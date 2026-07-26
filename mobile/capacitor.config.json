@@ -1,0 +1,13 @@
+{
+  "appId": "cloud.parasyte.parapin",
+  "appName": "PArA PIN",
+  "webDir": "www",
+  "backgroundColor": "#050608",
+  "ios": {
+    "contentInset": "always",
+    "backgroundColor": "#050608"
+  },
+  "android": {
+    "backgroundColor": "#050608"
+  }
+}
