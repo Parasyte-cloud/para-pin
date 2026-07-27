@@ -3,7 +3,7 @@
   "compatibility_date": "2025-01-01",
   "main": "worker.js",
   "assets": {
-    "directory": "./www",
+    "directory": ".",
     "binding": "ASSETS"
   },
   "durable_objects": {
