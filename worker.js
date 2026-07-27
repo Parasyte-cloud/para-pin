@@ -349,6 +349,30 @@ export class Registry {
         }));
       }
 
+      // Chats this user removed from their own list ("Remove chat") stay
+      // hidden only until something new happens in them — comparing each
+      // hidden chat's last-message time against the moment it was hidden
+      // means a fresh message from the other person brings it back on its
+      // own, without either side needing to do anything.
+      const hidden = (await this.state.storage.get(`hiddenChats:${user.id}`)) || {};
+      let hiddenChanged = false;
+      const visibleChats = [];
+      for (const c of chats) {
+        const hiddenAt = hidden[c.id];
+        if (hiddenAt) {
+          const summary = summaries[c.id];
+          const lastTs = summary && summary.lastMessage ? summary.lastMessage.ts : 0;
+          if (lastTs > hiddenAt) {
+            delete hidden[c.id];
+            hiddenChanged = true;
+            visibleChats.push(c);
+          }
+          continue;
+        }
+        visibleChats.push(c);
+      }
+      if (hiddenChanged) await this.state.storage.put(`hiddenChats:${user.id}`, hidden);
+
       const admins = (await this.state.storage.get('admins')) || [];
       return json({
         userId: user.id,
@@ -363,7 +387,7 @@ export class Registry {
         // see, e.g., "2 devices" after approving a second one, without
         // needing admin access.
         trustedDeviceCount: user.deviceIds.length,
-        chats,
+        chats: visibleChats,
         summaries,
       });
     }
@@ -439,6 +463,14 @@ export class Registry {
       for (const cid of myChatIds) {
         const c = await this.state.storage.get(`chat:${cid}`);
         if (c && c.type === 'dm' && c.memberIds.includes(other.id)) {
+          // Re-adding someone whose chat you'd previously removed from your
+          // own list should bring it back — you clearly want to talk to them
+          // again, so there's no reason to leave it hidden.
+          const hidden = (await this.state.storage.get(`hiddenChats:${me.id}`)) || {};
+          if (hidden[cid]) {
+            delete hidden[cid];
+            await this.state.storage.put(`hiddenChats:${me.id}`, hidden);
+          }
           return json({ chat: c, existing: true });
         }
       }
@@ -511,6 +543,25 @@ export class Registry {
       const myChats = (await this.state.storage.get(`userChats:${user.id}`)) || [];
       await this.state.storage.put(`userChats:${user.id}`, myChats.filter((id) => id !== chatId));
       return json({ ok: true, chat, leaverName: user.displayName });
+    }
+
+    // Removes a DM from just this user's own chat list — purely a per-user
+    // preference (like notify-prefs), never touches the shared chat record
+    // or the other person's list, so it's safe for one side of a duplicate
+    // conversation to clean up without affecting the other. It automatically
+    // comes back the next time a new message arrives (see /session, which
+    // compares each hidden chat's lastMessage timestamp against the time it
+    // was hidden) or the moment either side re-adds the contact.
+    if (request.method === 'POST' && url.pathname === '/hide-chat') {
+      const { pinHash, chatId } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ ok: false, error: 'not_registered' }, 401);
+      const myChatIds = (await this.state.storage.get(`userChats:${user.id}`)) || [];
+      if (!myChatIds.includes(chatId)) return json({ ok: false, error: 'not_found' }, 404);
+      const hidden = (await this.state.storage.get(`hiddenChats:${user.id}`)) || {};
+      hidden[chatId] = Date.now();
+      await this.state.storage.put(`hiddenChats:${user.id}`, hidden);
+      return json({ ok: true });
     }
 
     if (request.method === 'GET' && url.pathname === '/whoami') {
@@ -1306,6 +1357,19 @@ export class ChatRoom {
       return json({ ok: true, wraps });
     }
 
+    // Escape hatch for a chat that's permanently stuck "waiting for
+    // encryption" — usually leftover/partial wrap data from some past
+    // failure mode that satisfies `Object.keys(wraps).length > 0` (blocking
+    // the `ifEmpty` establish gate above) without actually containing a
+    // usable wrap for every member's current device. Wiping it lets the
+    // next `ensureChatKey` call on any member's device start over cleanly;
+    // any member of the chat may trigger this (self-service, no admin
+    // needed), same as they already can read/write the wraps themselves.
+    if (request.method === 'POST' && url.pathname === '/e2ee-wraps/reset') {
+      await this.state.storage.delete('e2eeWraps');
+      return json({ ok: true });
+    }
+
     if (request.method === 'POST' && url.pathname === '/read') {
       const { userId, upToTs } = await request.json();
       if (!userId) return json({ error: 'missing_user' }, 400);
@@ -1870,6 +1934,37 @@ export default {
           const body = await request.text();
           return roomStub.fetch('https://internal/e2ee-wraps', { method: 'POST', body });
         }
+      }
+
+      // /api/chats/:id/e2ee-wraps/reset — clears a chat's stored key wraps so
+      // it can freshly re-establish, for the (thankfully rare) case where a
+      // chat is permanently stuck "waiting for encryption" because of
+      // partial/stale wrap data. Self-service: any member can trigger it.
+      const e2eeResetMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/e2ee-wraps\/reset$/);
+      if (e2eeResetMatch && request.method === 'POST') {
+        const [, chatId] = e2eeResetMatch;
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const verifyRes = await registryStub.fetch(
+          `https://internal/verify-member?pinHash=${encodeURIComponent(pinHash)}&chatId=${encodeURIComponent(chatId)}`
+        );
+        const verify = await verifyRes.json();
+        if (!verify.ok) return json({ error: 'forbidden' }, 403);
+        const roomStub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(chatId));
+        return roomStub.fetch('https://internal/e2ee-wraps/reset', { method: 'POST' });
+      }
+
+      // /api/chats/:id/hide — removes a chat from just this user's own list
+      // (see Registry's /hide-chat for the per-user semantics).
+      const hideMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/hide$/);
+      if (hideMatch && request.method === 'POST') {
+        const [, chatId] = hideMatch;
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        return registryStub.fetch('https://internal/hide-chat', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, chatId }),
+        });
       }
 
       const chatMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/(messages|ws|read|read-state)$/);
