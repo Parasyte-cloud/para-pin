@@ -1084,6 +1084,29 @@
     renderMyAvatar();
     document.getElementById('adminRosterBtn').style.display = iAmAdmin ? 'flex' : 'none';
 
+    // One-time admin recovery: opening the app with ?admin-key=... in the
+    // URL tries to claim admin access with it (see /api/admin/bootstrap —
+    // gated by a Cloudflare secret only the account owner can set via
+    // `wrangler secret put ADMIN_BOOTSTRAP_KEY`, so this is safe to leave
+    // live). The param is stripped from the URL either way so it doesn't
+    // linger in history or get bookmarked with the key still in it.
+    const urlParams = new URLSearchParams(location.search);
+    const adminKey = urlParams.get('admin-key');
+    if (adminKey){
+      apiFetch('/admin/bootstrap', { method: 'POST', body: JSON.stringify({ key: adminKey }) }).then((br)=>{
+        if (br.ok){
+          iAmAdmin = true;
+          document.getElementById('adminRosterBtn').style.display = 'flex';
+          alert("You're now an admin — tap the 👥 icon next to your profile to open the console.");
+        } else {
+          alert("That admin key didn't work.");
+        }
+      });
+      urlParams.delete('admin-key');
+      const newUrl = location.pathname + (urlParams.toString() ? '?' + urlParams.toString() : '');
+      history.replaceState(null, '', newUrl);
+    }
+
     // Seed every chat's last-message preview and unread count from the
     // server right away — without this, the chat list only ever learned
     // about a new message via the live notify socket while the app was

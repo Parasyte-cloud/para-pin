@@ -650,6 +650,29 @@ export class Registry {
     // otherwise the account roster/retention/device panel would become
     // permanently unreachable with no way back in short of editing storage
     // directly.
+    // Recovery hatch for "I should be admin but I'm not, and there's no
+    // admin left who can promote me" — e.g. testing with a different PIN
+    // than whichever one happened to be first through the door when this
+    // was originally deployed. Gated entirely by ADMIN_BOOTSTRAP_KEY, a
+    // secret only settable via `wrangler secret put` — nobody without
+    // Cloudflare access to this project can ever call this successfully,
+    // regardless of whether they know this endpoint exists. If the secret
+    // was never set, this always fails closed.
+    if (request.method === 'POST' && url.pathname === '/admin/bootstrap') {
+      const { pinHash, key } = await request.json();
+      if (!this.env.ADMIN_BOOTSTRAP_KEY || !key || key !== this.env.ADMIN_BOOTSTRAP_KEY) {
+        return json({ error: 'forbidden' }, 403);
+      }
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!admins.includes(user.id)) {
+        admins.push(user.id);
+        await this.state.storage.put('admins', admins);
+      }
+      return json({ ok: true });
+    }
+
     if (request.method === 'POST' && url.pathname === '/admin/promote') {
       const { requesterId, userId } = await request.json();
       const admins = (await this.state.storage.get('admins')) || [];
@@ -1544,6 +1567,20 @@ export default {
         return registryStub.fetch('https://internal/admin/reset-device', {
           method: 'POST',
           body: JSON.stringify({ requesterId: who.userId, userId: body.userId }),
+        });
+      }
+
+      // Not gated by an existing admin session on purpose — see the Registry
+      // handler's comment. The pinHash still has to belong to a real,
+      // already-registered account; the ADMIN_BOOTSTRAP_KEY check is what
+      // actually protects this.
+      if (request.method === 'POST' && url.pathname === '/api/admin/bootstrap') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/admin/bootstrap', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, key: body.key }),
         });
       }
 
