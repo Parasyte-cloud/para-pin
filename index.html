@@ -219,12 +219,18 @@
   .conv-sub{ font-size:11px; color:var(--text-low); cursor:default; }
   .conv-sub.typing{ color:var(--ice); }
 
-  .messages{ flex:1; overflow-y:auto; padding:22px 26px; display:flex; flex-direction:column; gap:10px; }
+  .messages{ flex:1; overflow-y:auto; overflow-x:hidden; padding:22px 26px; display:flex; flex-direction:column; gap:10px; }
   .day-sep{ align-self:center; font-size:10.5px; color:var(--text-low); background:rgba(255,255,255,0.04); padding:3px 12px; border-radius:20px; margin:10px 0; letter-spacing:.05em; }
-  .bubble-row{ display:flex; gap:8px; max-width:68%; }
+  /* min-width:0 matters here: without it, a flex item's default min-width is
+     "auto" (its content's un-wrapped width), which wins over max-width and
+     lets a long message render as one un-wrapped line that bleeds off the
+     edge of the screen instead of wrapping — this is what "long messages
+     aren't handled properly" actually was. */
+  .bubble-row{ display:flex; gap:8px; max-width:68%; min-width:0; }
   .bubble-row.me{ align-self:flex-end; flex-direction:row-reverse; }
   .bubble{
-    position:relative; padding:10px 14px; border-radius:16px; font-size:13.5px; line-height:1.45; word-wrap:break-word;
+    position:relative; padding:10px 14px; border-radius:16px; font-size:13.5px; line-height:1.45;
+    overflow-wrap:anywhere; word-wrap:break-word; min-width:0;
     border:1px solid var(--glass-brd);
   }
   .bubble-row:not(.me) .bubble{ background:rgba(255,255,255,0.05); border-top-left-radius:4px; }
@@ -457,6 +463,30 @@
   .pick-row .avatar{ width:30px; height:30px; border-radius:9px; font-size:11px; }
   .pick-row .pname{ font-size:13px; }
   .modal-actions{ display:flex; justify-content:flex-end; gap:10px; }
+
+  /* ---------- admin console (full dedicated screen, not a small modal) ---------- */
+  .admin-console-overlay{ background:var(--bg-1); align-items:stretch; justify-content:stretch; }
+  .modal.admin-console{
+    width:100%; max-width:100%; height:100%; max-height:100%; border-radius:0;
+    padding:0; display:flex; flex-direction:column; overflow:hidden;
+  }
+  .admin-console-head{
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
+    padding:16px 18px; border-bottom:1px solid var(--glass-brd); flex-shrink:0;
+  }
+  .admin-console-head h2{ margin:0; font-size:20px; }
+  .admin-console-tabs{ display:flex; gap:6px; padding:12px 18px 0; flex-shrink:0; }
+  .admin-console-tab{
+    padding:8px 16px; border-radius:10px 10px 0 0; font-size:13px; font-weight:600;
+    color:var(--text-mid); cursor:pointer; border:1px solid transparent; border-bottom:none;
+  }
+  .admin-console-tab:hover{ color:var(--text-hi); }
+  .admin-console-tab.active{ color:var(--text-hi); background:rgba(255,255,255,0.05); border-color:var(--glass-brd); }
+  .admin-console-body{ flex:1; overflow-y:auto; padding:20px 18px 40px; max-width:640px; width:100%; margin:0 auto; }
+  .admin-console-section h3{ margin-top:0; }
+  @media (max-width: 640px){
+    .admin-console-tab{ flex:1; text-align:center; padding:8px 6px; }
+  }
   .btn{ padding:9px 18px; border-radius:12px; font-size:13px; font-weight:600; cursor:pointer; border:1px solid var(--glass-brd); background:rgba(255,255,255,0.04); color:var(--text-hi); }
   .btn:hover{ background:rgba(255,255,255,0.09); }
   .btn.primary{ background:linear-gradient(135deg, var(--ice), var(--fire)); border:none; color:#0a0d12; }
@@ -703,6 +733,7 @@
       <input type="checkbox" id="profileAlwaysBannerInput" style="width:auto;">
       Always show a notification banner, even while I'm using the app
     </label>
+    <div class="btn" id="approveDeviceOpenBtn" style="margin-top:14px;">Approve a new device</div>
     <div class="modal-actions">
       <div class="btn" onclick="closeModal('profileOverlay')">Cancel</div>
       <div class="btn primary" id="profileSaveBtn">Save</div>
@@ -710,35 +741,94 @@
   </div>
 </div>
 
-<!-- ============ ADMIN ROSTER MODAL ============ -->
-<div class="overlay" id="rosterOverlay">
-  <div class="modal lg">
-    <h3>Message retention</h3>
-    <div class="hint">Applies to every chat. Messages and their attachments older than this get permanently deleted, checked once a day.</div>
-    <select id="retentionSelect" style="width:100%; margin-bottom:16px;">
-      <option value="0">Keep forever (default)</option>
-      <option value="30">Delete after 30 days</option>
-      <option value="90">Delete after 90 days</option>
-      <option value="365">Delete after 365 days</option>
-    </select>
-    <h3>Team roster</h3>
-    <div class="hint">Pre-add someone and hand them the PIN yourself, or add an email to have it sent automatically. The PIN is shown here once either way — write it down if you're delivering it yourself.</div>
-    <div style="display:flex; gap:8px;">
-      <input type="text" id="rosterNameInput" placeholder="Full name" style="flex:1;">
-      <input type="text" id="rosterDeptInput" placeholder="Department (optional)" style="flex:1;">
-    </div>
-    <input type="email" id="rosterEmailInput" placeholder="Email (optional — sends the PIN automatically)" style="width:100%; margin-top:8px;">
-    <div class="hint" id="rosterError" style="display:none; color:#ff6a6a; margin-top:-6px;"></div>
-    <div class="btn primary" id="rosterAddBtn" style="margin-bottom:14px;">Generate PIN</div>
-    <div id="rosterNewPin" class="roster-new-pin" style="display:none;"></div>
-    <div class="contact-pick" id="rosterList" style="max-height:280px;"></div>
-
-    <h3 style="margin-top:20px;">Devices</h3>
-    <div class="hint">Every PIN locks to whichever device first signs in with it. If someone gets a new phone or reinstalls, reset their lock here so the next login claims it.</div>
-    <div class="contact-pick" id="deviceList" style="max-height:220px;"></div>
-
+<!-- ============ FORCE PIN CHANGE (mandatory — no cancel/backdrop close) ============ -->
+<div class="overlay" id="forcePinChangeOverlay" data-mandatory="1">
+  <div class="modal lg" style="text-align:center;">
+    <h3>Choose your own PIN</h3>
+    <div class="hint">The PIN you were given was shared with you by an admin, so it isn't private anymore. Pick a new PIN only you know — you'll use this one from now on.</div>
+    <input type="tel" inputmode="numeric" id="forcePinNewInput" placeholder="New PIN (7 digits)" maxlength="7" style="margin-top:14px; text-align:center; letter-spacing:4px;">
+    <input type="tel" inputmode="numeric" id="forcePinConfirmInput" placeholder="Confirm new PIN" maxlength="7" style="text-align:center; letter-spacing:4px;">
+    <div class="hint" id="forcePinError" style="display:none; color:#ff6a6a;"></div>
     <div class="modal-actions">
-      <div class="btn primary" onclick="closeModal('rosterOverlay')">Done</div>
+      <div class="btn primary" id="forcePinSaveBtn" style="width:100%;">Save & continue</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ NEW-DEVICE APPROVAL REQUEST ============ -->
+<div class="overlay" id="deviceApprovalOverlay">
+  <div class="modal lg" style="text-align:center;">
+    <h3>New device</h3>
+    <div class="hint" id="deviceApprovalIntro">This PIN is already set up on another device. Ask whoever has it to approve this one.</div>
+    <div class="btn primary" id="deviceApprovalRequestBtn" style="margin-top:10px;">Request approval</div>
+    <div id="deviceApprovalCodeBox" style="display:none; margin-top:16px;">
+      <div class="hint">Show this code to someone with an already-trusted device — they'll enter it there to approve this one.</div>
+      <div id="deviceApprovalCode" style="font-size:34px; font-weight:700; letter-spacing:8px; margin:10px 0;"></div>
+      <div class="hint" id="deviceApprovalStatus">Waiting for approval…</div>
+    </div>
+    <div class="hint" id="deviceApprovalError" style="display:none; color:#ff6a6a;"></div>
+    <div class="modal-actions">
+      <div class="btn" onclick="closeModal('deviceApprovalOverlay')">Close</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ APPROVE A NEW DEVICE (from a trusted device) ============ -->
+<div class="overlay" id="approveDeviceOverlay">
+  <div class="modal lg" style="text-align:center;">
+    <h3>Approve a new device</h3>
+    <div class="hint">Enter the code shown on the new device.</div>
+    <input type="tel" inputmode="numeric" id="approveDeviceCodeInput" placeholder="6-digit code" maxlength="6" style="margin-top:14px; text-align:center; letter-spacing:6px;">
+    <div class="hint" id="approveDeviceMsg" style="display:none;"></div>
+    <div class="modal-actions">
+      <div class="btn" onclick="closeModal('approveDeviceOverlay')">Cancel</div>
+      <div class="btn primary" id="approveDeviceSubmitBtn">Approve</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ ADMIN CONSOLE (full screen) ============ -->
+<div class="overlay admin-console-overlay" id="rosterOverlay">
+  <div class="modal lg admin-console">
+    <div class="admin-console-head">
+      <div class="icon-btn" onclick="closeModal('rosterOverlay')" title="Close">←</div>
+      <h2>Admin console</h2>
+      <div style="width:34px;"></div>
+    </div>
+    <div class="admin-console-tabs">
+      <div class="admin-console-tab active" data-tab="retention">Retention</div>
+      <div class="admin-console-tab" data-tab="roster">Roster</div>
+      <div class="admin-console-tab" data-tab="devices">Devices</div>
+    </div>
+    <div class="admin-console-body">
+      <section class="admin-console-section" data-section="retention">
+        <h3>Message retention</h3>
+        <div class="hint">Applies to every chat. Messages and their attachments older than this get permanently deleted, checked once a day.</div>
+        <select id="retentionSelect" style="width:100%; margin-bottom:16px;">
+          <option value="0">Keep forever (default)</option>
+          <option value="30">Delete after 30 days</option>
+          <option value="90">Delete after 90 days</option>
+          <option value="365">Delete after 365 days</option>
+        </select>
+      </section>
+      <section class="admin-console-section" data-section="roster" style="display:none;">
+        <h3>Team roster</h3>
+        <div class="hint">Pre-add someone and hand them the PIN yourself, or add an email to have it sent automatically. Whoever uses it will be asked to choose their own PIN the first time they sign in.</div>
+        <div style="display:flex; gap:8px;">
+          <input type="text" id="rosterNameInput" placeholder="Full name" style="flex:1;">
+          <input type="text" id="rosterDeptInput" placeholder="Department (optional)" style="flex:1;">
+        </div>
+        <input type="email" id="rosterEmailInput" placeholder="Email (optional — sends the PIN automatically)" style="width:100%; margin-top:8px;">
+        <div class="hint" id="rosterError" style="display:none; color:#ff6a6a; margin-top:-6px;"></div>
+        <div class="btn primary" id="rosterAddBtn" style="margin-bottom:14px;">Generate PIN</div>
+        <div id="rosterNewPin" class="roster-new-pin" style="display:none;"></div>
+        <div class="contact-pick" id="rosterList" style="max-height:none;"></div>
+      </section>
+      <section class="admin-console-section" data-section="devices" style="display:none;">
+        <h3>Devices</h3>
+        <div class="hint">Everyone's PIN locks to whichever devices they've trusted (they add more by approving them from an existing device — see their profile). If someone loses every device at once, reset them here so the next login starts fresh.</div>
+        <div class="contact-pick" id="deviceList" style="max-height:none;"></div>
+      </section>
     </div>
   </div>
 </div>
@@ -846,10 +936,12 @@
   }
 
   // ---------------- server session (real account) ----------------
-  // Device-lock (BlackBerry-style): a random id generated once per browser
-  // install and never sent anywhere except alongside the PIN hash at login.
-  // The first device to log in with a given PIN claims it server-side; a
-  // mismatch on a later login means "this PIN is already bound elsewhere."
+  // Device-lock (BlackBerry-style, now multi-device): a random id generated
+  // once per browser install and never sent anywhere except alongside the
+  // PIN hash at login. A brand-new account's first device is auto-trusted;
+  // after that, a login from an untrusted device needs approval from one
+  // that's already trusted (see the device-link request/approve flow) —
+  // knowing the PIN alone is no longer enough to sign in somewhere new.
   let myDeviceId = localStorage.getItem('parapin_device_id');
   if (!myDeviceId){
     myDeviceId = (crypto.randomUUID ? crypto.randomUUID() : 'dev_' + Math.random().toString(36).slice(2) + Date.now().toString(36));
@@ -953,14 +1045,17 @@
     if (!r.ok) {
       if (r.body && r.body.error === 'pin_disabled') {
         showSessionBanner('This PIN has been disabled. Contact your admin if that seems wrong.');
-      } else if (r.body && r.body.error === 'device_mismatch') {
-        showSessionBanner("This PIN is locked to a different device. Ask your admin to reset it, or sign in from the device you originally used.");
+      } else if (r.body && r.body.error === 'device_approval_required') {
+        openDeviceApprovalFlow();
       } else {
         showSessionBanner(r.networkError ? "Can't reach the PArA PIN server — check your connection." : 'Something went wrong starting your session.');
       }
       return;
     }
     hideSessionBanner();
+    closeModal('deviceApprovalOverlay');
+
+    if (r.body.mustChangePin) openModal('forcePinChangeOverlay');
 
     if (!r.body.displayName) {
       const name = await askDisplayName();
@@ -1033,15 +1128,132 @@
       apiFetch('/session', { method: 'POST', body: JSON.stringify({ deviceId: myDeviceId }) }).then((r) => {
         if (r.ok) {
           hideSessionBanner();
+          if (r.body.mustChangePin) openModal('forcePinChangeOverlay');
           sessionChats = r.body.chats || [];
           renderApp();
-        } else if (r.body && r.body.error === 'device_mismatch') {
-          showSessionBanner("This PIN is locked to a different device. Ask your admin to reset it, or sign in from the device you originally used.");
+        } else if (r.body && r.body.error === 'device_approval_required') {
+          openDeviceApprovalFlow();
         } else {
           showSessionBanner(r.networkError ? "Still can't reach the server." : 'Still failing — try again shortly.');
         }
       });
     }
+  });
+
+  // ================= MULTI-DEVICE TRUST =================
+  // A device that knows the right PIN but isn't yet trusted can't just be
+  // let in — that would make "I know their PIN" (which anyone who has ever
+  // typed it in front of you does) equivalent to "I can sign in as you."
+  // Instead it has to be vouched for by a device that's already trusted:
+  // this one generates a short code and shows it on its own screen; someone
+  // with a trusted device reads that code and enters it there to approve.
+  let deviceApprovalPollTimer = null;
+  function openDeviceApprovalFlow(){
+    document.getElementById('deviceApprovalCodeBox').style.display = 'none';
+    document.getElementById('deviceApprovalRequestBtn').style.display = 'block';
+    document.getElementById('deviceApprovalError').style.display = 'none';
+    document.getElementById('deviceApprovalIntro').textContent = "This PIN is already set up on another device. Ask whoever has it to approve this one.";
+    openModal('deviceApprovalOverlay');
+  }
+  document.getElementById('deviceApprovalRequestBtn').addEventListener('click', async function(){
+    const btn = this;
+    const errEl = document.getElementById('deviceApprovalError');
+    errEl.style.display = 'none';
+    btn.disabled = true;
+    const r = await apiFetch('/device-link/request', { method: 'POST', body: JSON.stringify({ deviceId: myDeviceId }) });
+    btn.disabled = false;
+    if (!r.ok){
+      errEl.textContent = r.body && r.body.error === 'no_trusted_devices'
+        ? "There's no trusted device to ask — an admin will need to reset this account's devices instead."
+        : "Couldn't start that — try again.";
+      errEl.style.display = 'block';
+      return;
+    }
+    btn.style.display = 'none';
+    document.getElementById('deviceApprovalCodeBox').style.display = 'block';
+    document.getElementById('deviceApprovalCode').textContent = r.body.code || '';
+    document.getElementById('deviceApprovalStatus').textContent = 'Waiting for approval…';
+    clearInterval(deviceApprovalPollTimer);
+    deviceApprovalPollTimer = setInterval(async ()=>{
+      const sr = await apiFetch(`/device-link/status?deviceId=${encodeURIComponent(myDeviceId)}`);
+      if (!sr.ok) return;
+      if (sr.body.status === 'approved'){
+        clearInterval(deviceApprovalPollTimer);
+        document.getElementById('deviceApprovalStatus').textContent = 'Approved! Signing you in…';
+        closeModal('deviceApprovalOverlay');
+        location.reload(); // simplest reliable way to re-run initSession with the now-trusted device now that it's in myPinHash's IndexedDB-cached lock state
+      } else if (sr.body.status === 'expired' || sr.body.status === 'none'){
+        clearInterval(deviceApprovalPollTimer);
+        document.getElementById('deviceApprovalStatus').textContent = 'That request expired — tap Request approval to try again.';
+        document.getElementById('deviceApprovalRequestBtn').style.display = 'block';
+      }
+    }, 4000);
+  });
+
+  document.getElementById('approveDeviceOpenBtn').addEventListener('click', ()=>{
+    closeModal('profileOverlay');
+    document.getElementById('approveDeviceCodeInput').value = '';
+    document.getElementById('approveDeviceMsg').style.display = 'none';
+    openModal('approveDeviceOverlay');
+  });
+  document.getElementById('approveDeviceSubmitBtn').addEventListener('click', async function(){
+    const btn = this;
+    const msgEl = document.getElementById('approveDeviceMsg');
+    const code = document.getElementById('approveDeviceCodeInput').value.trim();
+    if (!/^\d{6}$/.test(code)){
+      msgEl.textContent = 'Enter the 6-digit code shown on the new device.';
+      msgEl.style.color = '#ff6a6a';
+      msgEl.style.display = 'block';
+      return;
+    }
+    btn.disabled = true;
+    const r = await apiFetch('/device-link/approve', { method: 'POST', body: JSON.stringify({ code }) });
+    btn.disabled = false;
+    if (r.ok){
+      msgEl.style.color = '#7ee08a';
+      msgEl.textContent = 'Device approved.';
+      msgEl.style.display = 'block';
+      setTimeout(()=>closeModal('approveDeviceOverlay'), 1200);
+    } else {
+      msgEl.style.color = '#ff6a6a';
+      msgEl.textContent = r.body && r.body.error === 'wrong_code' ? "That code doesn't match." : r.body && r.body.error === 'expired' ? 'That code expired.' : "Couldn't approve that device — try again.";
+      msgEl.style.display = 'block';
+    }
+  });
+
+  // ================= FORCED PIN CHANGE =================
+  // Shown once, right after a roster-issued PIN's very first successful
+  // login (see /session's mustChangePin) — the admin who created that PIN
+  // knows it too, so it can only ever be a bootstrap credential, never the
+  // real one. There's no cancel button on this overlay by design.
+  document.getElementById('forcePinSaveBtn').addEventListener('click', async function(){
+    const btn = this;
+    const errEl = document.getElementById('forcePinError');
+    errEl.style.display = 'none';
+    const a = document.getElementById('forcePinNewInput').value.trim();
+    const b = document.getElementById('forcePinConfirmInput').value.trim();
+    if (!/^\d{7}$/.test(a)){ errEl.textContent = 'Enter a 7-digit PIN.'; errEl.style.display = 'block'; return; }
+    if (a !== b){ errEl.textContent = "Those don't match."; errEl.style.display = 'block'; return; }
+    btn.disabled = true;
+    const newPinHash = await sha256Hex(a);
+    const r = await apiFetch('/change-pin', { method: 'POST', body: JSON.stringify({ newPinHash, deviceId: myDeviceId }) });
+    btn.disabled = false;
+    if (!r.ok){
+      errEl.textContent = r.body && r.body.error === 'pin_taken' ? 'That PIN is already in use — pick a different one.' : 'Could not save that — try again.';
+      errEl.style.display = 'block';
+      return;
+    }
+    myPinHash = newPinHash;
+    syncPinHashToServiceWorker(myPinHash);
+    // The lock screen's own PIN gate is a separate, purely-local check (see
+    // hashPin/state.pin above) that happens before the server is ever
+    // contacted — it has to be updated too, or the very next app open would
+    // reject the new PIN the person just chose.
+    state.pin = hashPin(a);
+    save();
+    document.getElementById('forcePinNewInput').value = '';
+    document.getElementById('forcePinConfirmInput').value = '';
+    closeModal('forcePinChangeOverlay');
   });
 
   // ================= LOCK SCREEN =================
@@ -1901,14 +2113,15 @@
       row.appendChild(info);
       const status = document.createElement('div');
       status.className = 'roster-status ' + (u.hasDeviceLock ? 'claimed' : 'pending');
-      status.textContent = u.hasDeviceLock ? 'locked' : 'not set yet';
+      const n = u.deviceCount || 0;
+      status.textContent = u.hasDeviceLock ? `${n} device${n === 1 ? '' : 's'}` : 'not set yet';
       row.appendChild(status);
       if (u.hasDeviceLock){
         const resetBtn = document.createElement('div');
         resetBtn.className = 'roster-disable-btn';
-        resetBtn.textContent = 'Reset';
+        resetBtn.textContent = 'Reset all';
         resetBtn.addEventListener('click', async ()=>{
-          if (!confirm(`Reset ${u.displayName}'s device lock? Whichever device next signs in with their PIN will claim it.`)) return;
+          if (!confirm(`Remove all of ${u.displayName}'s trusted devices? The next device to sign in with their PIN will be trusted automatically — use this only if they've lost every device.`)) return;
           const rr = await apiFetch('/admin/reset-device', { method: 'POST', body: JSON.stringify({ userId: u.id }) });
           if (rr.ok) loadDevices();
           else showSessionBanner("Couldn't reset that device lock — try again.");
@@ -1918,6 +2131,17 @@
       deviceListEl.appendChild(row);
     });
   }
+
+  document.querySelectorAll('.admin-console-tab').forEach(tab=>{
+    tab.addEventListener('click', ()=>{
+      document.querySelectorAll('.admin-console-tab').forEach(t=>t.classList.remove('active'));
+      tab.classList.add('active');
+      const target = tab.dataset.tab;
+      document.querySelectorAll('.admin-console-section').forEach(sec=>{
+        sec.style.display = sec.dataset.section === target ? 'block' : 'none';
+      });
+    });
+  });
 
   const retentionSelect = document.getElementById('retentionSelect');
   retentionSelect.addEventListener('change', async ()=>{
@@ -1964,10 +2188,16 @@
     rosterDeptInput.value = '';
     rosterEmailInput.value = '';
     rosterNewPin.style.display = 'block';
-    const emailNote = !email ? '' : r.body.emailSent
-      ? ` An email with this PIN was also sent to ${escapeHtml(email)}.`
-      : ` Tried to email this to ${escapeHtml(email)} but it didn't go through${r.body.emailError && r.body.emailError !== 'resend_not_configured' ? ' (' + escapeHtml(r.body.emailError) + ')' : ' (email isn\'t set up yet)'} — share the PIN directly instead.`;
-    rosterNewPin.innerHTML = `<div class="rp-pin">${r.body.pin.split('').join(' ')}</div><div class="rp-note">${escapeHtml(r.body.entry.name)}'s PIN — shown once, share it with them now. They'll enter it like any other PArA PIN.${emailNote}</div>`;
+    if (r.body.emailSent){
+      // The PIN was delivered by email and deliberately isn't included in
+      // this response at all — the fewer places a shared secret sits, the
+      // better, especially since they'll be forced to replace it with one
+      // only they know the moment they first log in anyway.
+      rosterNewPin.innerHTML = `<div class="rp-note">✓ An email with ${escapeHtml(r.body.entry.name)}'s PIN was sent to ${escapeHtml(email)}. They'll be asked to choose their own PIN the first time they sign in.</div>`;
+    } else {
+      const emailNote = !email ? '' : ` Tried to email this to ${escapeHtml(email)} but it didn't go through${r.body.emailError && r.body.emailError !== 'resend_not_configured' ? ' (' + escapeHtml(r.body.emailError) + ')' : ' (email isn\'t set up yet)'} — share the PIN directly instead.`;
+      rosterNewPin.innerHTML = `<div class="rp-pin">${r.body.pin.split('').join(' ')}</div><div class="rp-note">${escapeHtml(r.body.entry.name)}'s PIN — shown once, share it with them now. They'll be asked to choose their own PIN the first time they sign in.${emailNote}</div>`;
+    }
     loadRoster();
   });
 
@@ -3690,6 +3920,10 @@
   window.openModal = function(id){ document.getElementById(id).classList.add('show'); };
 
   document.querySelectorAll('.overlay').forEach(ov=>{
+    // Mandatory overlays (currently just the forced-PIN-change screen) can't
+    // be dismissed by tapping outside them — the whole point is that nothing
+    // else is usable until that step is done.
+    if (ov.dataset.mandatory === '1') return;
     ov.addEventListener('click', (e)=>{ if (e.target === ov) ov.classList.remove('show'); });
   });
 

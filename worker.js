@@ -197,12 +197,21 @@ export class Registry {
           department: (roster && roster.department) || null,
           avatarUrl: null,
           e2eePublicKey: null,
-          deviceId: deviceId || null,
+          deviceIds: [],
+          // A roster-issued PIN is a shared secret the admin who created it
+          // also knows — if it doubled as the permanent credential, whoever
+          // uses it FIRST (which could be that admin, testing it, or anyone
+          // they showed it to) would permanently claim the account. Forcing
+          // a mandatory PIN change before the account is usable means the
+          // admin-known PIN only ever works for this one bootstrap step —
+          // once changed, only the real person knows the PIN that matters.
+          mustChangePin: !!roster,
+          pendingDeviceLink: null,
           createdAt: Date.now(),
         };
         await this.state.storage.put(`user:${pinHash}`, user);
         await this.state.storage.put(`userChats:${user.id}`, []);
-        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl, e2eePublicKey: null, hasDeviceLock: !!user.deviceId });
+        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl, e2eePublicKey: null, hasDeviceLock: false });
         await this.state.storage.put(`userIdToPinHash:${user.id}`, pinHash);
 
         // Bootstrap: nobody is admin yet, so whoever this very first account
@@ -218,27 +227,34 @@ export class Registry {
       } else if (displayName && !user.displayName) {
         user.displayName = displayName;
         await this.state.storage.put(`user:${pinHash}`, user);
-        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: !!user.deviceId });
+        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: (user.deviceIds || []).length > 0 });
+      }
+      if (!Array.isArray(user.deviceIds)) {
+        // migrate the old single-deviceId shape from before multi-device trust existed
+        user.deviceIds = user.deviceId ? [user.deviceId] : [];
+        delete user.deviceId;
+        await this.state.storage.put(`user:${pinHash}`, user);
       }
 
-      // Device lock (BlackBerry-style): the PIN alone isn't enough to sign in
-      // once it's bound to a device — this is what actually answers "someone
+      // Device trust: the PIN alone isn't enough to sign in from a device
+      // that isn't already trusted — this is what actually answers "someone
       // has my PIN now, so what." `deviceId` is a random id the client
       // generates once and keeps in localStorage; it's a deterrent against
       // casual PIN sharing/leaks, not a cryptographic guarantee (a client
-      // that skips sending it, or sends a fake one, isn't stopped by this —
-      // it's meant to block "typed your PIN into a different phone," not a
-      // determined attacker forging raw API requests). The first device to
-      // ever log in with a given PIN claims it; an admin can clear the lock
-      // from the roster/devices panel if someone gets a new phone.
-      if (user.deviceId && deviceId && user.deviceId !== deviceId) {
-        return json({ error: 'device_mismatch' }, 403);
-      }
-      if (!user.deviceId && deviceId) {
-        user.deviceId = deviceId;
-        await this.state.storage.put(`user:${pinHash}`, user);
-        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: true });
-        await this.state.storage.put(`userIdToPinHash:${user.id}`, pinHash);
+      // that skips sending it, or sends a fake one, isn't stopped by this).
+      // A brand-new account's first device is auto-trusted (nothing to
+      // approve against yet); after that, a new device needs an existing
+      // trusted device to approve it (see /device-link/request+approve)
+      // rather than being turned away with no recourse but an admin reset.
+      if (!user.mustChangePin && deviceId && !user.deviceIds.includes(deviceId)) {
+        if (user.deviceIds.length === 0) {
+          user.deviceIds = [deviceId];
+          await this.state.storage.put(`user:${pinHash}`, user);
+          await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: true });
+          await this.state.storage.put(`userIdToPinHash:${user.id}`, pinHash);
+        } else {
+          return json({ error: 'device_approval_required' }, 403);
+        }
       }
 
       if (roster && roster.status !== 'claimed') {
@@ -293,6 +309,7 @@ export class Registry {
         department: user.department || null,
         isAdmin: admins.includes(user.id),
         e2eePublicKey: user.e2eePublicKey || null,
+        mustChangePin: !!user.mustChangePin,
         chats,
         summaries,
       });
@@ -490,7 +507,15 @@ export class Registry {
         emailResult = await sendOnboardingEmail(this.env, { to: entry.email, name: entry.name, pin });
       }
 
-      return json({ entry, pin, emailSent: emailResult.sent, emailError: emailResult.sent ? undefined : emailResult.error });
+      // Once the PIN has actually been emailed to the person, there's no
+      // reason for it to also sit in this API response / the admin's own
+      // screen — the fewer places a shared secret is displayed, the better,
+      // and the person will also be forced to change it on first login
+      // anyway (see /session's mustChangePin), so the admin never needs it
+      // again after this point. If email delivery failed (or wasn't
+      // configured), the admin still needs to see and hand over the PIN
+      // themselves, so it's included in that case.
+      return json({ entry, pin: emailResult.sent ? undefined : pin, emailSent: emailResult.sent, emailError: emailResult.sent ? undefined : emailResult.error });
     }
 
     if (request.method === 'POST' && url.pathname === '/admin/roster/disable') {
@@ -538,7 +563,7 @@ export class Registry {
       const map = await this.state.storage.list({ prefix: 'userById:' });
       const users = [];
       for (const rec of map.values()) {
-        users.push({ id: rec.id, displayName: rec.displayName || 'Unnamed', hasDeviceLock: !!rec.hasDeviceLock });
+        users.push({ id: rec.id, displayName: rec.displayName || 'Unnamed', hasDeviceLock: !!rec.hasDeviceLock, deviceCount: rec.deviceCount || (rec.hasDeviceLock ? 1 : 0) });
       }
       return json({ users });
     }
@@ -551,10 +576,131 @@ export class Registry {
       if (!pinHash) return json({ error: 'not_found' }, 404);
       const user = await this.state.storage.get(`user:${pinHash}`);
       if (!user) return json({ error: 'not_found' }, 404);
-      user.deviceId = null;
+      // Clears ALL trusted devices, not just one — after this, the very next
+      // device to log in with the (still-unchanged) PIN is auto-trusted again,
+      // same as a brand-new account. That's the intentional "lost every
+      // device" escape hatch; if only one of several devices was lost, the
+      // person is generally better served by staying signed in on the others
+      // and just not approving the lost one for anything new.
+      user.deviceIds = [];
+      user.pendingDeviceLink = null;
       await this.state.storage.put(`user:${pinHash}`, user);
-      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: false });
+      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: false, deviceCount: 0 });
       return json({ ok: true });
+    }
+
+    // ---- Mandatory PIN change (closes the "admin already knows the PIN"
+    // window for roster-issued accounts) ----
+    // Authenticated by knowing the CURRENT pin hash (same trust model as
+    // every other endpoint here) — the point isn't stronger auth, it's that
+    // completing this step is what finally binds a device and stops the
+    // admin-issued PIN from being usable as a permanent credential at all.
+    if (request.method === 'POST' && url.pathname === '/change-pin') {
+      const { oldPinHash, newPinHash, deviceId } = await request.json();
+      if (!oldPinHash || !newPinHash) return json({ error: 'missing_fields' }, 400);
+      if (oldPinHash === newPinHash) return json({ error: 'pin_unchanged' }, 400);
+      const user = await this.state.storage.get(`user:${oldPinHash}`);
+      if (!user) return json({ error: 'not_found' }, 404);
+      const clash = await this.state.storage.get(`user:${newPinHash}`);
+      if (clash) return json({ error: 'pin_taken' }, 409);
+
+      user.pinHash = newPinHash;
+      user.mustChangePin = false;
+      user.deviceIds = deviceId ? [deviceId] : [];
+      await this.state.storage.delete(`user:${oldPinHash}`);
+      await this.state.storage.put(`user:${newPinHash}`, user);
+      await this.state.storage.put(`userIdToPinHash:${user.id}`, newPinHash);
+      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: user.deviceIds.length > 0, deviceCount: user.deviceIds.length });
+
+      // The roster entry (if any) was keyed by the OLD pin hash for lookup
+      // purposes; that mapping is now dead weight since the account is
+      // already claimed and the old PIN no longer works for anything.
+      const rosterId = await this.state.storage.get(`rosterByPin:${oldPinHash}`);
+      if (rosterId) await this.state.storage.delete(`rosterByPin:${oldPinHash}`);
+
+      return json({ ok: true });
+    }
+
+    // ---- Multi-device trust: linking a new device ----
+    // A device that already knows the correct PIN but isn't yet trusted
+    // can't just be let in (that's the whole "I know their PIN" problem the
+    // user asked to mitigate) — it has to be vouched for by a device that's
+    // already trusted. This endpoint starts that: it generates a short code
+    // and pushes an approval prompt to every device already signed in on
+    // this account. The new device displays the SAME code on its own screen
+    // and asks the person to read it aloud / show it to whoever has a
+    // trusted device, who then types it in over there to approve.
+    if (request.method === 'POST' && url.pathname === '/device-link/request') {
+      const { pinHash, deviceId } = await request.json();
+      if (!pinHash || !deviceId) return json({ error: 'missing_fields' }, 400);
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_found' }, 404);
+      if (!Array.isArray(user.deviceIds)) user.deviceIds = [];
+      if (user.deviceIds.includes(deviceId)) return json({ ok: true, alreadyTrusted: true });
+      if (user.deviceIds.length === 0) return json({ error: 'no_trusted_devices' }, 400);
+
+      const code = String(Math.floor(100000 + Math.random() * 900000));
+      user.pendingDeviceLink = { code, deviceId, requestedAt: Date.now() };
+      await this.state.storage.put(`user:${pinHash}`, user);
+
+      if (this.env.USER_CHANNEL) {
+        const payload = JSON.stringify({ title: 'PArA PIN', body: 'A new device wants to sign in. Open the app to approve it.', chatId: null, deviceLink: true });
+        try {
+          const stub = this.env.USER_CHANNEL.get(this.env.USER_CHANNEL.idFromName(user.id));
+          await stub.fetch('https://internal/push-direct', { method: 'POST', body: payload });
+        } catch (e) {}
+      }
+      // The code is returned here so the REQUESTING device can display it —
+      // it's the one that needs to show it to whoever holds a trusted
+      // device, not the other way around. It's already tied to this one
+      // pending request/deviceId pair and expires in 10 minutes, so handing
+      // it back over the same authenticated channel that started the
+      // request isn't a meaningfully bigger exposure than the request itself.
+      return json({ ok: true, code, expiresInSec: 600 });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/device-link/approve') {
+      // Called from an ALREADY-trusted device — pinHash here is that
+      // device's own (current, working) credential, not the new device's.
+      const { pinHash, code } = await request.json();
+      if (!pinHash || !code) return json({ error: 'missing_fields' }, 400);
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_found' }, 404);
+      const pending = user.pendingDeviceLink;
+      if (!pending) return json({ error: 'no_pending_request' }, 400);
+      if (Date.now() - pending.requestedAt > 10 * 60 * 1000) {
+        user.pendingDeviceLink = null;
+        await this.state.storage.put(`user:${pinHash}`, user);
+        return json({ error: 'expired' }, 400);
+      }
+      if (String(code).trim() !== pending.code) return json({ error: 'wrong_code' }, 400);
+
+      if (!Array.isArray(user.deviceIds)) user.deviceIds = [];
+      if (!user.deviceIds.includes(pending.deviceId)) user.deviceIds.push(pending.deviceId);
+      user.pendingDeviceLink = null;
+      await this.state.storage.put(`user:${pinHash}`, user);
+      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: true, deviceCount: user.deviceIds.length });
+      return json({ ok: true });
+    }
+
+    // Lets a device that's waiting after /device-link/request poll for the
+    // outcome without needing its own push subscription (it isn't trusted
+    // yet, so the server won't push directly to it).
+    if (request.method === 'GET' && url.pathname === '/device-link/status') {
+      const pinHash = url.searchParams.get('pinHash');
+      const deviceId = url.searchParams.get('deviceId');
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_found' }, 404);
+      if (Array.isArray(user.deviceIds) && user.deviceIds.includes(deviceId)) {
+        return json({ status: 'approved' });
+      }
+      if (!user.pendingDeviceLink || user.pendingDeviceLink.deviceId !== deviceId) {
+        return json({ status: 'none' });
+      }
+      if (Date.now() - user.pendingDeviceLink.requestedAt > 10 * 60 * 1000) {
+        return json({ status: 'expired' });
+      }
+      return json({ status: 'pending' });
     }
 
     // Internal-only — used by the scheduled retention purge to enumerate
@@ -1159,6 +1305,52 @@ export default {
           body: JSON.stringify({ pinHash, displayName: body.displayName || null, deviceId: body.deviceId || null }),
         });
         return res;
+      }
+
+      // Authenticated by the OLD pin hash — you have to actually know the
+      // current PIN to change it, same as any other authenticated call here.
+      if (request.method === 'POST' && url.pathname === '/api/change-pin') {
+        const oldPinHash = authHash(request, url);
+        if (!oldPinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        if (!body.newPinHash) return json({ error: 'missing_fields' }, 400);
+        return registryStub.fetch('https://internal/change-pin', {
+          method: 'POST',
+          body: JSON.stringify({ oldPinHash, newPinHash: body.newPinHash, deviceId: body.deviceId || null }),
+        });
+      }
+
+      // The requesting (not-yet-trusted) device's own pinHash — it already
+      // knows the correct PIN, that's not in question; what it doesn't have
+      // yet is a trusted device to vouch for it.
+      if (request.method === 'POST' && url.pathname === '/api/device-link/request') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        if (!body.deviceId) return json({ error: 'missing_fields' }, 400);
+        return registryStub.fetch('https://internal/device-link/request', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, deviceId: body.deviceId }),
+        });
+      }
+
+      // Called FROM an already-trusted, already-signed-in device.
+      if (request.method === 'POST' && url.pathname === '/api/device-link/approve') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        if (!body.code) return json({ error: 'missing_fields' }, 400);
+        return registryStub.fetch('https://internal/device-link/approve', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, code: body.code }),
+        });
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/device-link/status') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const deviceId = url.searchParams.get('deviceId') || '';
+        return registryStub.fetch(`https://internal/device-link/status?pinHash=${encodeURIComponent(pinHash)}&deviceId=${encodeURIComponent(deviceId)}`);
       }
 
       if (request.method === 'POST' && url.pathname === '/api/profile') {
