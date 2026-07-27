@@ -295,6 +295,31 @@
     display:flex; align-items:center; gap:10px; padding:8px 18px; border-top:1px solid var(--glass-brd);
     background:rgba(255,255,255,0.03);
   }
+  .reply-preview{
+    display:flex; align-items:stretch; gap:10px; padding:8px 18px; border-top:1px solid var(--glass-brd);
+    background:rgba(255,255,255,0.03);
+  }
+  .reply-preview-accent{ width:3px; border-radius:2px; background:var(--ice); flex-shrink:0; }
+  .reply-preview-body{ flex:1; min-width:0; display:flex; flex-direction:column; justify-content:center; }
+  .reply-preview-name{ font-size:11.5px; font-weight:600; color:var(--ice); }
+  .reply-preview-text{ font-size:12px; color:var(--text-mid); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+  .reply-quote{
+    display:flex; flex-direction:column; gap:1px; padding:5px 8px; margin-bottom:5px; border-radius:8px;
+    background:rgba(255,255,255,0.08); border-left:3px solid var(--ice); cursor:pointer; max-width:100%;
+  }
+  .reply-quote-name{ font-size:11px; font-weight:600; color:var(--ice); }
+  .reply-quote-text{ font-size:12px; color:var(--text-mid); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:block; }
+  .bubble-row.jump-highlight .bubble{ animation: jumpFlash 1.2s ease; }
+  @keyframes jumpFlash{ 0%{ box-shadow:0 0 0 2px var(--ice); } 100%{ box-shadow:0 0 0 0 transparent; } }
+  .msg-reply-btn{
+    position:absolute; top:4px; cursor:pointer; font-size:12px;
+    color:var(--text-low); width:17px; height:17px; display:flex; align-items:center; justify-content:center;
+  }
+  .msg-reply-btn.pos-left{ left:6px; }
+  .msg-reply-btn.pos-right{ right:6px; }
+  .msg-reply-btn:hover{ color:var(--ice); }
+
   .attach-preview img{ width:40px; height:40px; object-fit:cover; border-radius:8px; }
   .attach-preview-icon{ width:40px; height:40px; border-radius:8px; background:rgba(255,255,255,0.08); display:flex; align-items:center; justify-content:center; font-size:20px; flex-shrink:0; }
   .attach-preview-name{ flex:1; font-size:12px; color:var(--text-mid); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -474,6 +499,14 @@
           </div>
         </div>
         <div class="messages" id="messages"></div>
+        <div id="replyPreviewBar" class="reply-preview" style="display:none;">
+          <div class="reply-preview-accent"></div>
+          <div class="reply-preview-body">
+            <div class="reply-preview-name" id="replyPreviewName"></div>
+            <div class="reply-preview-text" id="replyPreviewText"></div>
+          </div>
+          <div class="icon-btn" id="replyCancelBtn" title="Cancel reply">×</div>
+        </div>
         <div id="attachPreviewBar" class="attach-preview" style="display:none;">
           <img id="attachPreviewImg" alt="">
           <div class="attach-preview-icon" id="attachPreviewIcon" style="display:none;">📄</div>
@@ -660,6 +693,7 @@
   let presencePollTimer = null;
   let pendingAttachment = null; // { blob, url (object URL for preview), width, height }
   let notifyPrefs = {}; // chatId -> 'all' | 'mentions' | 'mute' (default 'all' when absent)
+  let replyingTo = null; // { id, fromName, text } snapshot of the message being replied to, or null
 
   async function apiFetch(path, opts = {}){
     const headers = { 'content-type': 'application/json', ...(opts.headers || {}) };
@@ -744,7 +778,18 @@
     document.getElementById('meAvatar').textContent = initials(myDisplayName || 'You');
     document.getElementById('meAvatar').style.background = colorFor(myUserId || 'me');
 
+    // Seed every chat's last-message preview and unread count from the
+    // server right away — without this, the chat list only ever learned
+    // about a new message via the live notify socket while the app was
+    // open, so anything sent while it was closed looked like nothing
+    // happened until you opened that exact chat.
     unreadCounts = {};
+    const summaries = r.body.summaries || {};
+    for (const chatId of Object.keys(summaries)){
+      const s = summaries[chatId];
+      if (s.lastMessage) messagesByChat[chatId] = [s.lastMessage];
+      if (s.unreadCount) unreadCounts[chatId] = s.unreadCount;
+    }
     updateTitleBadge();
     connectNotifySocket();
     requestNotifyPermission();
@@ -1125,11 +1170,17 @@
       const isMe = m.fromUserId === myUserId;
       const row = document.createElement('div');
       row.className = 'bubble-row' + (isMe ? ' me' : '');
+      row.dataset.msgId = m.id;
       const bubble = document.createElement('div');
       bubble.className = 'bubble' + (m.deleted ? ' deleted' : '');
       let inner = '';
       if (chat.type === 'group' && !isMe){
         inner += `<span class="from">${escapeHtml(m.fromName || userNameCache[m.fromUserId] || 'PArA PIN user')}</span>`;
+      }
+      if (m.replyTo && !m.deleted){
+        inner += `<div class="reply-quote" data-jump-id="${escapeHtml(m.replyTo.id)}">`
+          + `<span class="reply-quote-name">${escapeHtml(m.replyTo.fromName || 'Message')}</span>`
+          + `<span class="reply-quote-text">${escapeHtml(m.replyTo.text || '')}</span></div>`;
       }
       if (m.deleted){
         inner += `<span class="deleted-label">Message deleted</span>`;
@@ -1185,6 +1236,13 @@
           delBtn.dataset.id = m.id;
           actions.appendChild(delBtn);
         }
+        const replyBtn = document.createElement('div');
+        replyBtn.className = 'msg-action-btn msg-reply-btn ' + (isMe ? 'pos-left' : 'pos-right');
+        replyBtn.title = 'Reply';
+        replyBtn.textContent = '↩';
+        replyBtn.dataset.id = m.id;
+        bubble.appendChild(replyBtn);
+
         bubble.appendChild(actions);
 
         const reactBtn = document.createElement('div');
@@ -1280,6 +1338,7 @@
       const msgs = messagesByChat[chatId];
       const m = msgs && msgs.find(mm => mm.id === editBtn.dataset.id);
       if (!m) return;
+      if (replyingTo) cancelReply();
       editingMessageId = m.id;
       msgInput.value = m.text;
       msgInput.style.height = 'auto';
@@ -1287,6 +1346,27 @@
       msgInput.focus();
       sendBtn.textContent = '✓';
       sendBtn.title = 'Save edit';
+      return;
+    }
+
+    const replyBtn = e.target.closest('.msg-reply-btn');
+    if (replyBtn){
+      const msgs = messagesByChat[chatId];
+      const m = msgs && msgs.find(mm => mm.id === replyBtn.dataset.id);
+      if (!m || m.deleted) return;
+      startReply(m);
+      return;
+    }
+
+    const quote = e.target.closest('.reply-quote');
+    if (quote){
+      const targetId = quote.dataset.jumpId;
+      const targetRow = targetId && messagesEl.querySelector(`.bubble-row[data-msg-id="${CSS.escape(targetId)}"]`);
+      if (targetRow){
+        targetRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        targetRow.classList.add('jump-highlight');
+        setTimeout(()=> targetRow.classList.remove('jump-highlight'), 1200);
+      }
       return;
     }
 
@@ -1432,6 +1512,7 @@
     convSubOverride = null;
     if (editingMessageId) cancelEdit();
     if (pendingAttachment) clearAttachment();
+    if (replyingTo) cancelReply();
     openReactPickerFor = null;
     renderConv();
     renderChatList();
@@ -1821,6 +1902,40 @@
   const msgInput = document.getElementById('msgInput');
   const sendBtn = document.getElementById('sendBtn');
 
+  // ---------------- reply-to ----------------
+  const replyPreviewBar = document.getElementById('replyPreviewBar');
+  const replyPreviewName = document.getElementById('replyPreviewName');
+  const replyPreviewText = document.getElementById('replyPreviewText');
+  const replyCancelBtn = document.getElementById('replyCancelBtn');
+
+  function replySnippet(m){
+    if (m.deleted) return 'Message deleted';
+    const isImg = m.attachment && (m.attachment.kind === 'image' || !m.attachment.kind);
+    const isVoice = m.attachment && m.attachment.kind === 'voice';
+    if (m.attachment && !m.text) return isImg ? '📷 Photo' : isVoice ? '🎤 Voice message' : '📄 ' + (m.attachment.name || 'File');
+    return m.text || '';
+  }
+
+  function startReply(m){
+    if (editingMessageId) cancelEdit();
+    replyingTo = {
+      id: m.id,
+      fromName: m.fromUserId === myUserId ? (myDisplayName || 'You') : (m.fromName || userNameCache[m.fromUserId] || 'PArA PIN user'),
+      text: replySnippet(m).slice(0, 140),
+    };
+    replyPreviewName.textContent = replyingTo.fromName;
+    replyPreviewText.textContent = replyingTo.text;
+    replyPreviewBar.style.display = 'flex';
+    msgInput.focus();
+  }
+
+  function cancelReply(){
+    replyingTo = null;
+    replyPreviewBar.style.display = 'none';
+  }
+
+  replyCancelBtn.addEventListener('click', cancelReply);
+
   // ---------------- image attachments ----------------
   const attachBtn = document.getElementById('attachBtn');
   const attachInput = document.getElementById('attachInput');
@@ -2109,6 +2224,8 @@
     msgInput.value = '';
     msgInput.style.height = 'auto';
     clearAttachment();
+    const replyToPayload = replyingTo;
+    cancelReply();
     sendBtn.disabled = true;
 
     let attachmentPayload = null;
@@ -2137,7 +2254,7 @@
       }
     }
 
-    const r = await apiFetch(`/chats/${chatId}/messages`, { method:'POST', body: JSON.stringify({ text, attachment: attachmentPayload }) });
+    const r = await apiFetch(`/chats/${chatId}/messages`, { method:'POST', body: JSON.stringify({ text, attachment: attachmentPayload, replyTo: replyToPayload }) });
     sendBtn.disabled = false;
     if (r.ok){
       mergeMessages(chatId, [r.body.message]);
@@ -2150,6 +2267,12 @@
       if (activeChatId === chatId && !msgInput.value && text){
         msgInput.value = text;
         msgInput.style.height = Math.min(msgInput.scrollHeight, 120) + 'px';
+      }
+      if (activeChatId === chatId && replyToPayload && !replyingTo){
+        replyingTo = replyToPayload;
+        replyPreviewName.textContent = replyingTo.fromName;
+        replyPreviewText.textContent = replyingTo.text;
+        replyPreviewBar.style.display = 'flex';
       }
     }
   }

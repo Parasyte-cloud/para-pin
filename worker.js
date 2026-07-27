@@ -168,7 +168,23 @@ export class Registry {
         const c = await this.state.storage.get(`chat:${cid}`);
         if (c) chats.push(c);
       }
-      return json({ userId: user.id, displayName: user.displayName, chats });
+
+      // Last message + unread count per chat, fetched in one pass so the chat
+      // list can show accurate previews and "N unread" the instant the app
+      // opens — otherwise a chat only ever looked unread if the app happened
+      // to be open (with a live socket) when the message arrived.
+      const summaries = {};
+      if (this.env.CHAT_ROOM) {
+        await Promise.all(chats.map(async (c) => {
+          try {
+            const stub = this.env.CHAT_ROOM.get(this.env.CHAT_ROOM.idFromName(c.id));
+            const res = await stub.fetch(`https://internal/summary?userId=${encodeURIComponent(user.id)}`);
+            if (res.ok) summaries[c.id] = await res.json();
+          } catch (e) {}
+        }));
+      }
+
+      return json({ userId: user.id, displayName: user.displayName, chats, summaries });
     }
 
     if (request.method === 'GET' && url.pathname === '/users') {
@@ -474,6 +490,23 @@ export class ChatRoom {
       return json({ messages: msgs });
     }
 
+    // Lets a caller learn "what would this chat show in a chat list" — last
+    // message plus how many are unread for a given user — without pulling the
+    // full history. Used at login to seed every chat's preview/unread count in
+    // one shot instead of only ever learning about new messages from a live
+    // socket while the app happens to be open.
+    if (request.method === 'GET' && url.pathname === '/summary') {
+      const userId = url.searchParams.get('userId');
+      const msgs = await this.loadMessages();
+      const lastMessage = msgs.length ? msgs[msgs.length - 1] : null;
+      let unreadCount = 0;
+      if (userId) {
+        const lastRead = (await this.state.storage.get(`lastRead:${userId}`)) || 0;
+        unreadCount = msgs.filter((m) => m.ts > lastRead && m.fromUserId !== userId).length;
+      }
+      return json({ lastMessage, unreadCount });
+    }
+
     if (request.method === 'GET' && url.pathname === '/read-state') {
       const ids = (url.searchParams.get('ids') || '').split(',').filter(Boolean);
       const reads = {};
@@ -484,7 +517,7 @@ export class ChatRoom {
     }
 
     if (request.method === 'POST' && url.pathname === '/messages') {
-      const { fromUserId, fromName, text, attachment } = await request.json();
+      const { fromUserId, fromName, text, attachment, replyTo } = await request.json();
       const hasText = text && text.trim();
       const hasAttachment = attachment && attachment.url;
       if (!hasText && !hasAttachment) return json({ error: 'empty' }, 400);
@@ -506,6 +539,15 @@ export class ChatRoom {
           size: Number(attachment.size) || null,
           kind: ['image', 'voice', 'file'].includes(attachment.kind) ? attachment.kind : 'image',
           duration: attachment.duration ? Number(attachment.duration) : null,
+        };
+      }
+      // Snapshotted at reply time rather than looked up live, so a reply still
+      // shows what it quoted even if the original is later edited or deleted.
+      if (replyTo && replyTo.id) {
+        msg.replyTo = {
+          id: String(replyTo.id).slice(0, 100),
+          fromName: replyTo.fromName ? String(replyTo.fromName).slice(0, 100) : null,
+          text: replyTo.text ? String(replyTo.text).slice(0, 200) : '',
         };
       }
       msgs.push(msg);
@@ -917,10 +959,10 @@ export default {
         }
 
         if (action === 'messages' && request.method === 'POST') {
-          const { text, attachment } = await request.json();
+          const { text, attachment, replyTo } = await request.json();
           const res = await roomStub.fetch('https://internal/messages', {
             method: 'POST',
-            body: JSON.stringify({ fromUserId: verify.userId, fromName: verify.displayName, text, attachment }),
+            body: JSON.stringify({ fromUserId: verify.userId, fromName: verify.displayName, text, attachment, replyTo }),
           });
           const resBody = await res.json();
 
