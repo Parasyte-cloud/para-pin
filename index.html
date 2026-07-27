@@ -3058,6 +3058,23 @@
     return key;
   }
 
+  // Combines a peer's real per-device keys with their legacy single key
+  // (under a synthetic '_legacy' slot) for the purpose of ESTABLISHING a
+  // chat key. Without this, establishing a chat's key would silently stall
+  // until every member happens to open the app under this multi-device
+  // code at least once (to upload a real per-device key) — which could be
+  // indefinitely, since nothing prompts them to. Wrapping the new chat key
+  // for their already-known legacy key too means messaging keeps working
+  // immediately for anyone who's ever used E2EE before, and their real
+  // device just becomes an additional, more capable wrap once they do open
+  // the app (see resolveMyWrap's matching '_legacy' fallback).
+  async function fetchPeerEffectiveDeviceKeys(userId){
+    const real = await fetchPeerDeviceKeys(userId);
+    const legacy = await fetchPeerLegacyPublicKey(userId);
+    if (!legacy) return real;
+    return { ...real, _legacy: legacy };
+  }
+
   async function ensureLegacyDmKey(chat){
     if (!chat || chat.type !== 'dm') return null;
     if (chat.id in chatLegacyDmKeyCache) return chatLegacyDmKeyCache[chat.id];
@@ -3093,7 +3110,11 @@
     const mine = wraps[myUserId];
     if (!mine) return null;
     if (typeof mine.ephemeralPub === 'string') return mine; // legacy flat shape
-    return mine[myDeviceId] || null;
+    // Prefer a wrap made for this exact device; fall back to one made
+    // against the legacy single key (see fetchPeerEffectiveDeviceKeys) —
+    // unwrappable here as long as this is still the original device whose
+    // private key matches that legacy public key.
+    return mine[myDeviceId] || mine._legacy || null;
   }
 
   async function unwrapRawKey(wrap){
@@ -3153,19 +3174,20 @@
     }
 
     // Nothing has ever been established for this chat — safe to create it.
-    if (chat.type === 'dm'){
-      // Both participants could reach this at the same moment; only the
-      // lexicographically-smaller userId actually establishes, so the two
-      // sides don't race to create different, incompatible keys.
-      const smallest = [...chat.memberIds].sort()[0];
-      if (myUserId !== smallest) return null;
-    }
-
+    // Both/all participants could reach this moment at once; rather than
+    // trying to coordinate who's "allowed" to establish (which deadlocks
+    // every chat where the other person isn't currently online to do their
+    // half), this just lets whoever gets here first actually establish it —
+    // the server (see /e2ee-wraps' `ifEmpty` check) atomically rejects a
+    // second establish attempt for the same chat and hands back the
+    // winner's wraps instead, which already include a copy for every member
+    // who had a known device key at that moment, so the "loser" can
+    // normally just unwrap it immediately from the very same response.
     const memberDeviceKeys = {};
     for (const id of chat.memberIds){
-      memberDeviceKeys[id] = id === myUserId ? { [myDeviceId]: myE2eeKeyPair.publicKeyB64 } : await fetchPeerDeviceKeys(id);
+      memberDeviceKeys[id] = id === myUserId ? { [myDeviceId]: myE2eeKeyPair.publicKeyB64 } : await fetchPeerEffectiveDeviceKeys(id);
     }
-    if (chat.memberIds.some(id => !memberDeviceKeys[id] || !Object.keys(memberDeviceKeys[id]).length)) return null; // still waiting on someone
+    if (chat.memberIds.some(id => !memberDeviceKeys[id] || !Object.keys(memberDeviceKeys[id]).length)) return null; // still waiting on someone — nobody has EVER uploaded any key for them, old or new
 
     const rawKey = crypto.getRandomValues(new Uint8Array(32));
     const newWraps = {};
@@ -3175,7 +3197,20 @@
         newWraps[id][did] = await wrapRawKeyForDevice(rawKey, pub);
       }
     }
-    await apiFetch(`/chats/${chat.id}/e2ee-wraps`, { method: 'POST', body: JSON.stringify({ wraps: newWraps }) });
+    const est = await apiFetch(`/chats/${chat.id}/e2ee-wraps`, { method: 'POST', body: JSON.stringify({ wraps: newWraps, ifEmpty: true }) });
+    if (est.ok && est.body.alreadyEstablished){
+      // Someone else won the race — try to unwrap THEIR key straight out of
+      // this same response instead of making another round trip.
+      const theirWrap = resolveMyWrap(est.body.wraps || {});
+      if (!theirWrap) return null; // their establish didn't know about my device yet — next retry will catch it
+      try {
+        const raw = await unwrapRawKey(theirWrap);
+        const key = await crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+        chatKeyCache[chat.id] = key;
+        chatRawKeyCache[chat.id] = raw;
+        return key;
+      } catch(e){ return null; }
+    }
     const key = await crypto.subtle.importKey('raw', rawKey, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
     chatKeyCache[chat.id] = key;
     chatRawKeyCache[chat.id] = rawKey;

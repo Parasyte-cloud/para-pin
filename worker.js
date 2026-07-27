@@ -1266,9 +1266,23 @@ export class ChatRoom {
       return json({ wraps });
     }
     if (request.method === 'POST' && url.pathname === '/e2ee-wraps') {
-      const { wraps: incoming } = await request.json();
+      const { wraps: incoming, ifEmpty } = await request.json();
       if (!incoming || typeof incoming !== 'object') return json({ error: 'invalid' }, 400);
       const wraps = (await this.state.storage.get('e2eeWraps')) || {};
+
+      // `ifEmpty` is set when a client is establishing a chat's key for the
+      // very first time (a random key it just generated locally). Two
+      // people can both reach that moment for the same chat at once — a
+      // Durable Object processes requests one at a time, so checking
+      // "is this chat still keyless RIGHT NOW" here is a genuinely atomic
+      // gate, unlike anything a client could coordinate on its own. First
+      // one through wins; whoever loses gets back the winner's wraps
+      // instead of having their own (different, incompatible) key silently
+      // saved over/alongside it.
+      if (ifEmpty && Object.keys(wraps).length > 0) {
+        return json({ ok: true, wraps, alreadyEstablished: true });
+      }
+
       const isWrapObj = (w) => w && typeof w.ephemeralPub === 'string' && typeof w.iv === 'string' && typeof w.wrapped === 'string';
       const sanitizeWrap = (w) => ({ ephemeralPub: w.ephemeralPub.slice(0, 200), iv: w.iv.slice(0, 50), wrapped: w.wrapped.slice(0, 500) });
       for (const [memberId, entry] of Object.entries(incoming)) {
