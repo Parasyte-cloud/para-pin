@@ -136,6 +136,55 @@ export class Registry {
       return json({ ok: true, userId: user.id, displayName: user.displayName, chat });
     }
 
+    if (request.method === 'GET' && url.pathname === '/whoami') {
+      const pinHash = url.searchParams.get('pinHash');
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ ok: false });
+      return json({ ok: true, userId: user.id, displayName: user.displayName });
+    }
+
+    return new Response('not found', { status: 404 });
+  }
+}
+
+// One instance per user (keyed by userId) — holds a live WebSocket per open
+// tab/device for that user, independent of which single chat's ChatRoom
+// socket they're connected to. Used purely to push "you have a message"
+// notifications so a message in a chat you're not currently looking at
+// still dings / badges / shows a browser notification.
+export class UserChannel {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.sessions = new Set();
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+
+    if (request.headers.get('Upgrade') === 'websocket') {
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+      server.accept();
+      this.sessions.add(server);
+      const cleanup = () => this.sessions.delete(server);
+      server.addEventListener('close', cleanup);
+      server.addEventListener('error', cleanup);
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/notify') {
+      const payload = await request.text();
+      for (const ws of this.sessions) {
+        try {
+          ws.send(payload);
+        } catch (e) {
+          this.sessions.delete(ws);
+        }
+      }
+      return json({ ok: true, delivered: this.sessions.size });
+    }
+
     return new Response('not found', { status: 404 });
   }
 }
@@ -206,7 +255,7 @@ export class ChatRoom {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     if (!url.pathname.startsWith('/api/')) {
@@ -216,6 +265,18 @@ export default {
     const registryStub = env.REGISTRY.get(env.REGISTRY.idFromName('global-registry-v1'));
 
     try {
+      // Per-user live channel: one persistent socket per open tab/device,
+      // used only to push cross-chat "new message" notifications.
+      if (url.pathname === '/api/notify/ws') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const channelStub = env.USER_CHANNEL.get(env.USER_CHANNEL.idFromName(who.userId));
+        return channelStub.fetch(request);
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/session') {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
@@ -284,7 +345,28 @@ export default {
             method: 'POST',
             body: JSON.stringify({ fromUserId: verify.userId, fromName: verify.displayName, text }),
           });
-          return res;
+          const resBody = await res.json();
+
+          if (res.ok && resBody.message) {
+            const chat = verify.chat;
+            const notifyPayload = JSON.stringify({
+              type: 'notify',
+              chatId,
+              chatType: chat.type,
+              chatName: chat.type === 'group' ? chat.name : null,
+              message: resBody.message,
+            });
+            const notifyOthers = (chat.memberIds || [])
+              .filter((memberId) => memberId !== verify.userId)
+              .map((memberId) => {
+                const channelStub = env.USER_CHANNEL.get(env.USER_CHANNEL.idFromName(memberId));
+                return channelStub.fetch('https://internal/notify', { method: 'POST', body: notifyPayload }).catch(() => {});
+              });
+            if (ctx && ctx.waitUntil) ctx.waitUntil(Promise.all(notifyOthers));
+            else await Promise.all(notifyOthers);
+          }
+
+          return json(resBody, res.status);
         }
       }
 

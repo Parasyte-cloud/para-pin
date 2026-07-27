@@ -184,6 +184,12 @@
   .ci-name{ font-size:14px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .ci-time{ font-size:10.5px; color:var(--text-low); flex-shrink:0; }
   .ci-last{ font-size:12.5px; color:var(--text-mid); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:2px; }
+  .unread-badge{
+    flex-shrink:0; min-width:19px; height:19px; padding:0 5px; border-radius:10px;
+    background:linear-gradient(135deg, var(--ice), var(--fire)); color:#0a0d12;
+    font-size:10.5px; font-weight:700; display:flex; align-items:center; justify-content:center;
+    align-self:center;
+  }
 
   .sidebar-foot{ padding:12px 16px; border-top:1px solid var(--glass-brd); display:flex; align-items:center; gap:10px; }
   .me-avatar{ width:30px; height:30px; border-radius:9px; background:linear-gradient(135deg, var(--ice), var(--fire)); display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; color:#0a0d12; }
@@ -495,6 +501,11 @@
   let sessionChats = [];
   let activeChatId = null;
   let myRawPin = null; // in-memory only for this unlocked session -- never persisted or sent anywhere
+  let notifySocket = null;
+  let notifyReconnectTimer = null;
+  let notifyReconnectAttempts = 0;
+  let unreadCounts = {};
+  let audioCtx = null;
 
   async function apiFetch(path, opts = {}){
     const headers = { 'content-type': 'application/json', ...(opts.headers || {}) };
@@ -578,6 +589,11 @@
     document.getElementById('meName').textContent = myDisplayName || 'You';
     document.getElementById('meAvatar').textContent = initials(myDisplayName || 'You');
     document.getElementById('meAvatar').style.background = colorFor(myUserId || 'me');
+
+    unreadCounts = {};
+    updateTitleBadge();
+    connectNotifySocket();
+    requestNotifyPermission();
 
     await renderApp();
   }
@@ -680,6 +696,10 @@
     if (reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
     if (activeSocket) { activeSocket.close(); activeSocket = null; }
     activeSocketChatId = null;
+    if (notifyReconnectTimer){ clearTimeout(notifyReconnectTimer); notifyReconnectTimer = null; }
+    if (notifySocket) { notifySocket.close(); notifySocket = null; }
+    unreadCounts = {};
+    updateTitleBadge();
     myPinHash = null; myUserId = null; myDisplayName = null; myRawPin = null;
     sessionChats = []; messagesByChat = {}; activeChatId = null;
     lockEl.style.display = 'flex';
@@ -786,6 +806,7 @@
       const body = document.createElement('div');
       body.className = 'ci-body';
       const lm = lastMsg(chat);
+      const unread = unreadCounts[chat.id] || 0;
       body.innerHTML = `
         <div class="ci-top">
           <div class="ci-name">${escapeHtml(name)}</div>
@@ -795,8 +816,16 @@
       `;
       row.appendChild(av);
       row.appendChild(body);
+      if (unread > 0){
+        const badge = document.createElement('div');
+        badge.className = 'unread-badge';
+        badge.textContent = unread > 9 ? '9+' : String(unread);
+        row.appendChild(badge);
+      }
       row.onclick = async ()=>{
         activeChatId = chat.id;
+        unreadCounts[chat.id] = 0;
+        updateTitleBadge();
         renderChatList();
         await openChat(chat.id);
       };
@@ -963,7 +992,11 @@
   // always firing a clean 'close' event. Catch up the moment the app is
   // looked at again instead of leaving the user staring at stale history.
   document.addEventListener('visibilitychange', ()=>{
-    if (document.visibilityState !== 'visible' || !activeChatId) return;
+    if (document.visibilityState !== 'visible') return;
+    if (myPinHash && (!notifySocket || notifySocket.readyState !== WebSocket.OPEN)){
+      connectNotifySocket();
+    }
+    if (!activeChatId) return;
     if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN || activeSocketChatId !== activeChatId){
       openChat(activeChatId);
     } else {
@@ -979,6 +1012,102 @@
   window.addEventListener('focus', ()=>{
     if (activeChatId) document.dispatchEvent(new Event('visibilitychange'));
   });
+
+  // ---------------- notifications: sound + badge + browser notification ----------------
+  // Synthesized two-tone chime — no external audio file to fetch or host.
+  function playDing(){
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      const now = audioCtx.currentTime;
+      [[880, now], [1320, now + 0.09]].forEach(([freq, start])=>{
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0, start);
+        gain.gain.linearRampToValueAtTime(0.16, start + 0.015);
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.28);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start(start);
+        osc.stop(start + 0.3);
+      });
+    } catch(e) {}
+  }
+  // Most browsers keep a fresh AudioContext suspended until a user gesture —
+  // resume it opportunistically so the very first ding isn't silently dropped.
+  ['click','keydown','touchstart'].forEach(evt=>{
+    window.addEventListener(evt, ()=>{ if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); }, { once:true, passive:true });
+  });
+
+  const baseTitle = document.title;
+  function updateTitleBadge(){
+    const total = Object.values(unreadCounts).reduce((a,b)=>a+b, 0);
+    document.title = total > 0 ? `(${total > 99 ? '99+' : total}) ${baseTitle}` : baseTitle;
+  }
+
+  function notifyPermissionOk(){
+    return typeof Notification !== 'undefined' && Notification.permission === 'granted';
+  }
+  function requestNotifyPermission(){
+    if (typeof Notification === 'undefined' || Notification.permission !== 'default') return;
+    Notification.requestPermission().catch(()=>{});
+  }
+
+  function handleNotify(data){
+    const chatId = data.chatId;
+    const msg = data.message;
+    if (!msg) return;
+    mergeMessages(chatId, [msg]);
+
+    const isOpenAndVisible = activeChatId === chatId && document.visibilityState === 'visible';
+    if (!isOpenAndVisible){
+      unreadCounts[chatId] = (unreadCounts[chatId] || 0) + 1;
+      updateTitleBadge();
+      playDing();
+      if (notifyPermissionOk() && document.visibilityState !== 'visible'){
+        try {
+          const title = data.chatType === 'group' ? (data.chatName || 'Group') : (msg.fromName || 'PArA PIN');
+          const body = data.chatType === 'group' && msg.fromName ? `${msg.fromName}: ${msg.text}` : msg.text;
+          const n = new Notification(title, { body, tag: 'parapin-' + chatId, icon: '/icon-192.png' });
+          n.onclick = () => { window.focus(); };
+        } catch(e) {}
+      }
+    }
+    if (activeChatId === chatId) renderConv();
+    renderChatList();
+  }
+
+  function connectNotifySocket(){
+    if (notifyReconnectTimer){ clearTimeout(notifyReconnectTimer); notifyReconnectTimer = null; }
+    if (notifySocket) { try { notifySocket.close(); } catch(e){} notifySocket = null; }
+    if (!myPinHash) return;
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    let ws;
+    try {
+      ws = new WebSocket(`${proto}://${location.host}/api/notify/ws?pinHash=${encodeURIComponent(myPinHash)}`);
+    } catch(e) { scheduleNotifyReconnect(); return; }
+    ws.addEventListener('open', ()=>{ notifyReconnectAttempts = 0; });
+    ws.addEventListener('message', (ev)=>{
+      let data;
+      try { data = JSON.parse(ev.data); } catch(e){ return; }
+      if (data.type === 'notify') handleNotify(data);
+    });
+    ws.addEventListener('close', ()=>{ if (notifySocket === ws) { notifySocket = null; if (myPinHash) scheduleNotifyReconnect(); } });
+    ws.addEventListener('error', ()=>{ try { ws.close(); } catch(e){} });
+    notifySocket = ws;
+  }
+
+  function scheduleNotifyReconnect(){
+    if (notifyReconnectTimer) return;
+    notifyReconnectAttempts = Math.min(notifyReconnectAttempts + 1, 5);
+    const delay = Math.min(1000 * notifyReconnectAttempts, 8000);
+    notifyReconnectTimer = setTimeout(()=>{
+      notifyReconnectTimer = null;
+      if (myPinHash) connectNotifySocket();
+    }, delay);
+  }
 
   // ---------------- composer ----------------
   const msgInput = document.getElementById('msgInput');
