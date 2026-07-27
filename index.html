@@ -261,7 +261,13 @@
     /* iOS Safari auto-zooms the page when a focused input's font is under
        16px — bump every text input up to kill that on mobile only. */
     .composer textarea, .search input, .modal input[type=text]{ font-size:16px; }
-    .conv-head{ padding:12px 14px; gap:10px; }
+
+    /* viewport-fit=cover lets the page draw under the notch/status bar and
+       home indicator — pad the header down and the footer up so nothing
+       sits behind them. env() is 0 on devices without a notch, so this is
+       a no-op there. */
+    .conv-head{ padding:calc(12px + env(safe-area-inset-top, 0px)) 14px 12px; gap:10px; }
+    .sidebar-head{ padding-top:calc(18px + env(safe-area-inset-top, 0px)); }
     .composer{ padding-bottom:calc(14px + env(safe-area-inset-bottom, 0px)); }
     .sidebar-foot{ padding-bottom:calc(12px + env(safe-area-inset-bottom, 0px)); }
   }
@@ -631,13 +637,27 @@
   // is exactly the broken/zoomed-out-of-shape composer bug. Fix: track the
   // real visible area ourselves and resize #app to match, so the composer
   // naturally ends up sitting right above the keyboard instead.
+  //
+  // Important: visualViewport.height is ALSO slightly smaller than
+  // window.innerHeight just from Safari's collapsible address/tab bar, even
+  // with no keyboard open at all. Only step in once the gap is big enough
+  // to actually be a keyboard (~120px+) — otherwise leave #app alone so its
+  // normal CSS (inset:0, full height) applies and nothing shifts or gaps.
   function syncViewportSize(){
     const vv = window.visualViewport;
     if (!vv) return;
-    appEl.style.height = vv.height + 'px';
-    appEl.style.top = vv.offsetTop + 'px';
-    lockEl.style.height = vv.height + 'px';
-    lockEl.style.top = vv.offsetTop + 'px';
+    const keyboardOpen = (window.innerHeight - vv.height) > 120;
+    if (keyboardOpen){
+      appEl.style.height = vv.height + 'px';
+      appEl.style.top = vv.offsetTop + 'px';
+      lockEl.style.height = vv.height + 'px';
+      lockEl.style.top = vv.offsetTop + 'px';
+    } else {
+      appEl.style.height = '';
+      appEl.style.top = '';
+      lockEl.style.height = '';
+      lockEl.style.top = '';
+    }
   }
   if (window.visualViewport){
     window.visualViewport.addEventListener('resize', syncViewportSize);
