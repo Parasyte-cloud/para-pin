@@ -2012,32 +2012,41 @@
       return;
     }
     const mimeType = pickVoiceMimeType();
+    let recorder;
     try {
-      mediaRecorder = mimeType ? new MediaRecorder(recordStream, { mimeType }) : new MediaRecorder(recordStream);
+      recorder = mimeType ? new MediaRecorder(recordStream, { mimeType }) : new MediaRecorder(recordStream);
     } catch(e){
       stopRecordStream();
       showSessionBanner("Couldn't start recording on this device.");
       return;
     }
+    mediaRecorder = recorder;
     recordChunks = [];
     recordStartedAt = Date.now();
-    mediaRecorder.addEventListener('dataavailable', (e)=>{ if (e.data && e.data.size) recordChunks.push(e.data); });
-    mediaRecorder.addEventListener('stop', ()=>{
+    // These closures capture `recorder` (a local const-like binding fixed to
+    // *this* recording), not the outer `mediaRecorder` variable — stopRecording()
+    // nulls that outer variable out immediately on click for UI responsiveness,
+    // but stop() is async and the 'stop' event (where we actually build the
+    // attachment) fires after that reassignment. Reading the outer variable
+    // here used to hit null.mimeType and throw, silently killing the whole
+    // "show it for review" step before it ever ran.
+    recorder.addEventListener('dataavailable', (e)=>{ if (e.data && e.data.size) recordChunks.push(e.data); });
+    recorder.addEventListener('stop', ()=>{
       stopRecordStream();
       const durationSec = Math.max(1, Math.round((Date.now() - recordStartedAt) / 1000));
-      const blob = new Blob(recordChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+      const blob = new Blob(recordChunks, { type: recorder.mimeType || 'audio/webm' });
       recordChunks = [];
       if (discardNextRecording){ discardNextRecording = false; return; }
-      if (blob.size === 0) return;
+      if (blob.size === 0){ showSessionBanner("Didn't catch any audio — try recording again."); return; }
       clearAttachment();
-      const ext = (mediaRecorder.mimeType || '').includes('mp4') ? 'm4a' : 'webm';
+      const ext = (recorder.mimeType || '').includes('mp4') ? 'm4a' : 'webm';
       pendingAttachment = { blob, url: null, width: null, height: null, name: `Voice message.${ext}`, kind: 'voice', duration: durationSec };
       attachPreviewIcon.textContent = '🎤';
       attachPreviewIcon.style.display = 'flex';
       attachPreviewName.textContent = `Voice message — ${fmtDuration(durationSec)}`;
       attachPreviewBar.style.display = 'flex';
     });
-    mediaRecorder.start();
+    recorder.start();
     recordBtn.classList.add('recording');
     recordBtn.textContent = '⏹';
     recordBtn.title = 'Stop recording';
