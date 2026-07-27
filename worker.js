@@ -517,7 +517,10 @@ export class ChatRoom {
       let unreadCount = 0;
       if (userId) {
         const lastRead = (await this.state.storage.get(`lastRead:${userId}`)) || 0;
-        unreadCount = msgs.filter((m) => m.ts > lastRead && m.fromUserId !== userId).length;
+        // System messages ("X left the group") have no fromUserId, so
+        // `!== userId` would count every one of them as unread from
+        // someone — exclude them explicitly rather than relying on that.
+        unreadCount = msgs.filter((m) => m.ts > lastRead && m.type !== 'system' && m.fromUserId !== userId).length;
       }
       return json({ lastMessage, unreadCount });
     }
