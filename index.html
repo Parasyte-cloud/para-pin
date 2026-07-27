@@ -246,6 +246,13 @@
     .bubble-row{ max-width:84%; }
     .keypad{ grid-template-columns:repeat(3,58px); gap:12px; }
     .key{ width:58px; height:58px; }
+
+    /* iOS Safari auto-zooms the page when a focused input's font is under
+       16px — bump every text input up to kill that on mobile only. */
+    .composer textarea, .search input, .modal input[type=text]{ font-size:16px; }
+    .conv-head{ padding:12px 14px; gap:10px; }
+    .composer{ padding-bottom:calc(14px + env(safe-area-inset-bottom, 0px)); }
+    .sidebar-foot{ padding-bottom:calc(12px + env(safe-area-inset-bottom, 0px)); }
   }
 
   /* ---------- modal ---------- */
@@ -670,7 +677,9 @@
   function lockApp(){
     mode = state.pin ? 'enter' : 'create';
     buffer=''; firstPin='';
+    if (reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
     if (activeSocket) { activeSocket.close(); activeSocket = null; }
+    activeSocketChatId = null;
     myPinHash = null; myUserId = null; myDisplayName = null; myRawPin = null;
     sessionChats = []; messagesByChat = {}; activeChatId = null;
     lockEl.style.display = 'flex';
@@ -887,36 +896,89 @@
   });
 
   // ---------------- opening a chat: fetch history + connect realtime ----------------
-  async function openChat(chatId){
-    if (!(chatId in messagesByChat)){
-      const r = await apiFetch(`/chats/${chatId}/messages`);
-      messagesByChat[chatId] = (r.ok && r.body.messages) ? r.body.messages : [];
+  let activeSocketChatId = null;
+  let reconnectTimer = null;
+  let reconnectAttempts = 0;
+
+  function mergeMessages(chatId, incoming){
+    const existing = messagesByChat[chatId] || (messagesByChat[chatId] = []);
+    const seen = new Set(existing.map(m => m.id));
+    for (const m of incoming){
+      if (!seen.has(m.id)){ existing.push(m); seen.add(m.id); }
     }
+    existing.sort((a,b) => a.ts - b.ts);
+  }
+
+  // Always re-fetch from the server when a chat is opened, even if we have a
+  // cached copy — a backgrounded tab or a dropped socket (very common on
+  // mobile Safari/Chrome when the screen locks) can silently miss messages
+  // pushed over the WebSocket, and the cache alone would then go stale.
+  async function openChat(chatId){
+    const r = await apiFetch(`/chats/${chatId}/messages`);
+    if (r.ok && r.body.messages) mergeMessages(chatId, r.body.messages);
+    else if (!(chatId in messagesByChat)) messagesByChat[chatId] = [];
     renderConv();
+    renderChatList();
     connectSocket(chatId);
   }
 
   function connectSocket(chatId){
+    if (reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
     if (activeSocket) { try { activeSocket.close(); } catch(e){} activeSocket = null; }
+    activeSocketChatId = chatId;
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     let ws;
     try {
       ws = new WebSocket(`${proto}://${location.host}/api/chats/${chatId}/ws?pinHash=${encodeURIComponent(myPinHash)}`);
-    } catch(e) { return; }
+    } catch(e) { scheduleReconnect(chatId); return; }
+    ws.addEventListener('open', ()=>{ reconnectAttempts = 0; });
     ws.addEventListener('message', (ev)=>{
       let data;
       try { data = JSON.parse(ev.data); } catch(e){ return; }
       if (data.type === 'message'){
-        const arr = messagesByChat[chatId] || (messagesByChat[chatId] = []);
-        if (!arr.some(m => m.id === data.message.id)){
-          arr.push(data.message);
-          if (activeChatId === chatId) renderConv();
-          renderChatList();
-        }
+        mergeMessages(chatId, [data.message]);
+        if (activeChatId === chatId) renderConv();
+        renderChatList();
       }
     });
+    ws.addEventListener('close', ()=>{
+      if (activeSocket === ws) activeSocket = null;
+      if (activeChatId === chatId) scheduleReconnect(chatId);
+    });
+    ws.addEventListener('error', ()=>{ try { ws.close(); } catch(e){} });
     activeSocket = ws;
   }
+
+  function scheduleReconnect(chatId){
+    if (reconnectTimer) return;
+    reconnectAttempts = Math.min(reconnectAttempts + 1, 5);
+    const delay = Math.min(1000 * reconnectAttempts, 8000);
+    reconnectTimer = setTimeout(()=>{
+      reconnectTimer = null;
+      if (activeChatId === chatId) connectSocket(chatId);
+    }, delay);
+  }
+
+  // Mobile browsers freeze/kill background tabs (and their sockets) without
+  // always firing a clean 'close' event. Catch up the moment the app is
+  // looked at again instead of leaving the user staring at stale history.
+  document.addEventListener('visibilitychange', ()=>{
+    if (document.visibilityState !== 'visible' || !activeChatId) return;
+    if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN || activeSocketChatId !== activeChatId){
+      openChat(activeChatId);
+    } else {
+      apiFetch(`/chats/${activeChatId}/messages`).then(r=>{
+        if (r.ok && r.body.messages){
+          mergeMessages(activeChatId, r.body.messages);
+          renderConv();
+          renderChatList();
+        }
+      });
+    }
+  });
+  window.addEventListener('focus', ()=>{
+    if (activeChatId) document.dispatchEvent(new Event('visibilitychange'));
+  });
 
   // ---------------- composer ----------------
   const msgInput = document.getElementById('msgInput');
@@ -930,8 +992,7 @@
     msgInput.style.height = 'auto';
     const r = await apiFetch(`/chats/${chatId}/messages`, { method:'POST', body: JSON.stringify({ text }) });
     if (r.ok){
-      const arr = messagesByChat[chatId] || (messagesByChat[chatId] = []);
-      if (!arr.some(m => m.id === r.body.message.id)) arr.push(r.body.message);
+      mergeMessages(chatId, [r.body.message]);
       if (activeChatId === chatId) renderConv();
       renderChatList();
     } else {
