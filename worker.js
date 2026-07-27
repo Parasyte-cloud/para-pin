@@ -132,6 +132,38 @@ async function sendWebPush(subscription, payloadObj, env) {
   return { ok: res.ok, status: res.status };
 }
 
+// ================= Transactional email (Resend) =================
+// Used only by the lightweight HR-linked onboarding roster: emails a newly
+// added person their PIN instead of (or alongside) an admin handing it over
+// directly. Cleanly no-ops if RESEND_API_KEY / RESEND_FROM_EMAIL aren't
+// configured — the roster feature works fine without email, this is optional.
+async function sendOnboardingEmail(env, { to, name, pin }) {
+  if (!env.RESEND_API_KEY) return { sent: false, error: 'resend_not_configured' };
+  if (!env.RESEND_FROM_EMAIL) return { sent: false, error: 'resend_from_not_configured' };
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: env.RESEND_FROM_EMAIL,
+        to: [to],
+        subject: "You're set up on PArA PIN",
+        text: `Hi ${name || 'there'},\n\nYou've been added to PArA PIN, the team chat app.\n\nYour PIN is: ${pin}\n\nOpen chat.parasyte.cloud and enter this PIN to get in — that's it, no username or password to remember. Keep it to yourself the way you'd keep any PIN.\n\n— PArA PIN`,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      return { sent: false, error: `status ${res.status}${body ? ': ' + body.slice(0, 200) : ''}` };
+    }
+    return { sent: true };
+  } catch (e) {
+    return { sent: false, error: e && e.message ? e.message : 'unknown error' };
+  }
+}
+
 export class Registry {
   constructor(state, env) {
     this.state = state;
@@ -164,11 +196,12 @@ export class Registry {
           displayName: (roster && roster.name) || displayName || null,
           department: (roster && roster.department) || null,
           avatarUrl: null,
+          e2eePublicKey: null,
           createdAt: Date.now(),
         };
         await this.state.storage.put(`user:${pinHash}`, user);
         await this.state.storage.put(`userChats:${user.id}`, []);
-        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl });
+        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl, e2eePublicKey: null });
 
         // Bootstrap: nobody is admin yet, so whoever this very first account
         // turns out to be becomes the admin — there's no HR system to source
@@ -183,7 +216,7 @@ export class Registry {
       } else if (displayName && !user.displayName) {
         user.displayName = displayName;
         await this.state.storage.put(`user:${pinHash}`, user);
-        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null });
+        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null });
       }
 
       if (roster && roster.status !== 'claimed') {
@@ -191,6 +224,21 @@ export class Registry {
         roster.userId = user.id;
         roster.claimedAt = Date.now();
         await this.state.storage.put(`roster:${roster.id}`, roster);
+
+        // Let admins know someone from the roster actually showed up — the
+        // "notifications" half of HR-linked onboarding. Best-effort, never
+        // blocks login if a push fails.
+        const admins = (await this.state.storage.get('admins')) || [];
+        if (admins.length && this.env.USER_CHANNEL) {
+          const payload = JSON.stringify({ title: 'PArA PIN', body: `${user.displayName || 'Someone'} just joined PArA PIN`, chatId: null });
+          for (const adminId of admins) {
+            if (adminId === user.id) continue;
+            try {
+              const stub = this.env.USER_CHANNEL.get(this.env.USER_CHANNEL.idFromName(adminId));
+              await stub.fetch('https://internal/push-direct', { method: 'POST', body: payload });
+            } catch (e) {}
+          }
+        }
       }
 
       const chatIds = (await this.state.storage.get(`userChats:${user.id}`)) || [];
@@ -222,6 +270,7 @@ export class Registry {
         avatarUrl: user.avatarUrl || null,
         department: user.department || null,
         isAdmin: admins.includes(user.id),
+        e2eePublicKey: user.e2eePublicKey || null,
         chats,
         summaries,
       });
@@ -235,8 +284,25 @@ export class Registry {
       if (typeof avatarUrl === 'string' || avatarUrl === null) user.avatarUrl = avatarUrl ? String(avatarUrl).slice(0, 500) : null;
       if (typeof department === 'string') user.department = department.trim().slice(0, 60) || null;
       await this.state.storage.put(`user:${user.pinHash}`, user);
-      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null });
+      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null });
       return json({ ok: true, displayName: user.displayName, avatarUrl: user.avatarUrl || null, department: user.department || null });
+    }
+
+    // Uploads this device's E2EE public key (ECDH P-256, raw bytes, base64url)
+    // for the account. Safe to call on every login — it just keeps the
+    // server's copy in sync with whatever's actually in this browser's
+    // IndexedDB. The matching private key never leaves the device.
+    if (request.method === 'POST' && url.pathname === '/e2ee/public-key') {
+      const { pinHash, publicKey } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      if (typeof publicKey !== 'string' || !publicKey || publicKey.length > 500) {
+        return json({ error: 'invalid_key' }, 400);
+      }
+      user.e2eePublicKey = publicKey;
+      await this.state.storage.put(`user:${user.pinHash}`, user);
+      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey });
+      return json({ ok: true });
     }
 
     if (request.method === 'GET' && url.pathname === '/users') {
@@ -360,10 +426,11 @@ export class Registry {
     }
 
     if (request.method === 'POST' && url.pathname === '/admin/roster') {
-      const { requesterId, name, department } = await request.json();
+      const { requesterId, name, department, email } = await request.json();
       const admins = (await this.state.storage.get('admins')) || [];
       if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
       if (!name || !name.trim()) return json({ error: 'missing_name' }, 400);
+      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: 'invalid_email' }, 400);
 
       let pin = null;
       let pinHash = null;
@@ -381,6 +448,7 @@ export class Registry {
         id,
         name: name.trim().slice(0, 60),
         department: (department || '').trim().slice(0, 60) || null,
+        email: email ? String(email).trim().slice(0, 200) : null,
         status: 'pending',
         userId: null,
         createdAt: Date.now(),
@@ -391,7 +459,12 @@ export class Registry {
       const list = (await this.state.storage.get('rosterList')) || [];
       await this.state.storage.put('rosterList', [...list, id]);
 
-      return json({ entry, pin });
+      let emailResult = { sent: false, error: 'no_email_provided' };
+      if (entry.email) {
+        emailResult = await sendOnboardingEmail(this.env, { to: entry.email, name: entry.name, pin });
+      }
+
+      return json({ entry, pin, emailSent: emailResult.sent, emailError: emailResult.sent ? undefined : emailResult.error });
     }
 
     if (request.method === 'POST' && url.pathname === '/admin/roster/disable') {
@@ -475,24 +548,21 @@ export class UserChannel {
       if (data && data.type === 'notify' && data.message) {
         const notifyPrefs = (await this.state.storage.get('notifyPrefs')) || {};
         const pref = notifyPrefs[data.chatId] || 'all';
-        const attKind = data.message.attachment && data.message.attachment.kind;
-        const msgText = data.message.text || (data.message.attachment ? (attKind === 'file' ? `📄 ${data.message.attachment.name || 'File'}` : attKind === 'voice' ? '🎤 Voice message' : '📷 Photo') : '');
 
-        // Muted chats never generate a push — the whole point is silence, even
-        // when the app is fully closed and there's no client left to filter it.
-        // Mentions-only needs a name to look for, so fall through to 'all' if
-        // we don't have one cached yet (e.g. push was set up before any pref
-        // was ever touched for this chat).
-        let shouldPush = pref !== 'mute';
-        if (shouldPush && pref === 'mentions') {
-          const myName = (await this.state.storage.get('displayName')) || '';
-          shouldPush = myName ? new RegExp(`@${myName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(msgText) : true;
-        }
+        // Messages are end-to-end encrypted now — this Durable Object only
+        // ever sees ciphertext, so it can no longer read message text to
+        // build a real preview or test the "mentions only" pref against it.
+        // Mute still fully suppresses (that's just a boolean, no content
+        // needed); "mentions only" degrades to "all" for a background OS
+        // push specifically — the in-app path (still open, socket connected)
+        // decrypts client-side and applies the real mention check there.
+        const shouldPush = pref !== 'mute';
 
         const subs = shouldPush ? (await this.state.storage.get('pushSubs')) || [] : [];
         if (subs.length) {
-          const title = data.chatType === 'group' ? (data.chatName || 'Group') : (data.message.fromName || 'PArA PIN');
-          const body = data.chatType === 'group' && data.message.fromName ? `${data.message.fromName}: ${msgText}` : msgText;
+          const senderLabel = data.message.fromName || 'Someone';
+          const title = data.chatType === 'group' ? (data.chatName || 'Group') : 'PArA PIN';
+          const body = data.chatType === 'group' ? `${senderLabel} sent a message` : `New message from ${senderLabel}`;
           const pushPayload = { title, body, chatId: data.chatId };
           const stillValid = [];
           for (const sub of subs) {
@@ -569,6 +639,29 @@ export class UserChannel {
       }
       if (stillValid.length !== subs.length) await this.state.storage.put('pushSubs', stillValid);
       return json({ delivered, total: subs.length, errors: errors.length ? errors : undefined });
+    }
+
+    // Generic "send this exact push to this user" primitive — used for things
+    // that aren't a chat message at all, like alerting admins when someone
+    // claims their HR-onboarding roster PIN for the first time.
+    if (request.method === 'POST' && url.pathname === '/push-direct') {
+      const { title, body, chatId } = await request.json().catch(() => ({}));
+      const subs = (await this.state.storage.get('pushSubs')) || [];
+      if (!subs.length) return json({ delivered: 0, total: 0 });
+      const payload = { title: title || 'PArA PIN', body: body || '', chatId: chatId || null };
+      let delivered = 0;
+      const stillValid = [];
+      for (const sub of subs) {
+        try {
+          const result = await sendWebPush(sub, payload, this.env);
+          if (result.ok) delivered++;
+          if (result.status !== 404 && result.status !== 410) stillValid.push(sub);
+        } catch (e) {
+          stillValid.push(sub);
+        }
+      }
+      if (stillValid.length !== subs.length) await this.state.storage.put('pushSubs', stillValid);
+      return json({ delivered, total: subs.length });
     }
 
     if (request.method === 'POST' && url.pathname === '/notify-pref') {
@@ -681,39 +774,58 @@ export class ChatRoom {
       return json({ reads });
     }
 
+    // Messages are end-to-end encrypted client-side — this Durable Object
+    // only ever stores/relays opaque ciphertext (+ IV) it cannot read.
+    // `alg` is just metadata for the client ('dm' vs 'group', which key to
+    // use) and carries no security weight on its own. Messages sent before
+    // E2EE shipped kept their old plaintext `text` field as-is; nothing here
+    // retroactively touches old history.
     if (request.method === 'POST' && url.pathname === '/messages') {
-      const { fromUserId, fromName, text, attachment, replyTo } = await request.json();
-      const hasText = text && text.trim();
+      const { fromUserId, fromName, ciphertext, iv, alg, attachment, replyTo } = await request.json();
+      const hasCiphertext = ciphertext && iv;
       const hasAttachment = attachment && attachment.url;
-      if (!hasText && !hasAttachment) return json({ error: 'empty' }, 400);
+      if (!hasCiphertext && !hasAttachment) return json({ error: 'empty' }, 400);
+      // Ciphertext is base64 and ~1.33x the encrypted byte length, and a 4000
+      // "character" plaintext cap can be up to ~12KB of UTF-8 bytes once
+      // heavy-Unicode (CJK, emoji, etc.) is accounted for — slicing a base64
+      // string to fit an undersized cap would silently corrupt it (breaks
+      // GCM auth, decrypt just fails with no clear reason), so this rejects
+      // oversized input outright instead of truncating it.
+      if (hasCiphertext && String(ciphertext).length > 20000) return json({ error: 'text_too_long' }, 400);
+      if (hasAttachment && attachment.nameCiphertext && String(attachment.nameCiphertext).length > 2000) {
+        return json({ error: 'name_too_long' }, 400);
+      }
       const msgs = await this.loadMessages();
       const msg = {
         id: crypto.randomUUID(),
         fromUserId,
         fromName: fromName || null,
-        text: hasText ? String(text).slice(0, 4000) : '',
         ts: Date.now(),
       };
+      if (hasCiphertext) {
+        msg.ciphertext = String(ciphertext);
+        msg.iv = String(iv).slice(0, 50);
+        msg.alg = alg === 'group' ? 'group' : 'dm';
+      }
       if (hasAttachment) {
         msg.attachment = {
           url: String(attachment.url).slice(0, 500),
           width: Number(attachment.width) || null,
           height: Number(attachment.height) || null,
           mime: attachment.mime ? String(attachment.mime).slice(0, 100) : 'image/jpeg',
-          name: attachment.name ? String(attachment.name).slice(0, 200) : null,
+          nameCiphertext: attachment.nameCiphertext ? String(attachment.nameCiphertext).slice(0, 2000) : null,
+          nameIv: attachment.nameIv ? String(attachment.nameIv).slice(0, 50) : null,
           size: Number(attachment.size) || null,
           kind: ['image', 'voice', 'file'].includes(attachment.kind) ? attachment.kind : 'image',
           duration: attachment.duration ? Number(attachment.duration) : null,
+          fileIv: attachment.fileIv ? String(attachment.fileIv).slice(0, 50) : null,
         };
       }
-      // Snapshotted at reply time rather than looked up live, so a reply still
-      // shows what it quoted even if the original is later edited or deleted.
+      // Only the id is stored now — the server can no longer read the
+      // original message to snapshot a plaintext quote, so the client
+      // re-derives the quoted name/text from its own already-decrypted copy.
       if (replyTo && replyTo.id) {
-        msg.replyTo = {
-          id: String(replyTo.id).slice(0, 100),
-          fromName: replyTo.fromName ? String(replyTo.fromName).slice(0, 100) : null,
-          text: replyTo.text ? String(replyTo.text).slice(0, 200) : '',
-        };
+        msg.replyTo = { id: String(replyTo.id).slice(0, 100) };
       }
       msgs.push(msg);
       if (msgs.length > 500) msgs.splice(0, msgs.length - 500);
@@ -721,6 +833,35 @@ export class ChatRoom {
 
       this.broadcast(JSON.stringify({ type: 'message', message: msg }), null);
       return json({ message: msg });
+    }
+
+    // ---- E2EE group key wraps ----
+    // For a group chat, one AES-256 key is generated client-side and wrapped
+    // (encrypted) once per member via a fresh ECDH exchange with that
+    // member's public key. This Durable Object just stores/serves those
+    // opaque wrapped copies — it never sees the real group key. Any current
+    // member may contribute wraps for members who don't have one yet (that's
+    // how the group key gets bootstrapped the first time everyone's public
+    // key is available).
+    if (request.method === 'GET' && url.pathname === '/e2ee-wraps') {
+      const wraps = (await this.state.storage.get('e2eeWraps')) || {};
+      return json({ wraps });
+    }
+    if (request.method === 'POST' && url.pathname === '/e2ee-wraps') {
+      const { wraps: incoming } = await request.json();
+      if (!incoming || typeof incoming !== 'object') return json({ error: 'invalid' }, 400);
+      const wraps = (await this.state.storage.get('e2eeWraps')) || {};
+      for (const [memberId, wrap] of Object.entries(incoming)) {
+        if (wrap && typeof wrap.ephemeralPub === 'string' && typeof wrap.iv === 'string' && typeof wrap.wrapped === 'string') {
+          wraps[memberId] = {
+            ephemeralPub: wrap.ephemeralPub.slice(0, 200),
+            iv: wrap.iv.slice(0, 50),
+            wrapped: wrap.wrapped.slice(0, 500),
+          };
+        }
+      }
+      await this.state.storage.put('e2eeWraps', wraps);
+      return json({ ok: true, wraps });
     }
 
     if (request.method === 'POST' && url.pathname === '/read') {
@@ -740,6 +881,8 @@ export class ChatRoom {
       if (!msg) return json({ error: 'not_found' }, 404);
       if (msg.fromUserId !== userId) return json({ error: 'forbidden' }, 403);
       msg.text = '';
+      delete msg.ciphertext;
+      delete msg.iv;
       msg.deleted = true;
       await this.state.storage.put('messages', msgs);
       this.broadcast(JSON.stringify({ type: 'delete', messageId }), null);
@@ -747,17 +890,20 @@ export class ChatRoom {
     }
 
     if (request.method === 'POST' && url.pathname === '/edit') {
-      const { userId, messageId, text } = await request.json();
-      if (!text || !text.trim()) return json({ error: 'empty' }, 400);
+      const { userId, messageId, ciphertext, iv } = await request.json();
+      if (!ciphertext || !iv) return json({ error: 'empty' }, 400);
+      if (String(ciphertext).length > 20000) return json({ error: 'text_too_long' }, 400);
       const msgs = await this.loadMessages();
       const msg = msgs.find((m) => m.id === messageId);
       if (!msg) return json({ error: 'not_found' }, 404);
       if (msg.fromUserId !== userId) return json({ error: 'forbidden' }, 403);
       if (msg.deleted) return json({ error: 'already_deleted' }, 400);
-      msg.text = String(text).slice(0, 4000);
+      msg.ciphertext = String(ciphertext);
+      msg.iv = String(iv).slice(0, 50);
+      delete msg.text; // upgrades a pre-E2EE plaintext message to encrypted the moment it's edited
       msg.edited = true;
       await this.state.storage.put('messages', msgs);
-      this.broadcast(JSON.stringify({ type: 'edit', messageId, text: msg.text }), null);
+      this.broadcast(JSON.stringify({ type: 'edit', messageId, ciphertext: msg.ciphertext, iv: msg.iv }), null);
       return json({ ok: true, message: msg });
     }
 
@@ -1041,6 +1187,17 @@ export default {
         return res;
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/e2ee/public-key') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const { publicKey } = await request.json();
+        const res = await registryStub.fetch('https://internal/e2ee/public-key', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, publicKey }),
+        });
+        return res;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/contacts') {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
@@ -1128,16 +1285,37 @@ export default {
         }
 
         // PATCH — edit
-        const { text } = await request.json();
+        const { ciphertext, iv } = await request.json();
         const res = await roomStub.fetch('https://internal/edit', {
           method: 'POST',
-          body: JSON.stringify({ userId: verify.userId, messageId, text }),
+          body: JSON.stringify({ userId: verify.userId, messageId, ciphertext, iv }),
         });
         const resBody = await res.json();
         return json(resBody, res.status);
       }
 
       // /api/chats/:id/messages, /api/chats/:id/ws, /api/chats/:id/read, /api/chats/:id/read-state
+      // /api/chats/:id/e2ee-wraps — stores/serves the per-member wrapped
+      // copies of a group's E2EE key. See ChatRoom's own handler for how the
+      // wrap/unwrap scheme works; this route just gates it to chat members.
+      const e2eeWrapsMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/e2ee-wraps$/);
+      if (e2eeWrapsMatch) {
+        const [, chatId] = e2eeWrapsMatch;
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const verifyRes = await registryStub.fetch(
+          `https://internal/verify-member?pinHash=${encodeURIComponent(pinHash)}&chatId=${encodeURIComponent(chatId)}`
+        );
+        const verify = await verifyRes.json();
+        if (!verify.ok) return json({ error: 'forbidden' }, 403);
+        const roomStub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(chatId));
+        if (request.method === 'GET') return roomStub.fetch('https://internal/e2ee-wraps');
+        if (request.method === 'POST') {
+          const body = await request.text();
+          return roomStub.fetch('https://internal/e2ee-wraps', { method: 'POST', body });
+        }
+      }
+
       const chatMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/(messages|ws|read|read-state)$/);
       if (chatMatch) {
         const [, chatId, action] = chatMatch;
@@ -1181,10 +1359,10 @@ export default {
         }
 
         if (action === 'messages' && request.method === 'POST') {
-          const { text, attachment, replyTo } = await request.json();
+          const { ciphertext, iv, alg, attachment, replyTo } = await request.json();
           const res = await roomStub.fetch('https://internal/messages', {
             method: 'POST',
-            body: JSON.stringify({ fromUserId: verify.userId, fromName: verify.displayName, text, attachment, replyTo }),
+            body: JSON.stringify({ fromUserId: verify.userId, fromName: verify.displayName, ciphertext, iv, alg, attachment, replyTo }),
           });
           const resBody = await res.json();
 

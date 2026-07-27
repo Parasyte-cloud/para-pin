@@ -12,3 +12,4 @@ mobile/
 README.md
 worker.js
 wrangler.jsonc
+scratch_e2ee_test.mjs

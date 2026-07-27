@@ -336,13 +336,6 @@
   .roster-disable-btn{ font-size:11px; color:var(--text-mid); cursor:pointer; flex-shrink:0; padding:4px 8px; }
   .roster-disable-btn:hover{ color:#ff6a6a; }
 
-  .ns-row{ display:flex; justify-content:space-between; align-items:center; padding:9px 0; border-bottom:1px solid var(--glass-brd); font-size:13px; }
-  .ns-row:last-of-type{ border-bottom:none; }
-  .ns-val{ font-weight:600; }
-  .ns-val.ok{ color:#3ddc84; }
-  .ns-val.warn{ color:#ffb020; }
-  .ns-val.bad{ color:#ff6a6a; }
-
   .scan-video-wrap{
     position:relative; width:100%; max-width:280px; aspect-ratio:1/1; margin:8px auto 16px;
     border-radius:16px; overflow:hidden; background:#000;
@@ -391,6 +384,7 @@
   .file-card-info{ min-width:0; flex:1; }
   .file-card-name{ font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-hi, inherit); }
   .file-card-size{ font-size:11px; color:var(--text-mid); }
+  .att-decrypting{ padding:8px 10px; border-radius:10px; background:rgba(255,255,255,0.07); font-size:12px; color:var(--text-mid); min-width:140px; }
 
   #notifyPrefBtn.is-muted{ opacity:.55; }
   .notify-pref-menu{
@@ -514,6 +508,11 @@
         <span id="sessionBannerText">Couldn't reach the PArA PIN server.</span>
         <span id="sessionRetryBtn" style="text-decoration:underline;cursor:pointer;margin-left:6px;">Retry</span>
       </div>
+      <div id="notifyEnableBanner" style="display:none;margin:0 16px 10px;padding:10px 12px;border-radius:12px;background:rgba(90,180,255,0.08);border:1px solid rgba(90,180,255,0.25);font-size:12px;color:#bfe0ff;">
+        <span id="notifyEnableBannerText">Turn on notifications so you don't miss a message.</span>
+        <span id="notifyEnableBtn" style="text-decoration:underline;cursor:pointer;margin-left:6px;font-weight:600;">Enable</span>
+        <span id="notifyEnableDismiss" style="float:right;cursor:pointer;opacity:0.7;">✕</span>
+      </div>
       <div class="search"><input type="text" id="searchInput" placeholder="Search chats..."></div>
       <div class="chat-list" id="chatList"></div>
       <div class="sidebar-foot">
@@ -524,7 +523,6 @@
             <div class="me-pin mono" id="mePinLabel">PArA PIN active</div>
           </div>
           <div class="icon-btn" id="adminRosterBtn" title="Team roster (admin)" style="display:none;">👥</div>
-          <div class="icon-btn" id="notifyStatusBtn" title="Notification settings">🔔</div>
           <div class="icon-btn" id="shareBtn" title="Share my PIN">▦</div>
           <div class="icon-btn" id="lockBtn" title="Lock">🔒</div>
         </div>
@@ -644,25 +642,6 @@
   </div>
 </div>
 
-<!-- ============ NOTIFICATION STATUS MODAL ============ -->
-<div class="overlay" id="notifyStatusOverlay">
-  <div class="modal lg">
-    <h3>Notifications</h3>
-    <div class="hint">What's actually true on this device right now — the previous fixes were all guesses without this.</div>
-    <div class="ns-row"><span>Browser support</span><span id="nsSupport" class="ns-val">—</span></div>
-    <div class="ns-row"><span>Permission</span><span id="nsPermission" class="ns-val">—</span></div>
-    <div class="ns-row"><span>Push subscription</span><span id="nsSubscription" class="ns-val">—</span></div>
-    <div class="hint" id="nsDetail" style="margin-top:10px; color:var(--text-mid);"></div>
-    <div class="modal-actions">
-      <div class="btn" id="nsRefreshBtn">Re-check</div>
-      <div class="btn primary" id="nsTestBtn">Send test notification</div>
-    </div>
-    <div class="modal-actions" style="margin-top:2px;">
-      <div class="btn" onclick="closeModal('notifyStatusOverlay')">Close</div>
-    </div>
-  </div>
-</div>
-
 <!-- ============ SHARE PIN MODAL ============ -->
 <div class="overlay" id="shareOverlay">
   <div class="modal lg" style="text-align:center;">
@@ -731,11 +710,12 @@
 <div class="overlay" id="rosterOverlay">
   <div class="modal lg">
     <h3>Team roster</h3>
-    <div class="hint">Pre-add someone and hand them the PIN yourself — no phone number or email needed. The PIN is shown once; write it down or share it right away.</div>
+    <div class="hint">Pre-add someone and hand them the PIN yourself, or add an email to have it sent automatically. The PIN is shown here once either way — write it down if you're delivering it yourself.</div>
     <div style="display:flex; gap:8px;">
       <input type="text" id="rosterNameInput" placeholder="Full name" style="flex:1;">
       <input type="text" id="rosterDeptInput" placeholder="Department (optional)" style="flex:1;">
     </div>
+    <input type="email" id="rosterEmailInput" placeholder="Email (optional — sends the PIN automatically)" style="width:100%; margin-top:8px;">
     <div class="hint" id="rosterError" style="display:none; color:#ff6a6a; margin-top:-6px;"></div>
     <div class="btn primary" id="rosterAddBtn" style="margin-bottom:14px;">Generate PIN</div>
     <div id="rosterNewPin" class="roster-new-pin" style="display:none;"></div>
@@ -990,10 +970,23 @@
     }
     updateTitleBadge();
     connectNotifySocket();
-    requestNotifyPermission();
+    updateNotifyBanner();
+    ensureMyE2eeKeyPair(); // warm this up early — every decrypt needs it
     apiFetch('/notify-prefs').then((r)=>{ if (r.ok && r.body.notifyPrefs) notifyPrefs = r.body.notifyPrefs; });
 
     await renderApp();
+
+    // Decrypt every chat's seeded preview message so the chat list shows real
+    // text instead of ciphertext-shaped nothing. Not awaited — each chat may
+    // need its own network round trip to resolve a key, and first paint
+    // shouldn't wait on that; renderChatList() gets called again as each one
+    // resolves.
+    for (const chatId of Object.keys(summaries)){
+      const chat = getChat(chatId);
+      if (chat && messagesByChat[chatId]){
+        decryptMessagesInPlace(chat, messagesByChat[chatId]).then(()=>renderChatList());
+      }
+    }
   }
 
   async function setNotifyPref(chatId, pref){
@@ -1403,24 +1396,33 @@
         inner += `<span class="deleted-label">Message deleted</span>`;
       } else {
         if (m.attachment && m.attachment.url){
+          const isEncryptedAtt = !!m.attachment.fileIv;
+          const attUrl = isEncryptedAtt ? (m.attachment._decryptedUrl || '') : m.attachment.url;
+          const stillDecrypting = isEncryptedAtt && !m.attachment._decryptedUrl;
           const isImg = m.attachment.kind === 'image' || !m.attachment.kind;
           if (isImg){
-            inner += `<img class="msg-image" src="${escapeHtml(m.attachment.url)}" data-full="${escapeHtml(m.attachment.url)}" alt="Photo">`;
+            inner += stillDecrypting
+              ? `<div class="att-decrypting">🔒 Decrypting photo…</div>`
+              : `<img class="msg-image" src="${escapeHtml(attUrl)}" data-full="${escapeHtml(attUrl)}" alt="Photo">`;
           } else if (m.attachment.kind === 'voice'){
             const dur = m.attachment.duration || 0;
-            inner += `<div class="voice-note" data-voice-id="${m.id}" data-url="${escapeHtml(m.attachment.url)}" data-duration="${dur}">`
-              + `<button class="voice-note-play" data-voice-id="${m.id}">▶</button>`
-              + `<div class="voice-note-bar"><div class="voice-note-bar-fill"></div></div>`
-              + `<div class="voice-note-dur">${fmtDuration(dur)}</div>`
-              + `</div>`;
+            inner += stillDecrypting
+              ? `<div class="att-decrypting">🔒 Decrypting voice message…</div>`
+              : (`<div class="voice-note" data-voice-id="${m.id}" data-url="${escapeHtml(attUrl)}" data-duration="${dur}">`
+                + `<button class="voice-note-play" data-voice-id="${m.id}">▶</button>`
+                + `<div class="voice-note-bar"><div class="voice-note-bar-fill"></div></div>`
+                + `<div class="voice-note-dur">${fmtDuration(dur)}</div>`
+                + `</div>`);
           } else {
             const fname = m.attachment.name || 'File';
             const fsize = m.attachment.size ? fmtFileSize(m.attachment.size) : '';
-            inner += `<a class="file-card" href="${escapeHtml(m.attachment.url)}" target="_blank" rel="noopener" download="${escapeHtml(fname)}">`
-              + `<span class="file-card-icon">${fileKindIcon(m.attachment.mime || '', fname)}</span>`
-              + `<span class="file-card-info"><span class="file-card-name">${escapeHtml(fname)}</span>`
-              + (fsize ? `<span class="file-card-size">${fsize}</span>` : '')
-              + `</span></a>`;
+            inner += stillDecrypting
+              ? `<div class="att-decrypting">🔒 Decrypting file…</div>`
+              : (`<a class="file-card" href="${escapeHtml(attUrl)}" target="_blank" rel="noopener" download="${escapeHtml(fname)}">`
+                + `<span class="file-card-icon">${fileKindIcon(m.attachment.mime || '', fname)}</span>`
+                + `<span class="file-card-info"><span class="file-card-name">${escapeHtml(fname)}</span>`
+                + (fsize ? `<span class="file-card-size">${fsize}</span>` : '')
+                + `</span></a>`);
           }
         }
         if (m.text) inner += highlightSearchMatches(renderTextWithMentions(m.text, chat), m.id);
@@ -1680,16 +1682,21 @@
 
   document.getElementById('lockBtn').addEventListener('click', lockApp);
 
-  document.getElementById('shareBtn').addEventListener('click', ()=>{
+  document.getElementById('shareBtn').addEventListener('click', async ()=>{
     if (!myRawPin) return;
     document.getElementById('sharePinDigits').textContent = myRawPin.split('').join(' \u2022 ');
     const qrEl = document.getElementById('qrCanvas');
     qrEl.innerHTML = '';
-    if (window.QRCode) {
+    openModal('shareOverlay');
+    if (typeof QRCode === 'undefined'){
+      try { await ensureQRCodeLib(); } catch(e){}
+    }
+    if (typeof QRCode !== 'undefined') {
       const addUrl = window.location.origin + '/add/' + myRawPin;
       new QRCode(qrEl, { text: addUrl, width: 180, height: 180, colorDark: '#0a0d12', colorLight: '#ffffff' });
+    } else {
+      qrEl.textContent = "QR image couldn't load \u2014 share the PIN digits above instead.";
     }
-    openModal('shareOverlay');
   });
 
   document.getElementById('copyPinBtn').addEventListener('click', ()=>{
@@ -1790,6 +1797,7 @@
   // ---------------- admin roster (lightweight HR-linked onboarding) ----------------
   const rosterNameInput = document.getElementById('rosterNameInput');
   const rosterDeptInput = document.getElementById('rosterDeptInput');
+  const rosterEmailInput = document.getElementById('rosterEmailInput');
   const rosterError = document.getElementById('rosterError');
   const rosterNewPin = document.getElementById('rosterNewPin');
   const rosterListEl = document.getElementById('rosterList');
@@ -1809,7 +1817,9 @@
       row.className = 'roster-entry';
       const info = document.createElement('div');
       info.className = 'roster-entry-info';
-      info.innerHTML = `<div class="roster-entry-name">${escapeHtml(e.name)}</div><div class="roster-entry-meta">${escapeHtml(e.department || 'No department set')}</div>`;
+      const metaParts = [e.department || 'No department set'];
+      if (e.email) metaParts.push(e.email);
+      info.innerHTML = `<div class="roster-entry-name">${escapeHtml(e.name)}</div><div class="roster-entry-meta">${escapeHtml(metaParts.join(' · '))}</div>`;
       row.appendChild(info);
       const status = document.createElement('div');
       status.className = 'roster-status ' + e.status;
@@ -1834,6 +1844,7 @@
   document.getElementById('adminRosterBtn').addEventListener('click', ()=>{
     rosterNameInput.value = '';
     rosterDeptInput.value = '';
+    rosterEmailInput.value = '';
     hideRosterError();
     rosterNewPin.style.display = 'none';
     openModal('rosterOverlay');
@@ -1844,16 +1855,21 @@
     const btn = this;
     if (btn.disabled) return;
     const name = rosterNameInput.value.trim();
+    const email = rosterEmailInput.value.trim();
     if (!name){ showRosterError('Enter a name.'); return; }
     hideRosterError();
     btn.disabled = true;
-    const r = await apiFetch('/admin/roster', { method: 'POST', body: JSON.stringify({ name, department: rosterDeptInput.value.trim() }) });
+    const r = await apiFetch('/admin/roster', { method: 'POST', body: JSON.stringify({ name, department: rosterDeptInput.value.trim(), email: email || undefined }) });
     btn.disabled = false;
-    if (!r.ok){ showRosterError('Could not add them — try again.'); return; }
+    if (!r.ok){ showRosterError(r.body && r.body.error === 'invalid_email' ? 'That email address looks off.' : 'Could not add them — try again.'); return; }
     rosterNameInput.value = '';
     rosterDeptInput.value = '';
+    rosterEmailInput.value = '';
     rosterNewPin.style.display = 'block';
-    rosterNewPin.innerHTML = `<div class="rp-pin">${r.body.pin.split('').join(' ')}</div><div class="rp-note">${escapeHtml(r.body.entry.name)}'s PIN — shown once, share it with them now. They'll enter it like any other PArA PIN.</div>`;
+    const emailNote = !email ? '' : r.body.emailSent
+      ? ` An email with this PIN was also sent to ${escapeHtml(email)}.`
+      : ` Tried to email this to ${escapeHtml(email)} but it didn't go through${r.body.emailError && r.body.emailError !== 'resend_not_configured' ? ' (' + escapeHtml(r.body.emailError) + ')' : ' (email isn\'t set up yet)'} — share the PIN directly instead.`;
+    rosterNewPin.innerHTML = `<div class="rp-pin">${r.body.pin.split('').join(' ')}</div><div class="rp-note">${escapeHtml(r.body.entry.name)}'s PIN — shown once, share it with them now. They'll enter it like any other PArA PIN.${emailNote}</div>`;
     loadRoster();
   });
 
@@ -1862,13 +1878,18 @@
   let reconnectTimer = null;
   let reconnectAttempts = 0;
 
-  function mergeMessages(chatId, incoming){
+  async function mergeMessages(chatId, incoming){
     const existing = messagesByChat[chatId] || (messagesByChat[chatId] = []);
     const seen = new Set(existing.map(m => m.id));
     for (const m of incoming){
       if (!seen.has(m.id)){ existing.push(m); seen.add(m.id); }
     }
     existing.sort((a,b) => a.ts - b.ts);
+    // Sweeping the whole array (not just what just arrived) means a message
+    // that was stuck on "waiting for encryption" earlier gets retried here
+    // too, once the key it needed becomes available.
+    const chat = getChat(chatId);
+    if (chat) await decryptMessagesInPlace(chat, existing);
   }
 
   // Always re-fetch from the server when a chat is opened, even if we have a
@@ -1879,7 +1900,7 @@
     discardActiveRecording();
     if (voicePlayer && !voicePlayer.paused) voicePlayer.pause(); // leaving the chat shouldn't leave a voice note playing with no visible player
     const r = await apiFetch(`/chats/${chatId}/messages`);
-    if (r.ok && r.body.messages) mergeMessages(chatId, r.body.messages);
+    if (r.ok && r.body.messages) await mergeMessages(chatId, r.body.messages);
     else if (!(chatId in messagesByChat)) messagesByChat[chatId] = [];
     convSubOverride = null;
     if (editingMessageId) cancelEdit();
@@ -2056,14 +2077,14 @@
     } catch(e) { scheduleReconnect(chatId); return; }
     socketLastActivityAt = Date.now();
     ws.addEventListener('open', ()=>{ reconnectAttempts = 0; socketLastActivityAt = Date.now(); });
-    ws.addEventListener('message', (ev)=>{
+    ws.addEventListener('message', async (ev)=>{
       socketLastActivityAt = Date.now();
       let data;
       try { data = JSON.parse(ev.data); } catch(e){ return; }
       if (data.type === 'pong'){
         return;
       } else if (data.type === 'message'){
-        mergeMessages(chatId, [data.message]);
+        await mergeMessages(chatId, [data.message]);
         if (activeChatId === chatId) renderConv();
         renderChatList();
         if (activeChatId === chatId && document.visibilityState === 'visible') markChatRead(chatId);
@@ -2166,9 +2187,9 @@
       openChat(activeChatId);
     } else {
       const chatId = activeChatId;
-      apiFetch(`/chats/${chatId}/messages`).then(r=>{
+      apiFetch(`/chats/${chatId}/messages`).then(async r=>{
         if (r.ok && r.body.messages){
-          mergeMessages(chatId, r.body.messages);
+          await mergeMessages(chatId, r.body.messages);
           if (activeChatId === chatId) renderConv();
           renderChatList();
         }
@@ -2256,14 +2277,6 @@
   function notifyPermissionOk(){
     return typeof Notification !== 'undefined' && Notification.permission === 'granted';
   }
-  function requestNotifyPermission(){
-    if (typeof Notification === 'undefined') return;
-    if (Notification.permission === 'granted'){ setupPushSubscription(); return; }
-    if (Notification.permission !== 'default') return;
-    Notification.requestPermission().then((perm)=>{
-      if (perm === 'granted') setupPushSubscription();
-    }).catch(()=>{});
-  }
 
   // ---------------- real push notifications (survive the app being fully closed) ----------------
   function urlBase64ToUint8Array(base64String){
@@ -2313,95 +2326,342 @@
     }
   }
 
-  // ---------------- notification status / diagnostics panel ----------------
-  const nsSupport = document.getElementById('nsSupport');
-  const nsPermission = document.getElementById('nsPermission');
-  const nsSubscription = document.getElementById('nsSubscription');
-  const nsDetail = document.getElementById('nsDetail');
-  const nsTestBtn = document.getElementById('nsTestBtn');
-  const nsRefreshBtn = document.getElementById('nsRefreshBtn');
+  // ---------------- enable-notifications banner ----------------
+  // Root cause of "still no ding, no notification" across every earlier fix:
+  // Notification.requestPermission() only actually prompts when it's called
+  // synchronously inside a real user gesture (a tap/click with nothing awaited
+  // first) — this is strictly enforced by Safari/iOS. Every previous version
+  // called it automatically from inside initSession(), which by that point had
+  // already awaited several network round trips (the /session fetch, etc.), so
+  // the PIN-pad tap's "user activation" had expired before the call ever ran.
+  // The browser then silently ignores or auto-resolves the prompt with no
+  // permission granted — no permission means setupPushSubscription() never
+  // creates a subscription, which means pushSubs stays empty server-side,
+  // which means there is nothing to ever push to, regardless of how correct
+  // the VAPID/encryption/fan-out code on the server is. Gating the prompt
+  // behind this banner's own button tap makes the tap itself the gesture.
+  const notifyEnableBanner = document.getElementById('notifyEnableBanner');
+  const notifyEnableBannerText = document.getElementById('notifyEnableBannerText');
+  const notifyEnableBtn = document.getElementById('notifyEnableBtn');
+  const notifyEnableDismiss = document.getElementById('notifyEnableDismiss');
+  let notifyBannerDismissed = false;
 
-  function setNsVal(el, text, level){
-    el.textContent = text;
-    el.className = 'ns-val' + (level ? ' ' + level : '');
+  function updateNotifyBanner(){
+    if (notifyBannerDismissed || typeof Notification === 'undefined'){
+      notifyEnableBanner.style.display = 'none';
+      return;
+    }
+    if (Notification.permission === 'granted'){
+      notifyEnableBanner.style.display = 'none';
+      // Already granted — creating/refreshing the subscription needs no
+      // prompt, so this can safely run without a fresh gesture.
+      setupPushSubscription();
+      return;
+    }
+    if (Notification.permission === 'denied'){
+      notifyEnableBannerText.textContent = "Notifications are blocked for PArA PIN. Enable them in your device/browser settings to get message alerts.";
+      notifyEnableBtn.style.display = 'none';
+      notifyEnableBanner.style.display = 'block';
+      return;
+    }
+    notifyEnableBannerText.textContent = "Turn on notifications so you don't miss a message.";
+    notifyEnableBtn.style.display = 'inline';
+    notifyEnableBanner.style.display = 'block';
   }
 
-  async function refreshNotifyStatus(){
-    const hasNotification = typeof Notification !== 'undefined';
-    const hasSW = 'serviceWorker' in navigator;
-    const hasPush = 'PushManager' in window;
-    if (hasNotification && hasSW && hasPush){
-      setNsVal(nsSupport, 'Supported', 'ok');
-    } else {
-      const missing = [!hasNotification && 'Notifications', !hasSW && 'Service Worker', !hasPush && 'Push'].filter(Boolean).join(', ');
-      setNsVal(nsSupport, 'Missing: ' + missing, 'bad');
+  notifyEnableBtn.addEventListener('click', () => {
+    // This call must stay the very first thing that runs on this tap — no
+    // awaits before it — or it stops counting as a user gesture on iOS.
+    if (typeof Notification === 'undefined') return;
+    Notification.requestPermission().then((perm) => {
+      if (perm === 'granted') setupPushSubscription();
+      updateNotifyBanner();
+    }).catch((e) => { lastPushSetupError = (e && e.message) || 'requestPermission() failed.'; });
+  });
+  notifyEnableDismiss.addEventListener('click', () => {
+    notifyBannerDismissed = true;
+    notifyEnableBanner.style.display = 'none';
+  });
+
+  // ==================== end-to-end encryption ====================
+  // Every message body and file attachment is encrypted on the sender's
+  // device and only ever decrypted on a recipient's device — the server
+  // stores and relays ciphertext it cannot read.
+  //
+  // Scheme (ECDH P-256 + HKDF-SHA256 + AES-256-GCM, all via Web Crypto):
+  //   - Each device generates its own ECDH keypair the first time this runs.
+  //     The private key is generated non-extractable and lives only in this
+  //     browser's IndexedDB — it never leaves the device, not even to us.
+  //     The public key is uploaded to the server so other members can find it.
+  //   - DMs: no server-stored key material at all. Both sides independently
+  //     derive the same AES key from (my private key, their public key) via
+  //     ECDH + HKDF — knowing both public keys (the server does) still isn't
+  //     enough to compute this without one of the private keys.
+  //   - Groups: whoever first opens the chat generates a random AES-256 group
+  //     key, then wraps (encrypts) a copy of it for every member via a fresh
+  //     ECDH exchange per member, and uploads only the wrapped copies. Each
+  //     member unwraps their own copy with their own private key.
+  //
+  // Known, deliberate limitations (kept simple on purpose for a small
+  // internal team tool, not a hardened secure-messenger product):
+  //   - No forward secrecy / ratcheting — a DM's key is fixed as long as
+  //     neither person's keypair changes; a group's key is fixed for the
+  //     life of the group. A real Signal-style ratchet is a much bigger
+  //     project and wasn't in scope here.
+  //   - No safety-number / key-verification UI — whatever public key the
+  //     server hands you for someone is trusted on first use, the same trust
+  //     model the rest of this PIN-based app already uses everywhere.
+  //   - No multi-device sync. Clearing this browser's storage (or a new
+  //     device) generates a brand-new keypair — old messages encrypted under
+  //     the old key become unreadable here, and any group needs someone to
+  //     re-open it so the group key gets wrapped for the new key too.
+  //   - Messages sent before this shipped stay exactly as they were (plain
+  //     text the server could already read) — nothing is retroactively
+  //     encrypted or deleted.
+  //   - Because the server can't read content anymore, a background push
+  //     notification can only say "new message from so-and-so," not show a
+  //     text preview, and "mentions only" can't be evaluated on a closed app
+  //     (falls back to notifying like "all" would — mute still works). While
+  //     the app is open, the real decrypted mention check still applies.
+
+  const E2EE_DM_INFO = 'PArA-PIN-DM-v1';
+  const E2EE_GROUP_WRAP_INFO = 'PArA-PIN-GroupWrap-v1';
+
+  function e2eeToU8(x){ return x instanceof Uint8Array ? x : new Uint8Array(x); }
+  function e2eeBufToB64(buf){
+    const bytes = e2eeToU8(buf);
+    let bin = '';
+    for (let i=0;i<bytes.length;i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  }
+  function e2eeB64ToBuf(b64url){
+    const b64 = String(b64url).replace(/-/g,'+').replace(/_/g,'/');
+    const pad = b64.length % 4 === 0 ? '' : '='.repeat(4 - (b64.length % 4));
+    const bin = atob(b64 + pad);
+    const buf = new Uint8Array(bin.length);
+    for (let i=0;i<bin.length;i++) buf[i] = bin.charCodeAt(i);
+    return buf;
+  }
+
+  function e2eeDb(){
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open('para-pin-e2ee', 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('kv');
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+  async function e2eeKvGet(key){
+    try {
+      const db = await e2eeDb();
+      return await new Promise((resolve) => {
+        const tx = db.transaction('kv', 'readonly');
+        const r = tx.objectStore('kv').get(key);
+        r.onsuccess = () => resolve(r.result || null);
+        r.onerror = () => resolve(null);
+      });
+    } catch(e){ return null; }
+  }
+  async function e2eeKvSet(key, val){
+    try {
+      const db = await e2eeDb();
+      return await new Promise((resolve) => {
+        const tx = db.transaction('kv', 'readwrite');
+        tx.objectStore('kv').put(val, key);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => resolve(false);
+      });
+    } catch(e){ return false; }
+  }
+
+  let myE2eeKeyPair = null;
+  let myE2eeReady = null;
+
+  async function ensureMyE2eeKeyPair(){
+    if (myE2eeReady) return myE2eeReady;
+    myE2eeReady = (async () => {
+      let stored = null;
+      try { stored = await e2eeKvGet('keypair'); } catch(e){}
+      if (stored && stored.privateKey && stored.publicKey){
+        myE2eeKeyPair = stored;
+      } else {
+        const kp = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
+        const rawPub = await crypto.subtle.exportKey('raw', kp.publicKey);
+        myE2eeKeyPair = { privateKey: kp.privateKey, publicKey: kp.publicKey, publicKeyB64: e2eeBufToB64(rawPub) };
+        try { await e2eeKvSet('keypair', myE2eeKeyPair); } catch(e){}
+      }
+      // Idempotent — safe on every login, keeps the server's copy of our
+      // public key in sync with whatever's actually in this browser.
+      apiFetch('/e2ee/public-key', { method: 'POST', body: JSON.stringify({ publicKey: myE2eeKeyPair.publicKeyB64 }) }).catch(()=>{});
+      return myE2eeKeyPair;
+    })();
+    return myE2eeReady;
+  }
+
+  async function e2eeDeriveAesKey(privateKey, publicKeyB64, infoStr){
+    const pub = await crypto.subtle.importKey('raw', e2eeB64ToBuf(publicKeyB64), { name: 'ECDH', namedCurve: 'P-256' }, true, []);
+    const sharedBits = await crypto.subtle.deriveBits({ name: 'ECDH', public: pub }, privateKey, 256);
+    const hkdfKey = await crypto.subtle.importKey('raw', sharedBits, 'HKDF', false, ['deriveBits']);
+    const keyBits = await crypto.subtle.deriveBits(
+      { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: new TextEncoder().encode(infoStr) },
+      hkdfKey, 256
+    );
+    return crypto.subtle.importKey('raw', keyBits, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+  }
+
+  async function e2eeEncryptString(key, plaintext){
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(plaintext));
+    return { iv: e2eeBufToB64(iv), ciphertext: e2eeBufToB64(ct) };
+  }
+  async function e2eeDecryptString(key, ivB64, ctB64){
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: e2eeB64ToBuf(ivB64) }, key, e2eeB64ToBuf(ctB64));
+    return new TextDecoder().decode(pt);
+  }
+  async function e2eeEncryptBytes(key, bytes){
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, bytes);
+    return { iv: e2eeBufToB64(iv), bytes: new Uint8Array(ct) };
+  }
+  async function e2eeDecryptBytes(key, ivB64, bytes){
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: e2eeB64ToBuf(ivB64) }, key, bytes);
+    return new Uint8Array(pt);
+  }
+
+  // Resolved per-chat AES keys (DM: derived shared key; group: unwrapped
+  // group key). Peer public keys only get cached once known — a still-null
+  // lookup is retried next time rather than stuck forever.
+  const chatKeyCache = {};
+  const chatKeyLastAttempt = {};
+  const peerPublicKeyCache = {};
+
+  async function fetchPeerPublicKey(userId){
+    if (peerPublicKeyCache[userId]) return peerPublicKeyCache[userId];
+    const r = await apiFetch(`/users?ids=${encodeURIComponent(userId)}`);
+    const rec = r.ok && r.body.users && r.body.users[0];
+    const key = (rec && rec.e2eePublicKey) || null;
+    if (key) peerPublicKeyCache[userId] = key;
+    return key;
+  }
+
+  // Resolves (and caches) the AES-GCM key usable for a chat, or null if it
+  // isn't possible yet (a member hasn't uploaded a public key by opening the
+  // app since this shipped, or a group's key hasn't been established). Retry
+  // attempts are throttled so repeated re-renders don't hammer the network.
+  async function ensureChatKey(chat){
+    if (!chat) return null;
+    if (chatKeyCache[chat.id]) return chatKeyCache[chat.id];
+    const lastTry = chatKeyLastAttempt[chat.id] || 0;
+    if (Date.now() - lastTry < 5000) return null;
+    chatKeyLastAttempt[chat.id] = Date.now();
+    await ensureMyE2eeKeyPair();
+
+    if (chat.type === 'dm'){
+      const otherId = chat.memberIds.find(id => id !== myUserId);
+      const otherPub = otherId ? await fetchPeerPublicKey(otherId) : null;
+      if (!otherPub) return null;
+      const key = await e2eeDeriveAesKey(myE2eeKeyPair.privateKey, otherPub, E2EE_DM_INFO);
+      chatKeyCache[chat.id] = key;
+      return key;
     }
 
-    if (!hasNotification){
-      setNsVal(nsPermission, 'n/a', 'bad');
-    } else if (Notification.permission === 'granted'){
-      setNsVal(nsPermission, 'Granted', 'ok');
-    } else if (Notification.permission === 'denied'){
-      setNsVal(nsPermission, 'Denied', 'bad');
-    } else {
-      setNsVal(nsPermission, 'Not asked yet', 'warn');
-    }
-
-    let detail = '';
-    if (!hasSW || !hasPush){
-      setNsVal(nsSubscription, 'Unavailable', 'bad');
-    } else {
+    // Group: try to unwrap an existing wrap first.
+    const r = await apiFetch(`/chats/${chat.id}/e2ee-wraps`);
+    const wraps = (r.ok && r.body.wraps) || {};
+    const myWrap = wraps[myUserId];
+    if (myWrap){
       try {
-        const reg = await navigator.serviceWorker.ready;
-        const sub = await reg.pushManager.getSubscription();
-        if (sub){
-          setNsVal(nsSubscription, 'Active', 'ok');
-          detail = 'Endpoint: ' + sub.endpoint.replace(/^https:\/\//, '').slice(0, 40) + '…';
-        } else if (Notification.permission !== 'granted'){
-          setNsVal(nsSubscription, 'Not set up', 'warn');
-          detail = 'Grant permission first, then hit Re-check.';
-        } else {
-          setNsVal(nsSubscription, 'Not set up', 'warn');
-          detail = lastPushSetupError || 'Permission is granted but no subscription exists yet — hit Re-check to retry.';
-        }
+        const unwrapKey = await e2eeDeriveAesKey(myE2eeKeyPair.privateKey, myWrap.ephemeralPub, E2EE_GROUP_WRAP_INFO);
+        const rawGroupKey = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: e2eeB64ToBuf(myWrap.iv) }, unwrapKey, e2eeB64ToBuf(myWrap.wrapped));
+        const key = await crypto.subtle.importKey('raw', rawGroupKey, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+        chatKeyCache[chat.id] = key;
+        return key;
       } catch(e){
-        setNsVal(nsSubscription, 'Error', 'bad');
-        detail = (e && e.message) || 'Failed to read subscription state.';
+        return null;
       }
     }
-    if (!detail && lastPushSetupError) detail = lastPushSetupError;
-    nsDetail.textContent = detail;
+
+    // No wrap for me yet — establish the group key for everyone, but only
+    // once every member has uploaded a public key at least once.
+    const memberPubs = {};
+    for (const id of chat.memberIds){
+      memberPubs[id] = id === myUserId ? myE2eeKeyPair.publicKeyB64 : await fetchPeerPublicKey(id);
+    }
+    if (Object.values(memberPubs).some(p => !p)) return null; // still waiting on someone
+
+    const rawGroupKey = crypto.getRandomValues(new Uint8Array(32));
+    const newWraps = {};
+    for (const id of chat.memberIds){
+      const ephemeral = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+      const ephemeralRawPub = await crypto.subtle.exportKey('raw', ephemeral.publicKey);
+      const wrapKey = await e2eeDeriveAesKey(ephemeral.privateKey, memberPubs[id], E2EE_GROUP_WRAP_INFO);
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const wrapped = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, wrapKey, rawGroupKey);
+      newWraps[id] = { ephemeralPub: e2eeBufToB64(ephemeralRawPub), iv: e2eeBufToB64(iv), wrapped: e2eeBufToB64(wrapped) };
+    }
+    await apiFetch(`/chats/${chat.id}/e2ee-wraps`, { method: 'POST', body: JSON.stringify({ wraps: newWraps }) });
+    const key = await crypto.subtle.importKey('raw', rawGroupKey, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+    chatKeyCache[chat.id] = key;
+    return key;
   }
 
-  document.getElementById('notifyStatusBtn').addEventListener('click', async ()=>{
-    openModal('notifyStatusOverlay');
-    nsDetail.textContent = 'Checking…';
-    await refreshNotifyStatus();
-  });
-  nsRefreshBtn.addEventListener('click', async ()=>{
-    nsDetail.textContent = 'Re-checking…';
-    requestNotifyPermission();
-    await setupPushSubscription();
-    await refreshNotifyStatus();
-  });
-  nsTestBtn.addEventListener('click', async ()=>{
-    nsTestBtn.textContent = 'Sending…';
-    const r = await apiFetch('/push/test', { method: 'POST' });
-    nsTestBtn.textContent = 'Send test notification';
-    if (r.ok){
-      nsDetail.textContent = r.body.delivered > 0
-        ? `Sent to ${r.body.delivered} device${r.body.delivered === 1 ? '' : 's'} — it should arrive within a few seconds.`
-        : 'No push subscription is registered yet on the server for this device — hit Re-check first.';
-    } else {
-      nsDetail.textContent = 'Server-side test send failed: ' + (r.body && r.body.error ? r.body.error : `status ${r.status}`);
+  // Decrypts whatever's decryptable across a chat's messages, mutating them
+  // in place so every existing renderer (renderConv, search, mention
+  // highlighting, chat-list previews) keeps reading `m.text` exactly like
+  // before and needs no changes of its own.
+  async function decryptMessagesInPlace(chat, msgs){
+    if (!chat || !msgs || !msgs.length) return;
+    for (const m of msgs){
+      if (m._e2eeDone || m.type === 'system') continue;
+      if (!m.ciphertext && !(m.attachment && m.attachment.fileIv)){ m._e2eeDone = true; continue; } // legacy plaintext message
+      const key = await ensureChatKey(chat);
+      if (!key){
+        if (!m.text) m.text = '🔒 Waiting for encryption to finish setting up…';
+        continue; // not marked done — retried next time this chat's messages are touched
+      }
+      if (m.ciphertext && m.iv){
+        try { m.text = await e2eeDecryptString(key, m.iv, m.ciphertext); }
+        catch(e){ m.text = "🔒 Couldn't decrypt this message on this device."; }
+      }
+      if (m.attachment && m.attachment.nameCiphertext && m.attachment.nameIv){
+        try { m.attachment.name = await e2eeDecryptString(key, m.attachment.nameIv, m.attachment.nameCiphertext); }
+        catch(e){ m.attachment.name = 'Attachment'; }
+      }
+      if (m.attachment && m.attachment.fileIv && !m.attachment._decryptedUrl && !m.attachment._decrypting){
+        m.attachment._decrypting = true;
+        (async () => {
+          try {
+            const res = await fetch(m.attachment.url);
+            const ciphertextBytes = new Uint8Array(await res.arrayBuffer());
+            const plainBytes = await e2eeDecryptBytes(key, m.attachment.fileIv, ciphertextBytes);
+            m.attachment._decryptedUrl = URL.createObjectURL(new Blob([plainBytes], { type: m.attachment.mime || 'application/octet-stream' }));
+          } catch(e){
+            m.attachment._decryptedUrl = null;
+          } finally {
+            m.attachment._decrypting = false;
+            if (activeChatId === chat.id) renderConv();
+          }
+        })();
+      }
+      if (m.replyTo && m.replyTo.id && !m.replyTo.text){
+        const original = msgs.find(x => x.id === m.replyTo.id);
+        if (original && original._e2eeDone){
+          m.replyTo.fromName = original.fromName || m.replyTo.fromName || 'Message';
+          m.replyTo.text = original.deleted ? 'Message deleted' : (original.text || '').slice(0, 200);
+        } else {
+          m.replyTo.fromName = m.replyTo.fromName || 'Message';
+          m.replyTo.text = '…';
+        }
+      }
+      m._e2eeDone = true;
     }
-  });
+  }
 
-  function handleNotify(data){
+  async function handleNotify(data){
     const chatId = data.chatId;
     const msg = data.message;
     if (!msg) return;
-    mergeMessages(chatId, [msg]);
+    await mergeMessages(chatId, [msg]);
 
     const isOpenAndVisible = activeChatId === chatId && document.visibilityState === 'visible';
     if (!isOpenAndVisible){
@@ -2859,16 +3119,26 @@
     const attachment = pendingAttachment;
     if ((!text && !attachment) || !activeChatId) return;
     const chatId = activeChatId;
+    const chat = getChat(chatId);
+
+    const key = await ensureChatKey(chat);
+    if (!key){
+      showSessionBanner("Encryption isn't ready for this chat yet — everyone in it needs to have opened PArA PIN at least once since the update. Try again shortly.");
+      return;
+    }
 
     if (editingMessageId){
       const messageId = editingMessageId;
       if (!text) return; // editing is text-only
       cancelEdit();
-      const r = await apiFetch(`/chats/${chatId}/messages/${messageId}`, { method: 'PATCH', body: JSON.stringify({ text }) });
+      const enc = await e2eeEncryptString(key, text);
+      const r = await apiFetch(`/chats/${chatId}/messages/${messageId}`, { method: 'PATCH', body: JSON.stringify({ ciphertext: enc.ciphertext, iv: enc.iv }) });
       if (r.ok && r.body.message){
         const msgs = messagesByChat[chatId];
         const m = msgs && msgs.find(mm => mm.id === messageId);
-        if (m){ m.text = r.body.message.text; m.edited = true; }
+        // We already know the plaintext we just encrypted — no need to
+        // round-trip a decrypt of our own edit.
+        if (m){ m.text = text; m.ciphertext = enc.ciphertext; m.iv = enc.iv; m._e2eeDone = true; m.edited = true; }
         if (activeChatId === chatId) renderConv();
         renderChatList();
       } else {
@@ -2888,10 +3158,15 @@
     let attachmentPayload = null;
     if (attachment){
       const mime = attachment.blob.type || (attachment.kind === 'image' ? 'image/jpeg' : 'application/octet-stream');
+      const rawBytes = new Uint8Array(await attachment.blob.arrayBuffer());
+      const encBytes = await e2eeEncryptBytes(key, rawBytes);
+      const encName = await e2eeEncryptString(key, attachment.name || 'file');
+      // Uploaded as opaque application/octet-stream — even the R2 object's
+      // own declared content type shouldn't reveal what the file actually is.
       const uploadRes = await apiFetch('/upload', {
         method: 'POST',
-        headers: { 'content-type': mime, 'x-file-name': encodeURIComponent(attachment.name || 'file') },
-        body: attachment.blob,
+        headers: { 'content-type': 'application/octet-stream', 'x-file-name': encodeURIComponent((attachment.name || 'file') + '.enc') },
+        body: encBytes.bytes,
       });
       if (uploadRes.ok && uploadRes.body.url){
         attachmentPayload = {
@@ -2899,10 +3174,12 @@
           width: attachment.width,
           height: attachment.height,
           mime,
-          name: attachment.name,
+          nameCiphertext: encName.ciphertext,
+          nameIv: encName.iv,
           size: attachment.blob.size,
           kind: attachment.kind,
           duration: attachment.duration || undefined,
+          fileIv: encBytes.iv,
         };
       } else {
         sendBtn.disabled = false;
@@ -2911,10 +3188,32 @@
       }
     }
 
-    const r = await apiFetch(`/chats/${chatId}/messages`, { method:'POST', body: JSON.stringify({ text, attachment: attachmentPayload, replyTo: replyToPayload }) });
+    let textEnc = null;
+    if (text) textEnc = await e2eeEncryptString(key, text);
+
+    const r = await apiFetch(`/chats/${chatId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({
+        ciphertext: textEnc ? textEnc.ciphertext : undefined,
+        iv: textEnc ? textEnc.iv : undefined,
+        alg: chat.type === 'group' ? 'group' : 'dm',
+        attachment: attachmentPayload,
+        replyTo: replyToPayload ? { id: replyToPayload.id } : null,
+      }),
+    });
     sendBtn.disabled = false;
     if (r.ok){
-      mergeMessages(chatId, [r.body.message]);
+      if (r.body.message){
+        // We already know exactly what we just sent — skip a redundant
+        // decrypt round trip on our own outgoing message.
+        r.body.message.text = text;
+        r.body.message._e2eeDone = true;
+        if (attachmentPayload && attachmentPayload.fileIv && r.body.message.attachment){
+          r.body.message.attachment.name = attachment.name || 'file';
+          r.body.message.attachment._decryptedUrl = URL.createObjectURL(attachment.blob);
+        }
+      }
+      await mergeMessages(chatId, [r.body.message]);
       if (activeChatId === chatId) renderConv();
       renderChatList();
     } else {
@@ -2981,6 +3280,55 @@
   let scanCanvas = null;
   let scanCtx = null;
 
+  // ---------------- resilient CDN script loading (jsQR / qrcodejs) ----------------
+  // Both QR libraries were single static script tags pointed at one CDN each.
+  // On a flaky mobile connection that request can fail once at page load and
+  // never retry, permanently breaking "scan a QR" / "show my QR" for the rest
+  // of that session even after the network recovers — which is exactly what
+  // "QR scanning isn't available right now" meant every time. Load on demand
+  // instead, try more than one mirror, and let a later tap retry instead of
+  // staying stuck on the first failure.
+  const scriptLoadPromises = {};
+  function loadScriptFromMirrors(urls){
+    const key = urls[0];
+    if (scriptLoadPromises[key]) return scriptLoadPromises[key];
+    const attempt = (async () => {
+      let lastErr = null;
+      for (const url of urls){
+        try {
+          await new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = url;
+            s.onload = resolve;
+            s.onerror = () => reject(new Error('failed to load ' + url));
+            document.head.appendChild(s);
+            setTimeout(() => reject(new Error('timed out loading ' + url)), 8000);
+          });
+          return true;
+        } catch(e){ lastErr = e; }
+      }
+      delete scriptLoadPromises[key]; // don't lock in a permanent failure — a later tap can retry
+      throw lastErr || new Error('all mirrors failed');
+    })();
+    scriptLoadPromises[key] = attempt;
+    return attempt;
+  }
+  function ensureJsQR(){
+    if (typeof jsQR === 'function') return Promise.resolve(true);
+    return loadScriptFromMirrors([
+      'https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js',
+      'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js',
+      'https://unpkg.com/jsqr@1.4.0/dist/jsQR.js',
+    ]).then(() => typeof jsQR === 'function');
+  }
+  function ensureQRCodeLib(){
+    if (typeof QRCode !== 'undefined') return Promise.resolve(true);
+    return loadScriptFromMirrors([
+      'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js',
+      'https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js',
+    ]).then(() => typeof QRCode !== 'undefined');
+  }
+
   function stopScan(){
     if (scanRafId){ cancelAnimationFrame(scanRafId); scanRafId = null; }
     if (scanStream){ scanStream.getTracks().forEach(t => t.stop()); scanStream = null; }
@@ -3007,13 +3355,21 @@
   }
 
   async function startScan(){
-    if (typeof jsQR !== 'function'){
-      showSessionBanner("QR scanning isn't available right now — enter the PIN instead.");
-      return;
-    }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
       showSessionBanner("This browser can't access the camera.");
       return;
+    }
+    if (typeof jsQR !== 'function'){
+      try {
+        await ensureJsQR();
+      } catch(e){
+        showSessionBanner("Couldn't load the QR scanner over the network — enter the PIN instead, or try again.");
+        return;
+      }
+      if (typeof jsQR !== 'function'){
+        showSessionBanner("QR scanning isn't available right now — enter the PIN instead.");
+        return;
+      }
     }
     closeModal('dmOverlay');
     openModal('scanOverlay');
