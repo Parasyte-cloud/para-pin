@@ -600,17 +600,30 @@ export default {
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
         if (!env.MEDIA) return json({ error: 'media_not_configured' }, 501);
 
-        const contentType = request.headers.get('content-type') || 'application/octet-stream';
-        if (!contentType.startsWith('image/')) return json({ error: 'unsupported_type' }, 400);
+        let contentType = request.headers.get('content-type') || 'application/octet-stream';
+        // Anything that a browser would treat as *active* content (executes script,
+        // renders as a page in the current origin) gets rejected outright — this is
+        // a shared-file box, not a place to host HTML/SVG that could carry a script.
+        const BLOCKED_TYPES = ['text/html', 'application/xhtml+xml', 'image/svg+xml', 'text/javascript', 'application/javascript', 'application/x-javascript'];
+        if (BLOCKED_TYPES.some((t) => contentType.toLowerCase().startsWith(t))) {
+          return json({ error: 'unsupported_type' }, 400);
+        }
+
+        const fileNameHeader = request.headers.get('x-file-name') || '';
+        let fileName = 'file';
+        try { fileName = decodeURIComponent(fileNameHeader).slice(0, 200) || 'file'; } catch (e) {}
 
         const buf = await request.arrayBuffer();
-        const MAX_BYTES = 8 * 1024 * 1024; // 8MB ceiling — client compresses well under this
+        const MAX_BYTES = 20 * 1024 * 1024; // 20MB ceiling
         if (buf.byteLength === 0) return json({ error: 'empty' }, 400);
         if (buf.byteLength > MAX_BYTES) return json({ error: 'too_large' }, 413);
 
         const key = crypto.randomUUID();
-        await env.MEDIA.put(key, buf, { httpMetadata: { contentType } });
-        return json({ id: key, url: `/api/media/${key}` });
+        await env.MEDIA.put(key, buf, {
+          httpMetadata: { contentType },
+          customMetadata: { fileName },
+        });
+        return json({ id: key, url: `/api/media/${key}`, name: fileName, size: buf.byteLength, mime: contentType });
       }
 
       const mediaMatch = url.pathname.match(/^\/api\/media\/([^/]+)$/);
@@ -618,12 +631,19 @@ export default {
         if (!env.MEDIA) return new Response('not found', { status: 404 });
         const obj = await env.MEDIA.get(mediaMatch[1]);
         if (!obj) return new Response('not found', { status: 404 });
-        return new Response(obj.body, {
-          headers: {
-            'content-type': obj.httpMetadata?.contentType || 'application/octet-stream',
-            'cache-control': 'public, max-age=31536000, immutable',
-          },
-        });
+        const contentType = obj.httpMetadata?.contentType || 'application/octet-stream';
+        const fileName = obj.customMetadata?.fileName || 'file';
+        // Images (and PDFs, which browsers preview in a sandboxed viewer, not the
+        // page origin) render inline; everything else forces a download instead of
+        // whatever the browser might otherwise try to do with it.
+        const inlineOk = contentType.startsWith('image/') || contentType === 'application/pdf';
+        const headers = {
+          'content-type': contentType,
+          'cache-control': 'public, max-age=31536000, immutable',
+          'x-content-type-options': 'nosniff',
+          'content-disposition': `${inlineOk ? 'inline' : 'attachment'}; filename="${fileName.replace(/["\r\n]/g, '_')}"`,
+        };
+        return new Response(obj.body, { headers });
       }
 
       if (request.method === 'POST' && url.pathname === '/api/session') {

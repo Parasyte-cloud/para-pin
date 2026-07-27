@@ -296,11 +296,18 @@
     background:rgba(255,255,255,0.03);
   }
   .attach-preview img{ width:40px; height:40px; object-fit:cover; border-radius:8px; }
+  .attach-preview-icon{ width:40px; height:40px; border-radius:8px; background:rgba(255,255,255,0.08); display:flex; align-items:center; justify-content:center; font-size:20px; flex-shrink:0; }
   .attach-preview-name{ flex:1; font-size:12px; color:var(--text-mid); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
   .msg-image{ display:block; max-width:220px; max-height:280px; border-radius:12px; cursor:pointer; object-fit:cover; }
   .bubble:has(.msg-image){ padding:6px; }
   .bubble:has(.msg-image) .ts{ padding:4px 6px 0; }
+
+  .file-card{ display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:10px; background:rgba(255,255,255,0.07); text-decoration:none; color:inherit; min-width:180px; max-width:240px; }
+  .file-card-icon{ font-size:22px; flex-shrink:0; }
+  .file-card-info{ min-width:0; flex:1; }
+  .file-card-name{ font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-hi, inherit); }
+  .file-card-size{ font-size:11px; color:var(--text-mid); }
 
   .back-btn{ display:none; flex-shrink:0; }
 
@@ -440,12 +447,13 @@
         <div class="messages" id="messages"></div>
         <div id="attachPreviewBar" class="attach-preview" style="display:none;">
           <img id="attachPreviewImg" alt="">
+          <div class="attach-preview-icon" id="attachPreviewIcon" style="display:none;">📄</div>
           <div class="attach-preview-name" id="attachPreviewName"></div>
           <div class="icon-btn" id="attachCancelBtn" title="Remove">×</div>
         </div>
         <div class="composer">
-          <input type="file" id="attachInput" accept="image/*" style="display:none;">
-          <div class="icon-btn attach-btn" id="attachBtn" title="Attach image">📷</div>
+          <input type="file" id="attachInput" style="display:none;">
+          <div class="icon-btn attach-btn" id="attachBtn" title="Attach file">📎</div>
           <textarea id="msgInput" rows="1" placeholder="Message..."></textarea>
           <button class="send-btn" id="sendBtn">➤</button>
         </div>
@@ -932,8 +940,9 @@
     if (m.type === 'system') return m.text;
     if (m.deleted) return (m.fromUserId===myUserId?'You: ':'') + 'Message deleted';
     const prefix = m.fromUserId===myUserId ? 'You: ' : '';
-    if (m.attachment && !m.text) return prefix + '📷 Photo';
-    if (m.attachment) return prefix + '📷 ' + m.text;
+    const isImg = m.attachment && (m.attachment.kind === 'image' || !m.attachment.kind);
+    if (m.attachment && !m.text) return prefix + (isImg ? '📷 Photo' : '📄 ' + (m.attachment.name || 'File'));
+    if (m.attachment) return prefix + (isImg ? '📷 ' : '📄 ') + m.text;
     return prefix + m.text;
   }
 
@@ -1068,7 +1077,18 @@
         inner += `<span class="deleted-label">Message deleted</span>`;
       } else {
         if (m.attachment && m.attachment.url){
-          inner += `<img class="msg-image" src="${escapeHtml(m.attachment.url)}" data-full="${escapeHtml(m.attachment.url)}" alt="Photo">`;
+          const isImg = m.attachment.kind === 'image' || !m.attachment.kind;
+          if (isImg){
+            inner += `<img class="msg-image" src="${escapeHtml(m.attachment.url)}" data-full="${escapeHtml(m.attachment.url)}" alt="Photo">`;
+          } else {
+            const fname = m.attachment.name || 'File';
+            const fsize = m.attachment.size ? fmtFileSize(m.attachment.size) : '';
+            inner += `<a class="file-card" href="${escapeHtml(m.attachment.url)}" target="_blank" rel="noopener" download="${escapeHtml(fname)}">`
+              + `<span class="file-card-icon">${fileKindIcon(m.attachment.mime || '', fname)}</span>`
+              + `<span class="file-card-info"><span class="file-card-name">${escapeHtml(fname)}</span>`
+              + (fsize ? `<span class="file-card-size">${fsize}</span>` : '')
+              + `</span></a>`;
+          }
         }
         if (m.text) inner += escapeHtml(m.text).replace(/\n/g,'<br>');
       }
@@ -1516,11 +1536,28 @@
   });
 
   // ---------------- notifications: sound + badge + browser notification ----------------
+  // Browsers keep a fresh AudioContext suspended until a *real* user gesture
+  // resumes it — and critically, that gesture has to happen before the
+  // context is created for some browsers to count it. Creating it lazily
+  // inside playDing() means the very first ding (often the one that matters
+  // most) can arrive with zero gesture in the call stack and get silently
+  // eaten with no audio and no error. Fix: create/unlock it eagerly on the
+  // PIN keypad press — every single session guarantees a real tap there.
+  function ensureAudioCtx(){
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') audioCtx.resume().catch(()=>{});
+    } catch(e) {}
+  }
+  ['click','keydown','touchstart'].forEach(evt=>{
+    window.addEventListener(evt, ensureAudioCtx, { passive:true });
+  });
+
   // Synthesized two-tone chime — no external audio file to fetch or host.
   function playDing(){
     try {
-      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      if (audioCtx.state === 'suspended') audioCtx.resume();
+      ensureAudioCtx();
+      if (!audioCtx || audioCtx.state !== 'running') return; // still locked — nothing more we can do without a gesture
       const now = audioCtx.currentTime;
       [[880, now], [1320, now + 0.09]].forEach(([freq, start])=>{
         const osc = audioCtx.createOscillator();
@@ -1537,16 +1574,20 @@
       });
     } catch(e) {}
   }
-  // Most browsers keep a fresh AudioContext suspended until a user gesture —
-  // resume it opportunistically so the very first ding isn't silently dropped.
-  ['click','keydown','touchstart'].forEach(evt=>{
-    window.addEventListener(evt, ()=>{ if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); }, { once:true, passive:true });
-  });
 
   const baseTitle = document.title;
   function updateTitleBadge(){
     const total = Object.values(unreadCounts).reduce((a,b)=>a+b, 0);
     document.title = total > 0 ? `(${total > 99 ? '99+' : total}) ${baseTitle}` : baseTitle;
+
+    // Badging API — the actual red-number badge on the home-screen icon (installed
+    // PWA) or dock/taskbar icon. Supported in Safari/Chrome on iOS, Android, macOS,
+    // Windows; silently does nothing where unsupported, so this is a safe no-op
+    // fallback everywhere else — the title/list/tab badges above still work regardless.
+    if ('setAppBadge' in navigator) {
+      if (total > 0) navigator.setAppBadge(total).catch(()=>{});
+      else if ('clearAppBadge' in navigator) navigator.clearAppBadge().catch(()=>{});
+    }
   }
 
   function notifyPermissionOk(){
@@ -1659,8 +1700,29 @@
   const attachInput = document.getElementById('attachInput');
   const attachPreviewBar = document.getElementById('attachPreviewBar');
   const attachPreviewImg = document.getElementById('attachPreviewImg');
+  const attachPreviewIcon = document.getElementById('attachPreviewIcon');
   const attachPreviewName = document.getElementById('attachPreviewName');
   const attachCancelBtn = document.getElementById('attachCancelBtn');
+
+  // Content-Type-capable-of-executing-as-a-page types are rejected client-side too,
+  // so the user gets an instant, friendly message instead of a server round-trip.
+  const BLOCKED_ATTACHMENT_TYPES = ['text/html', 'application/xhtml+xml', 'image/svg+xml', 'text/javascript', 'application/javascript'];
+
+  function fileKindIcon(mime, name){
+    if (mime.startsWith('image/')) return '🖼️';
+    if (mime === 'application/pdf') return '📕';
+    if (/\.(zip|rar|7z)$/i.test(name)) return '🗜️';
+    if (/\.(doc|docx)$/i.test(name) || mime.includes('word')) return '📘';
+    if (/\.(xls|xlsx|csv)$/i.test(name) || mime.includes('sheet') || mime === 'text/csv') return '📗';
+    if (/\.(ppt|pptx)$/i.test(name) || mime.includes('presentation')) return '📙';
+    return '📄';
+  }
+
+  function fmtFileSize(bytes){
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  }
 
   function resizeImageFile(file, maxDim, quality){
     return new Promise((resolve, reject)=>{
@@ -1688,9 +1750,11 @@
   }
 
   function clearAttachment(){
-    if (pendingAttachment) URL.revokeObjectURL(pendingAttachment.url);
+    if (pendingAttachment && pendingAttachment.url) URL.revokeObjectURL(pendingAttachment.url);
     pendingAttachment = null;
     attachPreviewBar.style.display = 'none';
+    attachPreviewImg.style.display = 'none';
+    attachPreviewIcon.style.display = 'none';
     attachPreviewImg.src = '';
   }
 
@@ -1700,19 +1764,37 @@
     const file = attachInput.files[0];
     attachInput.value = '';
     if (!file) return;
-    if (!file.type.startsWith('image/')){ showSessionBanner('Only images are supported right now.'); return; }
-    if (file.size > 20 * 1024 * 1024){ showSessionBanner('That image is too large (20MB max).'); return; }
-    try {
-      const resized = await resizeImageFile(file, 1600, 0.82);
-      clearAttachment();
-      pendingAttachment = { blob: resized.blob, url: URL.createObjectURL(resized.blob), width: resized.width, height: resized.height };
-      attachPreviewImg.src = pendingAttachment.url;
-      attachPreviewName.textContent = file.name + ' — ' + Math.round(resized.blob.size / 1024) + ' KB';
-      attachPreviewBar.style.display = 'flex';
-      msgInput.focus();
-    } catch(e){
-      showSessionBanner("Couldn't process that image — try a different one.");
+    const mime = file.type || 'application/octet-stream';
+    if (BLOCKED_ATTACHMENT_TYPES.some((t)=> mime.toLowerCase().startsWith(t))){
+      showSessionBanner("That file type can't be shared here.");
+      return;
     }
+    if (file.size > 20 * 1024 * 1024){ showSessionBanner('That file is too large (20MB max).'); return; }
+
+    if (mime.startsWith('image/')){
+      try {
+        const resized = await resizeImageFile(file, 1600, 0.82);
+        clearAttachment();
+        pendingAttachment = { blob: resized.blob, url: URL.createObjectURL(resized.blob), width: resized.width, height: resized.height, name: file.name, kind: 'image' };
+        attachPreviewImg.src = pendingAttachment.url;
+        attachPreviewImg.style.display = 'block';
+        attachPreviewName.textContent = file.name + ' — ' + fmtFileSize(resized.blob.size);
+        attachPreviewBar.style.display = 'flex';
+        msgInput.focus();
+      } catch(e){
+        showSessionBanner("Couldn't process that image — try a different one.");
+      }
+      return;
+    }
+
+    // Non-image: upload the raw file, no canvas resizing.
+    clearAttachment();
+    pendingAttachment = { blob: file, url: null, width: null, height: null, name: file.name, kind: 'file' };
+    attachPreviewIcon.textContent = fileKindIcon(mime, file.name);
+    attachPreviewIcon.style.display = 'flex';
+    attachPreviewName.textContent = file.name + ' — ' + fmtFileSize(file.size);
+    attachPreviewBar.style.display = 'flex';
+    msgInput.focus();
   });
 
   async function sendMessage(){
@@ -1745,16 +1827,25 @@
 
     let attachmentPayload = null;
     if (attachment){
+      const mime = attachment.blob.type || (attachment.kind === 'image' ? 'image/jpeg' : 'application/octet-stream');
       const uploadRes = await apiFetch('/upload', {
         method: 'POST',
-        headers: { 'content-type': attachment.blob.type || 'image/jpeg' },
+        headers: { 'content-type': mime, 'x-file-name': encodeURIComponent(attachment.name || 'file') },
         body: attachment.blob,
       });
       if (uploadRes.ok && uploadRes.body.url){
-        attachmentPayload = { url: uploadRes.body.url, width: attachment.width, height: attachment.height, mime: attachment.blob.type };
+        attachmentPayload = {
+          url: uploadRes.body.url,
+          width: attachment.width,
+          height: attachment.height,
+          mime,
+          name: attachment.name,
+          size: attachment.blob.size,
+          kind: attachment.kind,
+        };
       } else {
         sendBtn.disabled = false;
-        showSessionBanner("Couldn't upload the image — try again.");
+        showSessionBanner(`Couldn't upload the ${attachment.kind === 'image' ? 'image' : 'file'} — try again.`);
         return;
       }
     }
