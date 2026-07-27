@@ -320,6 +320,17 @@ export class UserChannel {
       };
       server.addEventListener('close', cleanup);
       server.addEventListener('error', cleanup);
+      // Heartbeat only — this socket is otherwise server-to-client-only
+      // (it exists purely to push "you have a message" pings). The client
+      // uses the pong to detect a mobile connection that's silently died
+      // while still reporting itself as open.
+      server.addEventListener('message', (ev) => {
+        let data;
+        try { data = JSON.parse(ev.data); } catch (e) { return; }
+        if (data.type === 'ping') {
+          try { server.send(JSON.stringify({ type: 'pong' })); } catch (e) {}
+        }
+      });
       return new Response(null, { status: 101, webSocket: client });
     }
 
@@ -470,15 +481,19 @@ export class ChatRoom {
       server.addEventListener('close', cleanup);
       server.addEventListener('error', cleanup);
 
-      // The only thing a client pushes *to* us over this socket is an
-      // ephemeral "I'm typing" ping — everything else (send, delete, read)
-      // goes through HTTP so it's reliable/persisted even if the socket
+      // The only things a client pushes *to* us over this socket are an
+      // ephemeral "I'm typing" ping and a heartbeat ping (the client uses the
+      // pong to tell a genuinely dead-but-still-"open" mobile connection
+      // apart from one that's just quiet) — everything else (send, delete,
+      // read) goes through HTTP so it's reliable/persisted even if the socket
       // happens to be reconnecting at that moment.
       server.addEventListener('message', (ev) => {
         let data;
         try { data = JSON.parse(ev.data); } catch (e) { return; }
         if (data.type === 'typing' && userId) {
           this.broadcast(JSON.stringify({ type: 'typing', userId, name }), server);
+        } else if (data.type === 'ping') {
+          try { server.send(JSON.stringify({ type: 'pong' })); } catch (e) {}
         }
       });
 
