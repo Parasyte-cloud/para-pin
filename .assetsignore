@@ -1,0 +1,14 @@
+# Files here are excluded from the Cloudflare Workers static assets upload
+# (assets.directory is "." in wrangler.jsonc, so without this, wrangler tries
+# to upload the entire repo — including node_modules and the Capacitor
+# mobile/ project — which is how a 45MB workerd binary ended up getting
+# shipped as a "static asset" and hit the 25MB per-file limit).
+node_modules/
+mobile/
+.git/
+.wrangler/
+.gitignore
+.assetsignore
+README.md
+worker.js
+wrangler.jsonc
