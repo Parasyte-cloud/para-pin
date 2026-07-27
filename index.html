@@ -207,20 +207,31 @@
   .conv-head{ padding:16px 20px; display:flex; align-items:center; gap:12px; border-bottom:1px solid var(--glass-brd); }
   .conv-head .avatar{ width:38px; height:38px; border-radius:12px; font-size:13px; }
   .conv-title{ font-size:15px; font-weight:700; }
-  .conv-sub{ font-size:11px; color:var(--text-low); }
+  .conv-sub{ font-size:11px; color:var(--text-low); cursor:default; }
+  .conv-sub.typing{ color:var(--ice); }
 
   .messages{ flex:1; overflow-y:auto; padding:22px 26px; display:flex; flex-direction:column; gap:10px; }
   .day-sep{ align-self:center; font-size:10.5px; color:var(--text-low); background:rgba(255,255,255,0.04); padding:3px 12px; border-radius:20px; margin:10px 0; letter-spacing:.05em; }
   .bubble-row{ display:flex; gap:8px; max-width:68%; }
   .bubble-row.me{ align-self:flex-end; flex-direction:row-reverse; }
   .bubble{
-    padding:10px 14px; border-radius:16px; font-size:13.5px; line-height:1.45; word-wrap:break-word;
+    position:relative; padding:10px 30px 10px 14px; border-radius:16px; font-size:13.5px; line-height:1.45; word-wrap:break-word;
     border:1px solid var(--glass-brd);
   }
-  .bubble-row:not(.me) .bubble{ background:rgba(255,255,255,0.05); border-top-left-radius:4px; }
+  .bubble-row:not(.me) .bubble{ background:rgba(255,255,255,0.05); border-top-left-radius:4px; padding-right:14px; }
   .bubble-row.me .bubble{ background:linear-gradient(135deg, rgba(0,212,255,0.22), rgba(255,106,0,0.16)); border-top-right-radius:4px; border-color:rgba(0,212,255,0.25); }
+  .bubble.deleted{ font-style:italic; opacity:.6; padding-right:14px; }
   .bubble .from{ font-size:10.5px; font-weight:700; color:var(--ice); margin-bottom:2px; display:block; }
-  .bubble .ts{ font-size:9.5px; color:var(--text-low); margin-top:4px; display:block; text-align:right; }
+  .bubble .ts{ font-size:9.5px; color:var(--text-low); margin-top:4px; display:flex; align-items:center; justify-content:flex-end; gap:4px; }
+  .bubble .tick{ font-size:10px; color:var(--text-low); letter-spacing:-1px; }
+  .bubble .tick.read{ color:var(--ice); }
+  .deleted-label{ color:var(--text-low); }
+  .msg-delete{
+    position:absolute; top:4px; right:6px; width:16px; height:16px; border-radius:50%;
+    display:flex; align-items:center; justify-content:center; font-size:12px; line-height:1;
+    color:var(--text-low); cursor:pointer; opacity:.55;
+  }
+  .msg-delete:hover{ opacity:1; color:#ff6a6a; background:rgba(255,255,255,0.08); }
 
   .empty-state{ flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; color:var(--text-low); }
   .empty-state .app-icon{ width:52px; height:52px; opacity:.5; }
@@ -268,8 +279,8 @@
        a no-op there. */
     .conv-head{ padding:calc(12px + env(safe-area-inset-top, 0px)) 14px 12px; gap:10px; }
     .sidebar-head{ padding-top:calc(18px + env(safe-area-inset-top, 0px)); }
-    .composer{ padding-bottom:calc(14px + env(safe-area-inset-bottom, 0px)); }
-    .sidebar-foot{ padding-bottom:calc(12px + env(safe-area-inset-bottom, 0px)); }
+    .composer{ padding-bottom:calc(10px + env(safe-area-inset-bottom, 0px)); }
+    .sidebar-foot{ padding-bottom:calc(8px + env(safe-area-inset-bottom, 0px)); }
   }
 
   /* ---------- modal ---------- */
@@ -423,6 +434,19 @@
   </div>
 </div>
 
+<!-- ============ GROUP MEMBERS MODAL ============ -->
+<div class="overlay" id="membersOverlay">
+  <div class="modal lg">
+    <h3 id="membersTitle">Group members</h3>
+    <div class="hint">Everyone in this group.</div>
+    <div class="contact-pick" id="membersList" style="max-height:280px;"></div>
+    <div class="modal-actions">
+      <div class="btn" id="leaveGroupBtn" style="color:#ff6a6a;">Leave group</div>
+      <div class="btn primary" onclick="closeModal('membersOverlay')">Done</div>
+    </div>
+  </div>
+</div>
+
 <!-- ============ DISPLAY NAME MODAL ============ -->
 <div class="overlay" id="nameOverlay">
   <div class="modal lg">
@@ -517,6 +541,11 @@
   let notifyReconnectAttempts = 0;
   let unreadCounts = {};
   let audioCtx = null;
+  let readState = {};       // chatId -> { userId: lastReadTs }
+  let typingUsers = {};     // chatId -> { userId: name }
+  let typingClearTimers = {}; // chatId -> timeout id
+  let lastTypingSentAt = 0;
+  let convSubOverride = null; // transient "X is typing..." swap-in for the active chat
 
   async function apiFetch(path, opts = {}){
     const headers = { 'content-type': 'application/json', ...(opts.headers || {}) };
@@ -893,12 +922,22 @@
     appEl.classList.add('show-chat');
     renderAvatar(convAvatar, name, chat.type==='group');
     convTitle.textContent = name;
-    convSub.textContent = chat.type === 'group'
-      ? chat.memberIds.length + ' members'
-      : 'Direct message';
+
+    const typing = typingUsers[chat.id];
+    const typingNames = typing ? Object.values(typing) : [];
+    if (typingNames.length){
+      convSub.textContent = (typingNames.length === 1 ? typingNames[0] : typingNames.join(', ')) + ' typing…';
+      convSub.classList.add('typing');
+    } else {
+      convSub.classList.remove('typing');
+      convSub.textContent = chat.type === 'group'
+        ? chat.memberIds.length + ' members — tap to view'
+        : 'Direct message';
+    }
 
     messagesEl.innerHTML = '';
     const msgs = messagesByChat[chat.id] || [];
+    const otherReadTs = otherMemberLastRead(chat);
     let lastDay = '';
     msgs.forEach(m=>{
       const day = fmtDay(m.ts);
@@ -913,19 +952,100 @@
       const row = document.createElement('div');
       row.className = 'bubble-row' + (isMe ? ' me' : '');
       const bubble = document.createElement('div');
-      bubble.className = 'bubble';
+      bubble.className = 'bubble' + (m.deleted ? ' deleted' : '');
       let inner = '';
       if (chat.type === 'group' && !isMe){
         inner += `<span class="from">${escapeHtml(m.fromName || userNameCache[m.fromUserId] || 'PArA PIN user')}</span>`;
       }
-      inner += escapeHtml(m.text).replace(/\n/g,'<br>');
-      inner += `<span class="ts">${fmtTime(m.ts)}</span>`;
+      if (m.deleted){
+        inner += `<span class="deleted-label">Message deleted</span>`;
+      } else {
+        inner += escapeHtml(m.text).replace(/\n/g,'<br>');
+      }
+      inner += `<span class="ts">${fmtTime(m.ts)}`;
+      if (isMe && !m.deleted && chat.type === 'dm'){
+        inner += `<span class="tick ${otherReadTs >= m.ts ? 'read' : ''}">${otherReadTs >= m.ts ? '✓✓' : '✓'}</span>`;
+      }
+      inner += `</span>`;
       bubble.innerHTML = inner;
+      if (isMe && !m.deleted){
+        const delBtn = document.createElement('div');
+        delBtn.className = 'msg-delete';
+        delBtn.title = 'Delete message';
+        delBtn.textContent = '×';
+        delBtn.dataset.id = m.id;
+        bubble.appendChild(delBtn);
+      }
       row.appendChild(bubble);
       messagesEl.appendChild(row);
     });
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
+
+  messagesEl.addEventListener('click', async (e)=>{
+    const btn = e.target.closest('.msg-delete');
+    if (!btn || !activeChatId) return;
+    const messageId = btn.dataset.id;
+    if (!confirm('Delete this message? This can\'t be undone.')) return;
+    const chatId = activeChatId;
+    const r = await apiFetch(`/chats/${chatId}/messages/${messageId}`, { method: 'DELETE' });
+    if (r.ok){
+      const msgs = messagesByChat[chatId];
+      const m = msgs && msgs.find(mm => mm.id === messageId);
+      if (m){ m.deleted = true; m.text = ''; }
+      if (activeChatId === chatId) renderConv();
+      renderChatList();
+    }
+  });
+
+  // ---------------- group members / leave group ----------------
+  const membersOverlay = document.getElementById('membersOverlay');
+  const membersList = document.getElementById('membersList');
+  const membersTitle = document.getElementById('membersTitle');
+  const leaveGroupBtn = document.getElementById('leaveGroupBtn');
+
+  convSub.style.cursor = 'pointer';
+  convSub.addEventListener('click', async ()=>{
+    const chat = getChat(activeChatId);
+    if (!chat || chat.type !== 'group') return;
+    await ensureNamesLoaded();
+    membersTitle.textContent = chatDisplayName(chat) + ' — ' + chat.memberIds.length + ' members';
+    membersList.innerHTML = '';
+    chat.memberIds.forEach(id=>{
+      const isMe = id === myUserId;
+      const name = isMe ? (myDisplayName || 'You') : (userNameCache[id] || 'PArA PIN user');
+      const row = document.createElement('div');
+      row.className = 'pick-row';
+      row.style.cursor = 'default';
+      const av = document.createElement('div');
+      av.className = 'avatar';
+      renderAvatar(av, name, false);
+      row.appendChild(av);
+      const nm = document.createElement('div');
+      nm.className = 'pname';
+      nm.textContent = name + (isMe ? ' (you)' : '');
+      row.appendChild(nm);
+      membersList.appendChild(row);
+    });
+    openModal('membersOverlay');
+  });
+
+  leaveGroupBtn.addEventListener('click', async ()=>{
+    const chat = getChat(activeChatId);
+    if (!chat) return;
+    if (!confirm('Leave "' + chatDisplayName(chat) + '"? You\'ll lose access to this group\'s history.')) return;
+    const r = await apiFetch('/groups/leave', { method: 'POST', body: JSON.stringify({ chatId: chat.id }) });
+    if (r.ok){
+      sessionChats = sessionChats.filter(c => c.id !== chat.id);
+      delete messagesByChat[chat.id];
+      delete unreadCounts[chat.id];
+      activeChatId = null;
+      if (activeSocket) { activeSocket.close(); activeSocket = null; }
+      closeModal('membersOverlay');
+      renderConv();
+      renderChatList();
+    }
+  });
 
   async function renderApp(){
     mePinLabel.textContent = 'PArA PIN active';
@@ -992,9 +1112,37 @@
     const r = await apiFetch(`/chats/${chatId}/messages`);
     if (r.ok && r.body.messages) mergeMessages(chatId, r.body.messages);
     else if (!(chatId in messagesByChat)) messagesByChat[chatId] = [];
+    convSubOverride = null;
     renderConv();
     renderChatList();
     connectSocket(chatId);
+    refreshReadState(chatId);
+    markChatRead(chatId);
+  }
+
+  // ---------------- read receipts (DMs only — group "seen by" gets ambiguous fast) ----------------
+  async function refreshReadState(chatId){
+    const r = await apiFetch(`/chats/${chatId}/read-state`);
+    if (r.ok && r.body.reads){
+      readState[chatId] = r.body.reads;
+      if (activeChatId === chatId) renderConv();
+    }
+  }
+
+  async function markChatRead(chatId){
+    const msgs = messagesByChat[chatId];
+    if (!msgs || !msgs.length || !myUserId) return;
+    const upToTs = msgs[msgs.length - 1].ts;
+    readState[chatId] = readState[chatId] || {};
+    readState[chatId][myUserId] = Math.max(readState[chatId][myUserId] || 0, upToTs);
+    await apiFetch(`/chats/${chatId}/read`, { method: 'POST', body: JSON.stringify({ upToTs }) });
+  }
+
+  function otherMemberLastRead(chat){
+    if (!chat || chat.type !== 'dm') return 0;
+    const otherId = chat.memberIds.find(id => id !== myUserId);
+    const reads = readState[chat.id];
+    return (reads && reads[otherId]) || 0;
   }
 
   function connectSocket(chatId){
@@ -1012,6 +1160,29 @@
       try { data = JSON.parse(ev.data); } catch(e){ return; }
       if (data.type === 'message'){
         mergeMessages(chatId, [data.message]);
+        if (activeChatId === chatId) renderConv();
+        renderChatList();
+        if (activeChatId === chatId && document.visibilityState === 'visible') markChatRead(chatId);
+      } else if (data.type === 'typing'){
+        if (data.userId === myUserId) return;
+        typingUsers[chatId] = typingUsers[chatId] || {};
+        typingUsers[chatId][data.userId] = data.name || 'Someone';
+        if (typingClearTimers[chatId]) clearTimeout(typingClearTimers[chatId]);
+        typingClearTimers[chatId] = setTimeout(()=>{
+          delete typingUsers[chatId];
+          if (activeChatId === chatId) renderConv();
+        }, 3000);
+        if (activeChatId === chatId) renderConv();
+      } else if (data.type === 'read_receipt'){
+        readState[chatId] = readState[chatId] || {};
+        readState[chatId][data.userId] = data.upToTs;
+        if (activeChatId === chatId) renderConv();
+      } else if (data.type === 'delete'){
+        const msgs = messagesByChat[chatId];
+        if (msgs){
+          const m = msgs.find(mm => mm.id === data.messageId);
+          if (m){ m.deleted = true; m.text = ''; }
+        }
         if (activeChatId === chatId) renderConv();
         renderChatList();
       }
@@ -1046,13 +1217,16 @@
     if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN || activeSocketChatId !== activeChatId){
       openChat(activeChatId);
     } else {
-      apiFetch(`/chats/${activeChatId}/messages`).then(r=>{
+      const chatId = activeChatId;
+      apiFetch(`/chats/${chatId}/messages`).then(r=>{
         if (r.ok && r.body.messages){
-          mergeMessages(activeChatId, r.body.messages);
-          renderConv();
+          mergeMessages(chatId, r.body.messages);
+          if (activeChatId === chatId) renderConv();
           renderChatList();
         }
       });
+      refreshReadState(chatId);
+      markChatRead(chatId);
     }
   });
   window.addEventListener('focus', ()=>{
@@ -1189,7 +1363,17 @@
   msgInput.addEventListener('input', ()=>{
     msgInput.style.height = 'auto';
     msgInput.style.height = Math.min(msgInput.scrollHeight, 120) + 'px';
+    sendTypingPing();
   });
+
+  // Throttled — one ping at most every 2s while actively typing, not per keystroke.
+  function sendTypingPing(){
+    if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN || !activeChatId) return;
+    const now = Date.now();
+    if (now - lastTypingSentAt < 2000) return;
+    lastTypingSentAt = now;
+    try { activeSocket.send(JSON.stringify({ type: 'typing' })); } catch(e) {}
+  }
 
   // ---------------- new DM (by PIN) ----------------
   const dmOverlay = document.getElementById('dmOverlay');

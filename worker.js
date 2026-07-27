@@ -136,6 +136,21 @@ export class Registry {
       return json({ ok: true, userId: user.id, displayName: user.displayName, chat });
     }
 
+    if (request.method === 'POST' && url.pathname === '/leave-group') {
+      const { pinHash, chatId } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ ok: false, error: 'not_registered' }, 401);
+      const chat = await this.state.storage.get(`chat:${chatId}`);
+      if (!chat || chat.type !== 'group' || !chat.memberIds.includes(user.id)) {
+        return json({ ok: false, error: 'not_found' }, 404);
+      }
+      chat.memberIds = chat.memberIds.filter((id) => id !== user.id);
+      await this.state.storage.put(`chat:${chatId}`, chat);
+      const myChats = (await this.state.storage.get(`userChats:${user.id}`)) || [];
+      await this.state.storage.put(`userChats:${user.id}`, myChats.filter((id) => id !== chatId));
+      return json({ ok: true, chat });
+    }
+
     if (request.method === 'GET' && url.pathname === '/whoami') {
       const pinHash = url.searchParams.get('pinHash');
       const user = await this.state.storage.get(`user:${pinHash}`);
@@ -194,7 +209,7 @@ export class ChatRoom {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.sessions = new Set();
+    this.sessions = new Map(); // ws -> { userId, name }
     this.messages = null;
   }
 
@@ -205,6 +220,17 @@ export class ChatRoom {
     return this.messages;
   }
 
+  broadcast(payload, exceptWs) {
+    for (const [ws] of this.sessions) {
+      if (ws === exceptWs) continue;
+      try {
+        ws.send(payload);
+      } catch (e) {
+        this.sessions.delete(ws);
+      }
+    }
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
 
@@ -212,16 +238,41 @@ export class ChatRoom {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
       server.accept();
-      this.sessions.add(server);
+      const userId = url.searchParams.get('userId') || null;
+      const name = url.searchParams.get('name') || null;
+      this.sessions.set(server, { userId, name });
+
       const cleanup = () => this.sessions.delete(server);
       server.addEventListener('close', cleanup);
       server.addEventListener('error', cleanup);
+
+      // The only thing a client pushes *to* us over this socket is an
+      // ephemeral "I'm typing" ping — everything else (send, delete, read)
+      // goes through HTTP so it's reliable/persisted even if the socket
+      // happens to be reconnecting at that moment.
+      server.addEventListener('message', (ev) => {
+        let data;
+        try { data = JSON.parse(ev.data); } catch (e) { return; }
+        if (data.type === 'typing' && userId) {
+          this.broadcast(JSON.stringify({ type: 'typing', userId, name }), server);
+        }
+      });
+
       return new Response(null, { status: 101, webSocket: client });
     }
 
     if (request.method === 'GET' && url.pathname === '/messages') {
       const msgs = await this.loadMessages();
       return json({ messages: msgs });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/read-state') {
+      const ids = (url.searchParams.get('ids') || '').split(',').filter(Boolean);
+      const reads = {};
+      for (const id of ids) {
+        reads[id] = (await this.state.storage.get(`lastRead:${id}`)) || 0;
+      }
+      return json({ reads });
     }
 
     if (request.method === 'POST' && url.pathname === '/messages') {
@@ -239,15 +290,31 @@ export class ChatRoom {
       if (msgs.length > 500) msgs.splice(0, msgs.length - 500);
       await this.state.storage.put('messages', msgs);
 
-      const payload = JSON.stringify({ type: 'message', message: msg });
-      for (const ws of this.sessions) {
-        try {
-          ws.send(payload);
-        } catch (e) {
-          this.sessions.delete(ws);
-        }
-      }
+      this.broadcast(JSON.stringify({ type: 'message', message: msg }), null);
       return json({ message: msg });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/read') {
+      const { userId, upToTs } = await request.json();
+      if (!userId) return json({ error: 'missing_user' }, 400);
+      const ts = Number(upToTs) || Date.now();
+      const prev = (await this.state.storage.get(`lastRead:${userId}`)) || 0;
+      if (ts > prev) await this.state.storage.put(`lastRead:${userId}`, ts);
+      this.broadcast(JSON.stringify({ type: 'read_receipt', userId, upToTs: Math.max(ts, prev) }), null);
+      return json({ ok: true });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/delete') {
+      const { userId, messageId } = await request.json();
+      const msgs = await this.loadMessages();
+      const msg = msgs.find((m) => m.id === messageId);
+      if (!msg) return json({ error: 'not_found' }, 404);
+      if (msg.fromUserId !== userId) return json({ error: 'forbidden' }, 403);
+      msg.text = '';
+      msg.deleted = true;
+      await this.state.storage.put('messages', msgs);
+      this.broadcast(JSON.stringify({ type: 'delete', messageId }), null);
+      return json({ ok: true, message: msg });
     }
 
     return new Response('not found', { status: 404 });
@@ -316,8 +383,39 @@ export default {
         return res;
       }
 
-      // /api/chats/:id/messages  and  /api/chats/:id/ws
-      const chatMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/(messages|ws)$/);
+      if (request.method === 'POST' && url.pathname === '/api/groups/leave') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const { chatId } = await request.json();
+        const res = await registryStub.fetch('https://internal/leave-group', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, chatId }),
+        });
+        return res;
+      }
+
+      // /api/chats/:id/messages/:messageId  (DELETE a message)
+      const deleteMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/messages\/([^/]+)$/);
+      if (deleteMatch && request.method === 'DELETE') {
+        const [, chatId, messageId] = deleteMatch;
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const verifyRes = await registryStub.fetch(
+          `https://internal/verify-member?pinHash=${encodeURIComponent(pinHash)}&chatId=${encodeURIComponent(chatId)}`
+        );
+        const verify = await verifyRes.json();
+        if (!verify.ok) return json({ error: 'forbidden' }, 403);
+        const roomStub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(chatId));
+        const res = await roomStub.fetch('https://internal/delete', {
+          method: 'POST',
+          body: JSON.stringify({ userId: verify.userId, messageId }),
+        });
+        const resBody = await res.json();
+        return json(resBody, res.status);
+      }
+
+      // /api/chats/:id/messages, /api/chats/:id/ws, /api/chats/:id/read, /api/chats/:id/read-state
+      const chatMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/(messages|ws|read|read-state)$/);
       if (chatMatch) {
         const [, chatId, action] = chatMatch;
         const pinHash = authHash(request, url);
@@ -332,14 +430,34 @@ export default {
         const roomStub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(chatId));
 
         if (action === 'ws') {
-          return roomStub.fetch(request);
+          // Inject the verified identity as query params so the ChatRoom DO
+          // knows who owns this socket (needed for typing pings) without
+          // trusting anything the client itself claims.
+          const wsUrl = new URL(request.url);
+          wsUrl.searchParams.set('userId', verify.userId);
+          wsUrl.searchParams.set('name', verify.displayName || '');
+          const wsRequest = new Request(wsUrl.toString(), request);
+          return roomStub.fetch(wsRequest);
         }
 
-        if (request.method === 'GET') {
+        if (action === 'read-state') {
+          return roomStub.fetch(`https://internal/read-state?ids=${encodeURIComponent((verify.chat.memberIds || []).join(','))}`);
+        }
+
+        if (action === 'read' && request.method === 'POST') {
+          const { upToTs } = await request.json().catch(() => ({}));
+          const res = await roomStub.fetch('https://internal/read', {
+            method: 'POST',
+            body: JSON.stringify({ userId: verify.userId, upToTs: upToTs || Date.now() }),
+          });
+          return res;
+        }
+
+        if (action === 'messages' && request.method === 'GET') {
           return roomStub.fetch('https://internal/messages');
         }
 
-        if (request.method === 'POST') {
+        if (action === 'messages' && request.method === 'POST') {
           const { text } = await request.json();
           const res = await roomStub.fetch('https://internal/messages', {
             method: 'POST',
