@@ -31,6 +31,47 @@ self.addEventListener('fetch', (e) => {
   );
 });
 
+// ---- App icon badge count, persisted across service-worker restarts ----
+// The Service Worker gets evicted between events, so a plain in-memory
+// variable would forget the count between pushes. IndexedDB is the one
+// storage API available in this scope that survives that.
+function badgeDb(){
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('para-pin-badge', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('kv');
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function getBadgeCount(){
+  try {
+    const db = await badgeDb();
+    return await new Promise((resolve) => {
+      const tx = db.transaction('kv', 'readonly');
+      const r = tx.objectStore('kv').get('count');
+      r.onsuccess = () => resolve(r.result || 0);
+      r.onerror = () => resolve(0);
+    });
+  } catch (e) { return 0; }
+}
+async function setBadgeCount(count){
+  try {
+    const db = await badgeDb();
+    await new Promise((resolve) => {
+      const tx = db.transaction('kv', 'readwrite');
+      tx.objectStore('kv').put(count, 'count');
+      tx.oncomplete = resolve;
+      tx.onerror = resolve;
+    });
+  } catch (e) {}
+  if ('setAppBadge' in self.navigator) {
+    try {
+      if (count > 0) await self.navigator.setAppBadge(count);
+      else await self.navigator.clearAppBadge();
+    } catch (e) {}
+  }
+}
+
 // ---- Web Push: fires even when no PArA PIN tab is open at all ----
 self.addEventListener('push', (event) => {
   let data = {};
@@ -43,17 +84,38 @@ self.addEventListener('push', (event) => {
     tag: data.chatId ? 'parapin-' + data.chatId : 'parapin',
     data: { chatId: data.chatId || null },
   };
-  event.waitUntil(self.registration.showNotification(title, options));
+  event.waitUntil((async () => {
+    await self.registration.showNotification(title, options);
+    // A page that's actually open and visible keeps its own accurate badge
+    // count already (see index.html's updateTitleBadge) and will stomp on
+    // whatever we set here the moment it handles the message itself — so
+    // only take over the icon badge when nothing visible is around to do it.
+    const clientList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    const hasVisible = clientList.some((c) => c.visibilityState === 'visible');
+    if (!hasVisible) {
+      const next = (await getBadgeCount()) + 1;
+      await setBadgeCount(next);
+    }
+  })());
 });
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
-      for (const client of clientList) {
-        if ('focus' in client) return client.focus();
-      }
-      if (self.clients.openWindow) return self.clients.openWindow('/');
-    })
-  );
+  event.waitUntil((async () => {
+    const clientList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const client of clientList) {
+      if ('focus' in client) { await client.focus(); return; }
+    }
+    if (self.clients.openWindow) await self.clients.openWindow('/');
+  })());
+});
+
+// The open app tells us its real unread total whenever it changes (see
+// syncBadgeToServiceWorker in index.html) — that's the source of truth;
+// this just keeps our own counter from drifting once the app is closed
+// again and push events start incrementing it on their own.
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'set-badge-count') {
+    event.waitUntil(setBadgeCount(Number(event.data.count) || 0));
+  }
 });

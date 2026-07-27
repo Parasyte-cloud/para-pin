@@ -1694,6 +1694,14 @@
       if (total > 0) navigator.setAppBadge(total).catch(()=>{});
       else if ('clearAppBadge' in navigator) navigator.clearAppBadge().catch(()=>{});
     }
+    // This page only runs while it's open/foregrounded — the moment it's
+    // backgrounded or closed, the service worker takes over bumping the icon
+    // badge on each push (since that's the only thing still running then).
+    // Hand it our real count every time it changes so it starts from the
+    // right number instead of whatever it last guessed while we were away.
+    if ('serviceWorker' in navigator && navigator.serviceWorker.controller){
+      navigator.serviceWorker.controller.postMessage({ type: 'set-badge-count', count: total });
+    }
   }
 
   function notifyPermissionOk(){
