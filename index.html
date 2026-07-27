@@ -733,7 +733,9 @@
       <input type="checkbox" id="profileAlwaysBannerInput" style="width:auto;">
       Always show a notification banner, even while I'm using the app
     </label>
-    <div class="btn" id="approveDeviceOpenBtn" style="margin-top:14px;">Approve a new device</div>
+    <div class="hint" id="profileDeviceStatus" style="margin-top:14px; margin-bottom:0; color:#7ee08a;"></div>
+    <div class="btn" id="approveDeviceOpenBtn" style="margin-top:10px;">Approve a new device</div>
+    <div class="hint" style="margin-top:8px; margin-bottom:0; color:#ffb84d;">Heads up: end-to-end encryption keys aren't synced across devices yet. A second approved device may not be able to decrypt existing group chats, and can cause your other device to temporarily lose sync on some conversations. Safe to use for sign-in; message history may be inconsistent between devices until this is fixed.</div>
     <div class="modal-actions">
       <div class="btn" onclick="closeModal('profileOverlay')">Cancel</div>
       <div class="btn primary" id="profileSaveBtn">Save</div>
@@ -768,7 +770,7 @@
     </div>
     <div class="hint" id="deviceApprovalError" style="display:none; color:#ff6a6a;"></div>
     <div class="modal-actions">
-      <div class="btn" onclick="closeModal('deviceApprovalOverlay')">Close</div>
+      <div class="btn" onclick="window.closeDeviceApprovalFlow()">Close</div>
     </div>
   </div>
 </div>
@@ -950,6 +952,7 @@
   let myPinHash = null;
   let myUserId = null;
   let myDisplayName = null;
+  let myTrustedDeviceCount = 1;
   let userNameCache = {};
   let messagesByChat = {};
   let activeSocket = null;
@@ -1070,6 +1073,7 @@
     myAvatarUrl = r.body.avatarUrl || null;
     myDepartment = r.body.department || null;
     iAmAdmin = !!r.body.isAdmin;
+    myTrustedDeviceCount = r.body.trustedDeviceCount || 1;
     sessionChats = r.body.chats || [];
     activeChatId = null;
     messagesByChat = {};
@@ -1155,6 +1159,14 @@
     document.getElementById('deviceApprovalIntro').textContent = "This PIN is already set up on another device. Ask whoever has it to approve this one.";
     openModal('deviceApprovalOverlay');
   }
+  // Dismissing this modal manually must also stop the status poll — otherwise
+  // it keeps hitting the API every 4s in the background indefinitely even
+  // after the person has given up and closed it.
+  window.closeDeviceApprovalFlow = function(){
+    clearInterval(deviceApprovalPollTimer);
+    deviceApprovalPollTimer = null;
+    closeModal('deviceApprovalOverlay');
+  };
   document.getElementById('deviceApprovalRequestBtn').addEventListener('click', async function(){
     const btn = this;
     const errEl = document.getElementById('deviceApprovalError');
@@ -1989,6 +2001,8 @@
     pendingProfilePhoto = null;
     renderProfilePhotoPreview(myAvatarUrl);
     profileAlwaysBannerInput.checked = alwaysShowBanner;
+    const n = myTrustedDeviceCount;
+    document.getElementById('profileDeviceStatus').textContent = `✓ This device is trusted. ${n} device${n === 1 ? '' : 's'} trusted on this account.`;
     openModal('profileOverlay');
   }
 

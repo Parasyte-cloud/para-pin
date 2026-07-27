@@ -224,16 +224,17 @@ export class Registry {
           await this.state.storage.put('admins', [user.id]);
         }
         await this.state.storage.put('anyUserExists', true);
-      } else if (displayName && !user.displayName) {
-        user.displayName = displayName;
-        await this.state.storage.put(`user:${pinHash}`, user);
-        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: (user.deviceIds || []).length > 0 });
       }
       if (!Array.isArray(user.deviceIds)) {
         // migrate the old single-deviceId shape from before multi-device trust existed
         user.deviceIds = user.deviceId ? [user.deviceId] : [];
         delete user.deviceId;
         await this.state.storage.put(`user:${pinHash}`, user);
+      }
+      if (displayName && !user.displayName) {
+        user.displayName = displayName;
+        await this.state.storage.put(`user:${pinHash}`, user);
+        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: user.deviceIds.length > 0, deviceCount: user.deviceIds.length });
       }
 
       // Device trust: the PIN alone isn't enough to sign in from a device
@@ -250,7 +251,7 @@ export class Registry {
         if (user.deviceIds.length === 0) {
           user.deviceIds = [deviceId];
           await this.state.storage.put(`user:${pinHash}`, user);
-          await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: true });
+          await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: true, deviceCount: 1 });
           await this.state.storage.put(`userIdToPinHash:${user.id}`, pinHash);
         } else {
           return json({ error: 'device_approval_required' }, 403);
@@ -310,6 +311,11 @@ export class Registry {
         isAdmin: admins.includes(user.id),
         e2eePublicKey: user.e2eePublicKey || null,
         mustChangePin: !!user.mustChangePin,
+        // Reaching this response at all means the current device already
+        // passed the trust check above — the count is just so the person can
+        // see, e.g., "2 devices" after approving a second one, without
+        // needing admin access.
+        trustedDeviceCount: user.deviceIds.length,
         chats,
         summaries,
       });
@@ -323,7 +329,7 @@ export class Registry {
       if (typeof avatarUrl === 'string' || avatarUrl === null) user.avatarUrl = avatarUrl ? String(avatarUrl).slice(0, 500) : null;
       if (typeof department === 'string') user.department = department.trim().slice(0, 60) || null;
       await this.state.storage.put(`user:${user.pinHash}`, user);
-      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: !!user.deviceId });
+      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: Array.isArray(user.deviceIds) && user.deviceIds.length > 0, deviceCount: Array.isArray(user.deviceIds) ? user.deviceIds.length : 0 });
       return json({ ok: true, displayName: user.displayName, avatarUrl: user.avatarUrl || null, department: user.department || null });
     }
 
@@ -340,7 +346,7 @@ export class Registry {
       }
       user.e2eePublicKey = publicKey;
       await this.state.storage.put(`user:${user.pinHash}`, user);
-      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey, hasDeviceLock: !!user.deviceId });
+      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey, hasDeviceLock: Array.isArray(user.deviceIds) && user.deviceIds.length > 0, deviceCount: Array.isArray(user.deviceIds) ? user.deviceIds.length : 0 });
       return json({ ok: true });
     }
 
