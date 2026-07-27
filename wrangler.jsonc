@@ -1,28 +1,51 @@
 {
-  "name": "para-pin",
-  "compatibility_date": "2025-01-01",
-  "main": "worker.js",
-  "assets": {
-    "directory": ".",
-    "binding": "ASSETS",
-    "not_found_handling": "single-page-application"
-  },
-  "durable_objects": {
-    "bindings": [
-      { "name": "REGISTRY", "class_name": "Registry" },
-      { "name": "CHAT_ROOM", "class_name": "ChatRoom" },
-      { "name": "USER_CHANNEL", "class_name": "UserChannel" }
-    ]
-  },
-  "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["Registry", "ChatRoom"] },
-    { "tag": "v2", "new_sqlite_classes": ["UserChannel"] }
-  ],
-  "r2_buckets": [
-    { "binding": "MEDIA", "bucket_name": "para-pin-media" }
-  ],
-  "vars": {
-    "VAPID_PUBLIC_KEY": "BHgMaer8-CVYer47TwT4jqy3mWDZmNpGfnR8j-j0ToABeD9VauBVizPxDCiGFdpnIVBhMO0nc2xo-KmgIuBTYgc",
-    "VAPID_SUBJECT": "mailto:infra@parasyte.cloud"
-  }
+	"name": "para-pin",
+	"compatibility_date": "2025-01-01",
+	"main": "worker.js",
+	"assets": {
+		"directory": ".",
+		"binding": "ASSETS",
+		"not_found_handling": "single-page-application"
+	},
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "REGISTRY",
+				"class_name": "Registry"
+			},
+			{
+				"name": "CHAT_ROOM",
+				"class_name": "ChatRoom"
+			},
+			{
+				"name": "USER_CHANNEL",
+				"class_name": "UserChannel"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"Registry",
+				"ChatRoom"
+			]
+		},
+		{
+			"tag": "v2",
+			"new_sqlite_classes": [
+				"UserChannel"
+			]
+		}
+	],
+	"r2_buckets": [
+		{
+			"binding": "MEDIA",
+			"bucket_name": "para-pin-media"
+		}
+	],
+	"vars": {
+		"VAPID_PUBLIC_KEY": "BHgMaer8-CVYer47TwT4jqy3mWDZmNpGfnR8j-j0ToABeD9VauBVizPxDCiGFdpnIVBhMO0nc2xo-KmgIuBTYgc",
+		"VAPID_SUBJECT": "mailto:infra@parasyte.cloud"
+	}
 }
