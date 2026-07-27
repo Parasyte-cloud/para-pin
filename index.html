@@ -309,6 +309,27 @@
   .file-card-name{ font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-hi, inherit); }
   .file-card-size{ font-size:11px; color:var(--text-mid); }
 
+  #notifyPrefBtn.is-muted{ opacity:.55; }
+  .notify-pref-menu{
+    position:absolute; top:calc(100% + 6px); right:0; z-index:20; min-width:170px;
+    background:rgba(20,22,26,0.97); border:1px solid var(--glass-brd-hi); border-radius:12px;
+    padding:5px; box-shadow:0 10px 30px rgba(0,0,0,0.4); backdrop-filter:blur(12px);
+  }
+  .notify-pref-opt{ padding:9px 12px; font-size:13px; border-radius:8px; cursor:pointer; white-space:nowrap; }
+  .notify-pref-opt:hover{ background:rgba(255,255,255,0.08); }
+  .notify-pref-opt.active{ color:var(--ice); font-weight:600; }
+  .chat-item-muted-badge{ font-size:11px; opacity:.6; margin-left:4px; }
+
+  .voice-note{ display:flex; align-items:center; gap:8px; min-width:170px; padding:2px 4px; }
+  .voice-note-play{ width:32px; height:32px; border-radius:50%; background:rgba(255,255,255,0.12); border:none; display:flex; align-items:center; justify-content:center; font-size:13px; cursor:pointer; flex-shrink:0; color:inherit; }
+  .voice-note-play:hover{ background:rgba(255,255,255,0.2); }
+  .voice-note-bar{ flex:1; height:3px; border-radius:2px; background:rgba(255,255,255,0.18); position:relative; overflow:hidden; }
+  .voice-note-bar-fill{ position:absolute; left:0; top:0; bottom:0; width:0%; background:var(--ice); }
+  .voice-note-dur{ font-size:11px; color:var(--text-mid); flex-shrink:0; min-width:32px; text-align:right; }
+  .record-btn.recording{ color:var(--fire); animation: recordPulse 1s ease-in-out infinite; }
+  @keyframes recordPulse{ 0%,100%{ opacity:1; } 50%{ opacity:.4; } }
+  .attach-preview-icon.recording-icon{ background:rgba(255,60,60,0.18); }
+
   .back-btn{ display:none; flex-shrink:0; }
 
   /* ================= MOBILE ================= */
@@ -338,7 +359,7 @@
     .conv-head{ padding:calc(12px + env(safe-area-inset-top, 0px)) 14px 12px; gap:10px; }
     .sidebar-head{ padding-top:calc(18px + env(safe-area-inset-top, 0px)); }
     .composer{ padding-bottom:calc(10px + env(safe-area-inset-bottom, 0px)); }
-    .sidebar-foot{ padding-bottom:calc(6px + env(safe-area-inset-bottom, 0px)); }
+    .sidebar-foot{ padding-bottom:6px; }
   }
 
   /* ---------- modal ---------- */
@@ -443,6 +464,14 @@
             <div class="conv-title" id="convTitle"></div>
             <div class="conv-sub" id="convSub"></div>
           </div>
+          <div class="notify-pref-wrap" style="margin-left:auto; position:relative;">
+            <div class="icon-btn" id="notifyPrefBtn" title="Notifications">🔔</div>
+            <div id="notifyPrefMenu" class="notify-pref-menu" style="display:none;">
+              <div class="notify-pref-opt" data-pref="all">🔔 All messages</div>
+              <div class="notify-pref-opt" data-pref="mentions">@ Mentions only</div>
+              <div class="notify-pref-opt" data-pref="mute">🔕 Mute</div>
+            </div>
+          </div>
         </div>
         <div class="messages" id="messages"></div>
         <div id="attachPreviewBar" class="attach-preview" style="display:none;">
@@ -454,6 +483,7 @@
         <div class="composer">
           <input type="file" id="attachInput" style="display:none;">
           <div class="icon-btn attach-btn" id="attachBtn" title="Attach file">📎</div>
+          <div class="icon-btn record-btn" id="recordBtn" title="Record voice note">🎤</div>
           <textarea id="msgInput" rows="1" placeholder="Message..."></textarea>
           <button class="send-btn" id="sendBtn">➤</button>
         </div>
@@ -629,6 +659,7 @@
   let presenceByUser = {}; // userId -> { online, lastSeen }
   let presencePollTimer = null;
   let pendingAttachment = null; // { blob, url (object URL for preview), width, height }
+  let notifyPrefs = {}; // chatId -> 'all' | 'mentions' | 'mute' (default 'all' when absent)
 
   async function apiFetch(path, opts = {}){
     const headers = { 'content-type': 'application/json', ...(opts.headers || {}) };
@@ -717,8 +748,18 @@
     updateTitleBadge();
     connectNotifySocket();
     requestNotifyPermission();
+    apiFetch('/notify-prefs').then((r)=>{ if (r.ok && r.body.notifyPrefs) notifyPrefs = r.body.notifyPrefs; });
 
     await renderApp();
+  }
+
+  async function setNotifyPref(chatId, pref){
+    notifyPrefs = { ...notifyPrefs };
+    if (pref === 'all') delete notifyPrefs[chatId];
+    else notifyPrefs[chatId] = pref;
+    renderChatList();
+    if (activeChatId === chatId) updateNotifyPrefBtn();
+    await apiFetch(`/chats/${chatId}/notify-pref`, { method: 'PUT', body: JSON.stringify({ pref }) });
   }
 
   document.getElementById('sessionRetryBtn').addEventListener('click', () => {
@@ -903,6 +944,20 @@
   const messagesEl = document.getElementById('messages');
   const convTitle = document.getElementById('convTitle');
   const convSub = document.getElementById('convSub');
+  const notifyPrefBtn = document.getElementById('notifyPrefBtn');
+  const notifyPrefMenu = document.getElementById('notifyPrefMenu');
+
+  notifyPrefBtn.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    notifyPrefMenu.style.display = notifyPrefMenu.style.display === 'block' ? 'none' : 'block';
+  });
+  notifyPrefMenu.addEventListener('click', (e)=>{
+    const opt = e.target.closest('.notify-pref-opt');
+    if (!opt || !activeChatId) return;
+    notifyPrefMenu.style.display = 'none';
+    setNotifyPref(activeChatId, opt.dataset.pref);
+  });
+  document.addEventListener('click', ()=>{ notifyPrefMenu.style.display = 'none'; });
   const convAvatar = document.getElementById('convAvatar');
   const mePinLabel = document.getElementById('mePinLabel');
   const searchInput = document.getElementById('searchInput');
@@ -941,8 +996,9 @@
     if (m.deleted) return (m.fromUserId===myUserId?'You: ':'') + 'Message deleted';
     const prefix = m.fromUserId===myUserId ? 'You: ' : '';
     const isImg = m.attachment && (m.attachment.kind === 'image' || !m.attachment.kind);
-    if (m.attachment && !m.text) return prefix + (isImg ? '📷 Photo' : '📄 ' + (m.attachment.name || 'File'));
-    if (m.attachment) return prefix + (isImg ? '📷 ' : '📄 ') + m.text;
+    const isVoice = m.attachment && m.attachment.kind === 'voice';
+    if (m.attachment && !m.text) return prefix + (isImg ? '📷 Photo' : isVoice ? '🎤 Voice message' : '📄 ' + (m.attachment.name || 'File'));
+    if (m.attachment) return prefix + (isImg ? '📷 ' : isVoice ? '🎤 ' : '📄 ') + m.text;
     return prefix + m.text;
   }
 
@@ -978,9 +1034,11 @@
       body.className = 'ci-body';
       const lm = lastMsg(chat);
       const unread = unreadCounts[chat.id] || 0;
+      const pref = notifyPrefs[chat.id] || 'all';
+      const muteBadge = pref === 'mute' ? '<span class="chat-item-muted-badge">🔕</span>' : pref === 'mentions' ? '<span class="chat-item-muted-badge">@</span>' : '';
       body.innerHTML = `
         <div class="ci-top">
-          <div class="ci-name">${escapeHtml(name)}</div>
+          <div class="ci-name">${escapeHtml(name)}${muteBadge}</div>
           <div class="ci-time">${lm ? fmtTime(lm.ts) : ''}</div>
         </div>
         <div class="ci-last">${lm ? escapeHtml(previewText(lm)) : 'Tap to open'}</div>
@@ -1080,6 +1138,13 @@
           const isImg = m.attachment.kind === 'image' || !m.attachment.kind;
           if (isImg){
             inner += `<img class="msg-image" src="${escapeHtml(m.attachment.url)}" data-full="${escapeHtml(m.attachment.url)}" alt="Photo">`;
+          } else if (m.attachment.kind === 'voice'){
+            const dur = m.attachment.duration || 0;
+            inner += `<div class="voice-note" data-voice-id="${m.id}" data-url="${escapeHtml(m.attachment.url)}" data-duration="${dur}">`
+              + `<button class="voice-note-play" data-voice-id="${m.id}">▶</button>`
+              + `<div class="voice-note-bar"><div class="voice-note-bar-fill"></div></div>`
+              + `<div class="voice-note-dur">${fmtDuration(dur)}</div>`
+              + `</div>`;
           } else {
             const fname = m.attachment.name || 'File';
             const fsize = m.attachment.size ? fmtFileSize(m.attachment.size) : '';
@@ -1184,6 +1249,13 @@
     if (img){
       document.getElementById('lightboxImg').src = img.dataset.full;
       openModal('lightboxOverlay');
+      return;
+    }
+
+    const voiceBtn = e.target.closest('.voice-note-play');
+    if (voiceBtn){
+      const wrap = voiceBtn.closest('.voice-note');
+      if (wrap) toggleVoicePlay(wrap.dataset.voiceId, wrap.dataset.url);
       return;
     }
 
@@ -1353,6 +1425,7 @@
   // mobile Safari/Chrome when the screen locks) can silently miss messages
   // pushed over the WebSocket, and the cache alone would then go stale.
   async function openChat(chatId){
+    discardActiveRecording();
     const r = await apiFetch(`/chats/${chatId}/messages`);
     if (r.ok && r.body.messages) mergeMessages(chatId, r.body.messages);
     else if (!(chatId in messagesByChat)) messagesByChat[chatId] = [];
@@ -1366,6 +1439,17 @@
     refreshReadState(chatId);
     markChatRead(chatId);
     startPresencePolling(getChat(chatId));
+    updateNotifyPrefBtn();
+  }
+
+  function updateNotifyPrefBtn(){
+    const pref = notifyPrefs[activeChatId] || 'all';
+    notifyPrefBtn.textContent = pref === 'mute' ? '🔕' : '🔔';
+    notifyPrefBtn.classList.toggle('is-muted', pref !== 'all');
+    notifyPrefBtn.title = pref === 'mute' ? 'Muted' : pref === 'mentions' ? 'Mentions only' : 'Notifications: All messages';
+    notifyPrefMenu.querySelectorAll('.notify-pref-opt').forEach((opt)=>{
+      opt.classList.toggle('active', opt.dataset.pref === pref);
+    });
   }
 
   // ---------------- read receipts (DMs only — group "seen by" gets ambiguous fast) ----------------
@@ -1510,8 +1594,21 @@
   // Mobile browsers freeze/kill background tabs (and their sockets) without
   // always firing a clean 'close' event. Catch up the moment the app is
   // looked at again instead of leaving the user staring at stale history.
+  //
+  // Presence is derived purely from "is this user's notify socket open" — so
+  // leaving it open while backgrounded made "online" mean "opened it at some
+  // point," not "actively here right now." Closing it the instant the app is
+  // hidden (and reopening the instant it's visible again) makes the online
+  // indicator mean what it looks like it means.
+  let intentionalNotifyClose = false;
   document.addEventListener('visibilitychange', ()=>{
-    if (document.visibilityState !== 'visible') return;
+    if (document.visibilityState === 'hidden'){
+      if (notifySocket){
+        intentionalNotifyClose = true;
+        try { notifySocket.close(); } catch(e){}
+      }
+      return;
+    }
     if (myPinHash && (!notifySocket || notifySocket.readyState !== WebSocket.OPEN)){
       connectNotifySocket();
     }
@@ -1533,6 +1630,15 @@
   });
   window.addEventListener('focus', ()=>{
     if (activeChatId) document.dispatchEvent(new Event('visibilitychange'));
+  });
+  // iOS in particular won't reliably fire 'close'/'beforeunload' on a tab/app
+  // being fully closed — 'pagehide' is the one event it does fire, so use it
+  // to close the socket cleanly and get an accurate last-seen time recorded.
+  window.addEventListener('pagehide', ()=>{
+    if (notifySocket){
+      intentionalNotifyClose = true;
+      try { notifySocket.close(); } catch(e){}
+    }
   });
 
   // ---------------- notifications: sound + badge + browser notification ----------------
@@ -1646,15 +1752,22 @@
     if (!isOpenAndVisible){
       unreadCounts[chatId] = (unreadCounts[chatId] || 0) + 1;
       updateTitleBadge();
-      playDing();
-      if (notifyPermissionOk() && document.visibilityState !== 'visible'){
-        try {
-          const title = data.chatType === 'group' ? (data.chatName || 'Group') : (msg.fromName || 'PArA PIN');
-          const msgText = msg.text || (msg.attachment ? '📷 Photo' : '');
-          const body = data.chatType === 'group' && msg.fromName ? `${msg.fromName}: ${msgText}` : msgText;
-          const n = new Notification(title, { body, tag: 'parapin-' + chatId, icon: '/icon-192.png' });
-          n.onclick = () => { window.focus(); };
-        } catch(e) {}
+
+      const pref = notifyPrefs[chatId] || 'all';
+      const msgText = msg.text || (msg.attachment ? (msg.attachment.kind === 'file' ? `📄 ${msg.attachment.name || 'File'}` : msg.attachment.kind === 'voice' ? '🎤 Voice message' : '📷 Photo') : '');
+      const mentioned = !!(myDisplayName && new RegExp(`@${myDisplayName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(msgText));
+      const shouldAlert = pref === 'mute' ? false : pref === 'mentions' ? mentioned : true;
+
+      if (shouldAlert){
+        playDing();
+        if (notifyPermissionOk() && document.visibilityState !== 'visible'){
+          try {
+            const title = data.chatType === 'group' ? (data.chatName || 'Group') : (msg.fromName || 'PArA PIN');
+            const body = data.chatType === 'group' && msg.fromName ? `${msg.fromName}: ${msgText}` : msgText;
+            const n = new Notification(title, { body, tag: 'parapin-' + chatId, icon: '/icon-192.png' });
+            n.onclick = () => { window.focus(); };
+          } catch(e) {}
+        }
       }
     }
     if (activeChatId === chatId) renderConv();
@@ -1676,7 +1789,12 @@
       try { data = JSON.parse(ev.data); } catch(e){ return; }
       if (data.type === 'notify') handleNotify(data);
     });
-    ws.addEventListener('close', ()=>{ if (notifySocket === ws) { notifySocket = null; if (myPinHash) scheduleNotifyReconnect(); } });
+    ws.addEventListener('close', ()=>{
+      if (notifySocket !== ws) return;
+      notifySocket = null;
+      if (intentionalNotifyClose){ intentionalNotifyClose = false; return; }
+      if (myPinHash) scheduleNotifyReconnect();
+    });
     ws.addEventListener('error', ()=>{ try { ws.close(); } catch(e){} });
     notifySocket = ws;
   }
@@ -1716,6 +1834,71 @@
     if (/\.(xls|xlsx|csv)$/i.test(name) || mime.includes('sheet') || mime === 'text/csv') return '📗';
     if (/\.(ppt|pptx)$/i.test(name) || mime.includes('presentation')) return '📙';
     return '📄';
+  }
+
+  function fmtDuration(sec){
+    sec = Math.max(0, Math.round(sec || 0));
+    const m = Math.floor(sec / 60), s = sec % 60;
+    return `${m}:${String(s).padStart(2, '0')}`;
+  }
+
+  // ---------------- voice notes: playback (single shared <audio>, only one plays at a time) ----------------
+  let voicePlayer = null;
+  let voicePlayingId = null;
+
+  function resetVoiceUi(id){
+    const wrap = messagesEl.querySelector(`.voice-note[data-voice-id="${CSS.escape(id)}"]`);
+    if (!wrap) return;
+    const btn = wrap.querySelector('.voice-note-play');
+    const fill = wrap.querySelector('.voice-note-bar-fill');
+    const durEl = wrap.querySelector('.voice-note-dur');
+    if (btn) btn.textContent = '▶';
+    if (fill) fill.style.width = '0%';
+    if (durEl) durEl.textContent = fmtDuration(Number(wrap.dataset.duration) || 0);
+  }
+
+  function getVoicePlayer(){
+    if (voicePlayer) return voicePlayer;
+    voicePlayer = new Audio();
+    voicePlayer.addEventListener('timeupdate', ()=>{
+      if (!voicePlayingId) return;
+      const wrap = messagesEl.querySelector(`.voice-note[data-voice-id="${CSS.escape(voicePlayingId)}"]`);
+      if (!wrap) return;
+      const fill = wrap.querySelector('.voice-note-bar-fill');
+      const durEl = wrap.querySelector('.voice-note-dur');
+      if (fill && voicePlayer.duration && isFinite(voicePlayer.duration)){
+        fill.style.width = (voicePlayer.currentTime / voicePlayer.duration * 100) + '%';
+      }
+      if (durEl) durEl.textContent = fmtDuration(Math.max(0, (voicePlayer.duration || Number(wrap.dataset.duration) || 0) - voicePlayer.currentTime));
+    });
+    voicePlayer.addEventListener('ended', ()=>{
+      const id = voicePlayingId;
+      voicePlayingId = null;
+      if (id) resetVoiceUi(id);
+    });
+    voicePlayer.addEventListener('pause', ()=>{
+      if (voicePlayingId && voicePlayer.currentTime === 0) resetVoiceUi(voicePlayingId);
+    });
+    return voicePlayer;
+  }
+
+  function toggleVoicePlay(id, url){
+    const player = getVoicePlayer();
+    if (voicePlayingId === id && !player.paused){
+      player.pause();
+      resetVoiceUi(id);
+      voicePlayingId = null;
+      return;
+    }
+    if (voicePlayingId) resetVoiceUi(voicePlayingId);
+    voicePlayingId = id;
+    player.src = url;
+    player.play().catch(()=>{ voicePlayingId = null; });
+    const wrap = messagesEl.querySelector(`.voice-note[data-voice-id="${CSS.escape(id)}"]`);
+    if (wrap){
+      const btn = wrap.querySelector('.voice-note-play');
+      if (btn) btn.textContent = '⏸';
+    }
   }
 
   function fmtFileSize(bytes){
@@ -1797,6 +1980,92 @@
     msgInput.focus();
   });
 
+  // ---------------- voice notes: record ----------------
+  const recordBtn = document.getElementById('recordBtn');
+  let mediaRecorder = null;
+  let recordChunks = [];
+  let recordStartedAt = 0;
+  let recordStream = null;
+  let discardNextRecording = false;
+
+  function pickVoiceMimeType(){
+    const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/aac'];
+    for (const t of candidates){
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) return t;
+    }
+    return '';
+  }
+
+  function stopRecordStream(){
+    if (recordStream){ recordStream.getTracks().forEach(t => t.stop()); recordStream = null; }
+  }
+
+  async function startRecording(){
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+      showSessionBanner("This browser can't record audio.");
+      return;
+    }
+    try {
+      recordStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch(e){
+      showSessionBanner('Microphone access was blocked — allow it to record a voice note.');
+      return;
+    }
+    const mimeType = pickVoiceMimeType();
+    try {
+      mediaRecorder = mimeType ? new MediaRecorder(recordStream, { mimeType }) : new MediaRecorder(recordStream);
+    } catch(e){
+      stopRecordStream();
+      showSessionBanner("Couldn't start recording on this device.");
+      return;
+    }
+    recordChunks = [];
+    recordStartedAt = Date.now();
+    mediaRecorder.addEventListener('dataavailable', (e)=>{ if (e.data && e.data.size) recordChunks.push(e.data); });
+    mediaRecorder.addEventListener('stop', ()=>{
+      stopRecordStream();
+      const durationSec = Math.max(1, Math.round((Date.now() - recordStartedAt) / 1000));
+      const blob = new Blob(recordChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+      recordChunks = [];
+      if (discardNextRecording){ discardNextRecording = false; return; }
+      if (blob.size === 0) return;
+      clearAttachment();
+      const ext = (mediaRecorder.mimeType || '').includes('mp4') ? 'm4a' : 'webm';
+      pendingAttachment = { blob, url: null, width: null, height: null, name: `Voice message.${ext}`, kind: 'voice', duration: durationSec };
+      attachPreviewIcon.textContent = '🎤';
+      attachPreviewIcon.style.display = 'flex';
+      attachPreviewName.textContent = `Voice message — ${fmtDuration(durationSec)}`;
+      attachPreviewBar.style.display = 'flex';
+    });
+    mediaRecorder.start();
+    recordBtn.classList.add('recording');
+    recordBtn.textContent = '⏹';
+    recordBtn.title = 'Stop recording';
+  }
+
+  function stopRecording(){
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    mediaRecorder = null;
+    recordBtn.classList.remove('recording');
+    recordBtn.textContent = '🎤';
+    recordBtn.title = 'Record voice note';
+  }
+
+  // Switching chats mid-recording would otherwise attach the voice note to
+  // whichever chat happens to be active when the user next hits send — discard
+  // it instead and let them re-record in the chat they actually want.
+  function discardActiveRecording(){
+    if (mediaRecorder && mediaRecorder.state === 'recording'){
+      discardNextRecording = true;
+      stopRecording();
+    }
+  }
+
+  recordBtn.addEventListener('click', ()=>{
+    if (mediaRecorder && mediaRecorder.state === 'recording') stopRecording();
+    else startRecording();
+  });
+
   async function sendMessage(){
     const text = msgInput.value.trim();
     const attachment = pendingAttachment;
@@ -1842,6 +2111,7 @@
           name: attachment.name,
           size: attachment.blob.size,
           kind: attachment.kind,
+          duration: attachment.duration || undefined,
         };
       } else {
         sendBtn.disabled = false;

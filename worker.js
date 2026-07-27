@@ -327,10 +327,25 @@ export class UserChannel {
       let data = null;
       try { data = JSON.parse(payload); } catch (e) {}
       if (data && data.type === 'notify' && data.message) {
-        const subs = (await this.state.storage.get('pushSubs')) || [];
+        const notifyPrefs = (await this.state.storage.get('notifyPrefs')) || {};
+        const pref = notifyPrefs[data.chatId] || 'all';
+        const attKind = data.message.attachment && data.message.attachment.kind;
+        const msgText = data.message.text || (data.message.attachment ? (attKind === 'file' ? `📄 ${data.message.attachment.name || 'File'}` : attKind === 'voice' ? '🎤 Voice message' : '📷 Photo') : '');
+
+        // Muted chats never generate a push — the whole point is silence, even
+        // when the app is fully closed and there's no client left to filter it.
+        // Mentions-only needs a name to look for, so fall through to 'all' if
+        // we don't have one cached yet (e.g. push was set up before any pref
+        // was ever touched for this chat).
+        let shouldPush = pref !== 'mute';
+        if (shouldPush && pref === 'mentions') {
+          const myName = (await this.state.storage.get('displayName')) || '';
+          shouldPush = myName ? new RegExp(`@${myName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(msgText) : true;
+        }
+
+        const subs = shouldPush ? (await this.state.storage.get('pushSubs')) || [] : [];
         if (subs.length) {
           const title = data.chatType === 'group' ? (data.chatName || 'Group') : (data.message.fromName || 'PArA PIN');
-          const msgText = data.message.text || (data.message.attachment ? '📷 Photo' : '');
           const body = data.chatType === 'group' && data.message.fromName ? `${data.message.fromName}: ${msgText}` : msgText;
           const pushPayload = { title, body, chatId: data.chatId };
           const stillValid = [];
@@ -359,13 +374,14 @@ export class UserChannel {
     }
 
     if (request.method === 'POST' && url.pathname === '/subscribe') {
-      const { subscription } = await request.json();
+      const { subscription, displayName } = await request.json();
       if (!subscription || !subscription.endpoint) return json({ error: 'invalid_subscription' }, 400);
       const subs = (await this.state.storage.get('pushSubs')) || [];
       if (!subs.some((s) => s.endpoint === subscription.endpoint)) {
         subs.push(subscription);
         await this.state.storage.put('pushSubs', subs);
       }
+      if (displayName) await this.state.storage.put('displayName', displayName);
       return json({ ok: true });
     }
 
@@ -374,6 +390,22 @@ export class UserChannel {
       const subs = (await this.state.storage.get('pushSubs')) || [];
       await this.state.storage.put('pushSubs', subs.filter((s) => s.endpoint !== endpoint));
       return json({ ok: true });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/notify-prefs') {
+      const notifyPrefs = (await this.state.storage.get('notifyPrefs')) || {};
+      return json({ notifyPrefs });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/notify-pref') {
+      const { chatId, pref, displayName } = await request.json();
+      if (!chatId || !['all', 'mentions', 'mute'].includes(pref)) return json({ error: 'invalid' }, 400);
+      const notifyPrefs = (await this.state.storage.get('notifyPrefs')) || {};
+      if (pref === 'all') delete notifyPrefs[chatId];
+      else notifyPrefs[chatId] = pref;
+      await this.state.storage.put('notifyPrefs', notifyPrefs);
+      if (displayName) await this.state.storage.put('displayName', displayName);
+      return json({ ok: true, notifyPrefs });
     }
 
     return new Response('not found', { status: 404 });
@@ -470,6 +502,10 @@ export class ChatRoom {
           width: Number(attachment.width) || null,
           height: Number(attachment.height) || null,
           mime: attachment.mime ? String(attachment.mime).slice(0, 100) : 'image/jpeg',
+          name: attachment.name ? String(attachment.name).slice(0, 200) : null,
+          size: Number(attachment.size) || null,
+          kind: ['image', 'voice', 'file'].includes(attachment.kind) ? attachment.kind : 'image',
+          duration: attachment.duration ? Number(attachment.duration) : null,
         };
       }
       msgs.push(msg);
@@ -633,10 +669,11 @@ export default {
         if (!obj) return new Response('not found', { status: 404 });
         const contentType = obj.httpMetadata?.contentType || 'application/octet-stream';
         const fileName = obj.customMetadata?.fileName || 'file';
-        // Images (and PDFs, which browsers preview in a sandboxed viewer, not the
-        // page origin) render inline; everything else forces a download instead of
-        // whatever the browser might otherwise try to do with it.
-        const inlineOk = contentType.startsWith('image/') || contentType === 'application/pdf';
+        // Images, audio (voice notes play inline via an <audio> element), and PDFs
+        // (browsers preview those in a sandboxed viewer, not the page origin) render
+        // inline; everything else forces a download instead of whatever the browser
+        // might otherwise try to do with it.
+        const inlineOk = contentType.startsWith('image/') || contentType.startsWith('audio/') || contentType === 'application/pdf';
         const headers = {
           'content-type': contentType,
           'cache-control': 'public, max-age=31536000, immutable',
@@ -682,7 +719,7 @@ export default {
         const channelStub = env.USER_CHANNEL.get(env.USER_CHANNEL.idFromName(who.userId));
         const res = await channelStub.fetch('https://internal/subscribe', {
           method: 'POST',
-          body: JSON.stringify({ subscription }),
+          body: JSON.stringify({ subscription, displayName: who.displayName }),
         });
         return res;
       }
@@ -698,6 +735,38 @@ export default {
         const res = await channelStub.fetch('https://internal/unsubscribe', {
           method: 'POST',
           body: JSON.stringify({ endpoint }),
+        });
+        return res;
+      }
+
+      // Per-chat notification preference ('all' | 'mentions' | 'mute'), stored
+      // server-side per user so it applies to real push (app fully closed) as
+      // well as in-app ding/badge — not just a local toggle that a push
+      // notification would ignore.
+      if (request.method === 'GET' && url.pathname === '/api/notify-prefs') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const channelStub = env.USER_CHANNEL.get(env.USER_CHANNEL.idFromName(who.userId));
+        const res = await channelStub.fetch('https://internal/notify-prefs');
+        return res;
+      }
+
+      const notifyPrefMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/notify-pref$/);
+      if (notifyPrefMatch && request.method === 'PUT') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const { pref } = await request.json().catch(() => ({}));
+        if (!['all', 'mentions', 'mute'].includes(pref)) return json({ error: 'invalid_pref' }, 400);
+        const channelStub = env.USER_CHANNEL.get(env.USER_CHANNEL.idFromName(who.userId));
+        const res = await channelStub.fetch('https://internal/notify-pref', {
+          method: 'POST',
+          body: JSON.stringify({ chatId: notifyPrefMatch[1], pref, displayName: who.displayName }),
         });
         return res;
       }
