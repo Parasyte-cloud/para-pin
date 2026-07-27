@@ -542,11 +542,31 @@ export class Registry {
     }
 
     if (request.method === 'POST' && url.pathname === '/admin/roster') {
-      const { requesterId, name, department, email } = await request.json();
+      const { requesterId, name, department, email, force } = await request.json();
       const admins = (await this.state.storage.get('admins')) || [];
       if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
       if (!name || !name.trim()) return json({ error: 'missing_name' }, 400);
       if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: 'invalid_email' }, 400);
+
+      // Generating a second PIN for a name that's already on the roster
+      // creates a genuinely separate account — not a second way in for the
+      // same person — because everything (chats, keys, message history) is
+      // keyed off whoever claims each PIN. If that PIN reaches the same
+      // person again, they end up as two different identities with their
+      // history split across both, which looks exactly like "their messages
+      // disappeared." This won't silently do that — it asks first, unless
+      // the admin explicitly confirms they mean to (e.g. two people who
+      // happen to share a name).
+      if (!force) {
+        const trimmedName = name.trim().toLowerCase();
+        const list = (await this.state.storage.get('rosterList')) || [];
+        for (const id of list) {
+          const e = await this.state.storage.get(`roster:${id}`);
+          if (e && e.status !== 'disabled' && e.name.trim().toLowerCase() === trimmedName) {
+            return json({ error: 'duplicate_name', existingStatus: e.status }, 409);
+          }
+        }
+      }
 
       let pin = null;
       let pinHash = null;
@@ -1525,7 +1545,7 @@ export default {
           const body = await request.json().catch(() => ({}));
           return registryStub.fetch('https://internal/admin/roster', {
             method: 'POST',
-            body: JSON.stringify({ requesterId: who.userId, name: body.name, department: body.department, email: body.email }),
+            body: JSON.stringify({ requesterId: who.userId, name: body.name, department: body.department, email: body.email, force: !!body.force }),
           });
         }
       }

@@ -736,9 +736,24 @@
     <div class="hint" id="profileDeviceStatus" style="margin-top:14px; margin-bottom:0; color:#7ee08a;"></div>
     <div class="btn" id="approveDeviceOpenBtn" style="margin-top:10px;">Approve a new device</div>
     <div class="hint" style="margin-top:8px; margin-bottom:0;">A newly-approved device gets its own encryption key and can read new messages right away. Any chat history from before it was added stays unreadable on that device only — same as most encrypted chat apps.</div>
+    <div id="adminRecoveryLink" style="margin-top:14px; font-size:12px; color:var(--text-mid); text-decoration:underline; cursor:pointer;">Don't see the admin console but think you should?</div>
     <div class="modal-actions">
       <div class="btn" onclick="closeModal('profileOverlay')">Cancel</div>
       <div class="btn primary" id="profileSaveBtn">Save</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ ADMIN RECOVERY (no URL editing required) ============ -->
+<div class="overlay" id="adminRecoveryOverlay">
+  <div class="modal lg" style="text-align:center;">
+    <h3>Recover admin access</h3>
+    <div class="hint">Enter the admin recovery key set on the server (via `wrangler secret put ADMIN_BOOTSTRAP_KEY`).</div>
+    <input type="text" id="adminRecoveryKeyInput" placeholder="Admin recovery key" autocapitalize="off" autocorrect="off" spellcheck="false" style="margin-top:14px;">
+    <div class="hint" id="adminRecoveryMsg" style="display:none;"></div>
+    <div class="modal-actions">
+      <div class="btn" onclick="closeModal('adminRecoveryOverlay')">Cancel</div>
+      <div class="btn primary" id="adminRecoverySubmitBtn">Submit</div>
     </div>
   </div>
 </div>
@@ -1257,6 +1272,46 @@
     } else {
       msgEl.style.color = '#ff6a6a';
       msgEl.textContent = r.body && r.body.error === 'wrong_code' ? "That code doesn't match." : r.body && r.body.error === 'expired' ? 'That code expired.' : "Couldn't approve that device — try again.";
+      msgEl.style.display = 'block';
+    }
+  });
+
+  // ================= ADMIN RECOVERY =================
+  // A plain button + text input instead of asking someone to hand-edit a
+  // URL's query string on a phone keyboard (?admin-key=...) — that's fragile
+  // (autocapitalize, Safari sometimes treating an unrecognized query string
+  // as a search instead of navigating) and easy to get wrong with no
+  // feedback about what went wrong. This calls the exact same
+  // /api/admin/bootstrap endpoint, just through a normal form.
+  document.getElementById('adminRecoveryLink').addEventListener('click', ()=>{
+    closeModal('profileOverlay');
+    document.getElementById('adminRecoveryKeyInput').value = '';
+    document.getElementById('adminRecoveryMsg').style.display = 'none';
+    openModal('adminRecoveryOverlay');
+  });
+  document.getElementById('adminRecoverySubmitBtn').addEventListener('click', async function(){
+    const btn = this;
+    const msgEl = document.getElementById('adminRecoveryMsg');
+    const key = document.getElementById('adminRecoveryKeyInput').value.trim();
+    if (!key){
+      msgEl.textContent = 'Enter the recovery key.';
+      msgEl.style.color = '#ff6a6a';
+      msgEl.style.display = 'block';
+      return;
+    }
+    btn.disabled = true;
+    const r = await apiFetch('/admin/bootstrap', { method: 'POST', body: JSON.stringify({ key }) });
+    btn.disabled = false;
+    if (r.ok){
+      iAmAdmin = true;
+      document.getElementById('adminRosterBtn').style.display = 'flex';
+      msgEl.style.color = '#7ee08a';
+      msgEl.textContent = "You're now an admin — the 👥 icon should appear next to your profile.";
+      msgEl.style.display = 'block';
+      setTimeout(()=>closeModal('adminRecoveryOverlay'), 1800);
+    } else {
+      msgEl.style.color = '#ff6a6a';
+      msgEl.textContent = r.body && r.body.error === 'forbidden' ? "That key doesn't match what's set on the server (or ADMIN_BOOTSTRAP_KEY was never set — see wrangler secret put)." : "Couldn't process that — try again.";
       msgEl.style.display = 'block';
     }
   });
@@ -2234,7 +2289,16 @@
     if (!name){ showRosterError('Enter a name.'); return; }
     hideRosterError();
     btn.disabled = true;
-    const r = await apiFetch('/admin/roster', { method: 'POST', body: JSON.stringify({ name, department: rosterDeptInput.value.trim(), email: email || undefined }) });
+    let r = await apiFetch('/admin/roster', { method: 'POST', body: JSON.stringify({ name, department: rosterDeptInput.value.trim(), email: email || undefined }) });
+    if (!r.ok && r.body && r.body.error === 'duplicate_name'){
+      // Generating a second PIN for a name already on the roster creates a
+      // genuinely separate account, not a second way in for the same
+      // person — if that PIN reaches them again, their chats and history
+      // end up split across two identities. Confirm before doing it anyway.
+      const proceed = confirm(`"${name}" is already on the roster (${r.body.existingStatus === 'claimed' ? 'already signed in' : 'not yet claimed'}). Generating another PIN creates a SEPARATE account, not another way in for the same person. Continue anyway?`);
+      if (!proceed){ btn.disabled = false; return; }
+      r = await apiFetch('/admin/roster', { method: 'POST', body: JSON.stringify({ name, department: rosterDeptInput.value.trim(), email: email || undefined, force: true }) });
+    }
     btn.disabled = false;
     if (!r.ok){ showRosterError(r.body && r.body.error === 'invalid_email' ? 'That email address looks off.' : 'Could not add them — try again.'); return; }
     rosterNameInput.value = '';
@@ -3156,7 +3220,14 @@
       }
       if (m.ciphertext && m.iv){
         try { m.text = await decryptWithFallback(chat, key, (k) => e2eeDecryptString(k, m.iv, m.ciphertext)); }
-        catch(e){ m.text = "🔒 Couldn't decrypt this message on this device."; }
+        catch(e){
+          m.text = "🔒 Couldn't decrypt this message on this device.";
+          // Genuinely undecryptable content shouldn't happen silently —
+          // logging the real error here is the only way to tell "wrong key"
+          // apart from "corrupted ciphertext" apart from "crypto API threw
+          // for an unrelated reason" without guessing blind next time.
+          console.warn('[e2ee] decrypt failed', { chatId: chat.id, chatType: chat.type, messageId: m.id, error: e && e.message });
+        }
       }
       if (m.attachment && m.attachment.nameCiphertext && m.attachment.nameIv){
         try { m.attachment.name = await decryptWithFallback(chat, key, (k) => e2eeDecryptString(k, m.attachment.nameIv, m.attachment.nameCiphertext)); }
