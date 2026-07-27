@@ -522,7 +522,7 @@
             <div class="me-name" id="meName">You</div>
             <div class="me-pin mono" id="mePinLabel">PArA PIN active</div>
           </div>
-          <div class="icon-btn" id="adminRosterBtn" title="Team roster (admin)" style="display:none;">👥</div>
+          <div class="icon-btn" id="adminRosterBtn" title="Admin settings (roster, retention, devices)" style="display:none;">👥</div>
           <div class="icon-btn" id="shareBtn" title="Share my PIN">▦</div>
           <div class="icon-btn" id="lockBtn" title="Lock">🔒</div>
         </div>
@@ -699,6 +699,10 @@
     </div>
     <input type="text" id="profileNameInput" placeholder="Your name" maxlength="40" style="margin-top:14px;">
     <input type="text" id="profileDeptInput" placeholder="Department / role (optional)" maxlength="60">
+    <label style="display:flex; align-items:center; gap:8px; text-align:left; margin-top:14px; font-size:13px; color:var(--text-mid); cursor:pointer;">
+      <input type="checkbox" id="profileAlwaysBannerInput" style="width:auto;">
+      Always show a notification banner, even while I'm using the app
+    </label>
     <div class="modal-actions">
       <div class="btn" onclick="closeModal('profileOverlay')">Cancel</div>
       <div class="btn primary" id="profileSaveBtn">Save</div>
@@ -709,6 +713,14 @@
 <!-- ============ ADMIN ROSTER MODAL ============ -->
 <div class="overlay" id="rosterOverlay">
   <div class="modal lg">
+    <h3>Message retention</h3>
+    <div class="hint">Applies to every chat. Messages and their attachments older than this get permanently deleted, checked once a day.</div>
+    <select id="retentionSelect" style="width:100%; margin-bottom:16px;">
+      <option value="0">Keep forever (default)</option>
+      <option value="30">Delete after 30 days</option>
+      <option value="90">Delete after 90 days</option>
+      <option value="365">Delete after 365 days</option>
+    </select>
     <h3>Team roster</h3>
     <div class="hint">Pre-add someone and hand them the PIN yourself, or add an email to have it sent automatically. The PIN is shown here once either way — write it down if you're delivering it yourself.</div>
     <div style="display:flex; gap:8px;">
@@ -720,6 +732,11 @@
     <div class="btn primary" id="rosterAddBtn" style="margin-bottom:14px;">Generate PIN</div>
     <div id="rosterNewPin" class="roster-new-pin" style="display:none;"></div>
     <div class="contact-pick" id="rosterList" style="max-height:280px;"></div>
+
+    <h3 style="margin-top:20px;">Devices</h3>
+    <div class="hint">Every PIN locks to whichever device first signs in with it. If someone gets a new phone or reinstalls, reset their lock here so the next login claims it.</div>
+    <div class="contact-pick" id="deviceList" style="max-height:220px;"></div>
+
     <div class="modal-actions">
       <div class="btn primary" onclick="closeModal('rosterOverlay')">Done</div>
     </div>
@@ -829,6 +846,15 @@
   }
 
   // ---------------- server session (real account) ----------------
+  // Device-lock (BlackBerry-style): a random id generated once per browser
+  // install and never sent anywhere except alongside the PIN hash at login.
+  // The first device to log in with a given PIN claims it server-side; a
+  // mismatch on a later login means "this PIN is already bound elsewhere."
+  let myDeviceId = localStorage.getItem('parapin_device_id');
+  if (!myDeviceId){
+    myDeviceId = (crypto.randomUUID ? crypto.randomUUID() : 'dev_' + Math.random().toString(36).slice(2) + Date.now().toString(36));
+    localStorage.setItem('parapin_device_id', myDeviceId);
+  }
   let myPinHash = null;
   let myUserId = null;
   let myDisplayName = null;
@@ -919,13 +945,16 @@
     pendingPin = pin;
     myPinHash = await sha256Hex(pin);
     pendingPin = null;
+    syncPinHashToServiceWorker(myPinHash);
 
     let cachedName = localStorage.getItem('parapin_displayname') || null;
-    let r = await apiFetch('/session', { method: 'POST', body: JSON.stringify({ displayName: cachedName }) });
+    let r = await apiFetch('/session', { method: 'POST', body: JSON.stringify({ displayName: cachedName, deviceId: myDeviceId }) });
 
     if (!r.ok) {
       if (r.body && r.body.error === 'pin_disabled') {
         showSessionBanner('This PIN has been disabled. Contact your admin if that seems wrong.');
+      } else if (r.body && r.body.error === 'device_mismatch') {
+        showSessionBanner("This PIN is locked to a different device. Ask your admin to reset it, or sign in from the device you originally used.");
       } else {
         showSessionBanner(r.networkError ? "Can't reach the PArA PIN server — check your connection." : 'Something went wrong starting your session.');
       }
@@ -937,7 +966,7 @@
       const name = await askDisplayName();
       if (name) {
         localStorage.setItem('parapin_displayname', name);
-        r = await apiFetch('/session', { method: 'POST', body: JSON.stringify({ displayName: name }) });
+        r = await apiFetch('/session', { method: 'POST', body: JSON.stringify({ displayName: name, deviceId: myDeviceId }) });
       }
     }
 
@@ -1001,11 +1030,13 @@
   document.getElementById('sessionRetryBtn').addEventListener('click', () => {
     if (myPinHash) {
       // re-attempt with the hash we already have — no need to re-enter the PIN
-      apiFetch('/session', { method: 'POST', body: JSON.stringify({}) }).then((r) => {
+      apiFetch('/session', { method: 'POST', body: JSON.stringify({ deviceId: myDeviceId }) }).then((r) => {
         if (r.ok) {
           hideSessionBanner();
           sessionChats = r.body.chats || [];
           renderApp();
+        } else if (r.body && r.body.error === 'device_mismatch') {
+          showSessionBanner("This PIN is locked to a different device. Ask your admin to reset it, or sign in from the device you originally used.");
         } else {
           showSessionBanner(r.networkError ? "Still can't reach the server." : 'Still failing — try again shortly.');
         }
@@ -1716,7 +1747,18 @@
   const profileNameInput = document.getElementById('profileNameInput');
   const profileDeptInput = document.getElementById('profileDeptInput');
   const profileSaveBtn = document.getElementById('profileSaveBtn');
+  const profileAlwaysBannerInput = document.getElementById('profileAlwaysBannerInput');
   let pendingProfilePhoto = null; // { blob, url } staged until Save; url is an object URL for local preview only
+
+  // Purely a local display preference — applies immediately, no server round
+  // trip needed. By default a notification banner only shows while the app
+  // is backgrounded/hidden (the ding alone covers the foreground case); this
+  // lets someone opt into always getting a banner too.
+  let alwaysShowBanner = localStorage.getItem('parapin_always_banner') === '1';
+  profileAlwaysBannerInput.addEventListener('change', ()=>{
+    alwaysShowBanner = profileAlwaysBannerInput.checked;
+    localStorage.setItem('parapin_always_banner', alwaysShowBanner ? '1' : '0');
+  });
 
   function renderProfilePhotoPreview(url){
     if (url){
@@ -1734,6 +1776,7 @@
     if (pendingProfilePhoto && pendingProfilePhoto.url) URL.revokeObjectURL(pendingProfilePhoto.url);
     pendingProfilePhoto = null;
     renderProfilePhotoPreview(myAvatarUrl);
+    profileAlwaysBannerInput.checked = alwaysShowBanner;
     openModal('profileOverlay');
   }
 
@@ -1841,7 +1884,56 @@
     });
   }
 
-  document.getElementById('adminRosterBtn').addEventListener('click', ()=>{
+  const deviceListEl = document.getElementById('deviceList');
+  async function loadDevices(){
+    deviceListEl.innerHTML = '<div class="hint">Loading…</div>';
+    const r = await apiFetch('/admin/users');
+    if (!r.ok){ deviceListEl.innerHTML = '<div class="hint">Could not load the device list.</div>'; return; }
+    const users = r.body.users || [];
+    if (!users.length){ deviceListEl.innerHTML = '<div class="hint">No one yet.</div>'; return; }
+    deviceListEl.innerHTML = '';
+    users.forEach(u=>{
+      const row = document.createElement('div');
+      row.className = 'roster-entry';
+      const info = document.createElement('div');
+      info.className = 'roster-entry-info';
+      info.innerHTML = `<div class="roster-entry-name">${escapeHtml(u.displayName)}</div>`;
+      row.appendChild(info);
+      const status = document.createElement('div');
+      status.className = 'roster-status ' + (u.hasDeviceLock ? 'claimed' : 'pending');
+      status.textContent = u.hasDeviceLock ? 'locked' : 'not set yet';
+      row.appendChild(status);
+      if (u.hasDeviceLock){
+        const resetBtn = document.createElement('div');
+        resetBtn.className = 'roster-disable-btn';
+        resetBtn.textContent = 'Reset';
+        resetBtn.addEventListener('click', async ()=>{
+          if (!confirm(`Reset ${u.displayName}'s device lock? Whichever device next signs in with their PIN will claim it.`)) return;
+          const rr = await apiFetch('/admin/reset-device', { method: 'POST', body: JSON.stringify({ userId: u.id }) });
+          if (rr.ok) loadDevices();
+          else showSessionBanner("Couldn't reset that device lock — try again.");
+        });
+        row.appendChild(resetBtn);
+      }
+      deviceListEl.appendChild(row);
+    });
+  }
+
+  const retentionSelect = document.getElementById('retentionSelect');
+  retentionSelect.addEventListener('change', async ()=>{
+    const prev = retentionSelect.dataset.saved || '0';
+    retentionSelect.disabled = true;
+    const r = await apiFetch('/admin/retention', { method: 'POST', body: JSON.stringify({ retentionDays: Number(retentionSelect.value) }) });
+    retentionSelect.disabled = false;
+    if (r.ok){
+      retentionSelect.dataset.saved = String(r.body.retentionDays);
+    } else {
+      retentionSelect.value = prev; // couldn't save — don't leave the UI claiming a setting that isn't actually active
+      showSessionBanner("Couldn't save the retention setting — try again.");
+    }
+  });
+
+  document.getElementById('adminRosterBtn').addEventListener('click', async ()=>{
     rosterNameInput.value = '';
     rosterDeptInput.value = '';
     rosterEmailInput.value = '';
@@ -1849,6 +1941,12 @@
     rosterNewPin.style.display = 'none';
     openModal('rosterOverlay');
     loadRoster();
+    loadDevices();
+    const r = await apiFetch('/admin/retention');
+    if (r.ok){
+      retentionSelect.value = String(r.body.retentionDays || 0);
+      retentionSelect.dataset.saved = retentionSelect.value;
+    }
   });
 
   document.getElementById('rosterAddBtn').addEventListener('click', async function(){
@@ -2114,7 +2212,17 @@
         const msgs = messagesByChat[chatId];
         if (msgs){
           const m = msgs.find(mm => mm.id === data.messageId);
-          if (m){ m.text = data.text; m.edited = true; }
+          if (m){
+            // Live edits from someone else arrive as ciphertext too — patch
+            // it in and force a re-decrypt rather than overwriting whatever
+            // was already correctly decrypted with nothing.
+            m.ciphertext = data.ciphertext;
+            m.iv = data.iv;
+            m.edited = true;
+            delete m._e2eeDone;
+            const chat = getChat(chatId);
+            if (chat) await decryptMessagesInPlace(chat, msgs);
+          }
         }
         if (activeChatId === chatId) renderConv();
         renderChatList();
@@ -2125,6 +2233,15 @@
           if (m) m.reactions = data.reactions;
         }
         if (activeChatId === chatId) renderConv();
+      } else if (data.type === 'purged'){
+        // Retention swept away everything at/before cutoffTs — drop the same
+        // from this open view instead of waiting for a manual refresh.
+        const msgs = messagesByChat[chatId];
+        if (msgs){
+          messagesByChat[chatId] = msgs.filter(mm => mm.ts >= data.cutoffTs);
+        }
+        if (activeChatId === chatId) renderConv();
+        renderChatList();
       }
     });
     ws.addEventListener('close', ()=>{
@@ -2183,6 +2300,16 @@
       connectNotifySocket();
     }
     if (!activeChatId) return;
+    // On mobile, .show-chat is what's actually switching the visible pane
+    // between the chat list and a conversation. renderConv() (called from
+    // openChat()) unconditionally re-adds .show-chat as a side effect — so
+    // without this check, backgrounding the app after pressing Back to the
+    // chat list and then returning would silently snap you back into the
+    // last chat you had open, looking exactly like "a message opened itself."
+    // activeChatId deliberately isn't cleared on Back (it's still needed for
+    // read state etc.), so the visible pane is the only reliable signal here.
+    const onMobileChatList = window.innerWidth <= 760 && !appEl.classList.contains('show-chat');
+    if (onMobileChatList) return;
     if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN || activeSocketChatId !== activeChatId){
       openChat(activeChatId);
     } else {
@@ -2249,6 +2376,24 @@
         osc.stop(start + 0.3);
       });
     } catch(e) {}
+  }
+
+  // The service worker's own IndexedDB (shared across the origin, unlike
+  // localStorage which a SW can't touch) needs a copy of the pin hash so it
+  // can re-authenticate a re-subscribe on its own if the browser silently
+  // rotates the push subscription while the app isn't open anywhere at all
+  // (see service-worker.js's pushsubscriptionchange handler).
+  function syncPinHashToServiceWorker(pinHash){
+    try {
+      const req = indexedDB.open('para-pin-badge', 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('kv');
+      req.onsuccess = () => {
+        try {
+          const tx = req.result.transaction('kv', 'readwrite');
+          tx.objectStore('kv').put(pinHash, 'pinHash');
+        } catch(e){}
+      };
+    } catch(e){}
   }
 
   const baseTitle = document.title;
@@ -2675,7 +2820,7 @@
 
       if (shouldAlert){
         playDing();
-        if (notifyPermissionOk() && document.visibilityState !== 'visible'){
+        if (notifyPermissionOk() && (alwaysShowBanner || document.visibilityState !== 'visible')){
           try {
             const title = data.chatType === 'group' ? (data.chatName || 'Group') : (msg.fromName || 'PArA PIN');
             const body = data.chatType === 'group' && msg.fromName ? `${msg.fromName}: ${msgText}` : msgText;

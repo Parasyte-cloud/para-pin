@@ -174,7 +174,7 @@ export class Registry {
     const url = new URL(request.url);
 
     if (request.method === 'POST' && url.pathname === '/session') {
-      const { pinHash, displayName } = await request.json();
+      const { pinHash, displayName, deviceId } = await request.json();
       if (!pinHash) return json({ error: 'missing_pin_hash' }, 400);
 
       // A roster entry pre-provisioned by an admin (see /admin/roster) claims
@@ -197,11 +197,13 @@ export class Registry {
           department: (roster && roster.department) || null,
           avatarUrl: null,
           e2eePublicKey: null,
+          deviceId: deviceId || null,
           createdAt: Date.now(),
         };
         await this.state.storage.put(`user:${pinHash}`, user);
         await this.state.storage.put(`userChats:${user.id}`, []);
-        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl, e2eePublicKey: null });
+        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl, e2eePublicKey: null, hasDeviceLock: !!user.deviceId });
+        await this.state.storage.put(`userIdToPinHash:${user.id}`, pinHash);
 
         // Bootstrap: nobody is admin yet, so whoever this very first account
         // turns out to be becomes the admin — there's no HR system to source
@@ -216,7 +218,27 @@ export class Registry {
       } else if (displayName && !user.displayName) {
         user.displayName = displayName;
         await this.state.storage.put(`user:${pinHash}`, user);
-        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null });
+        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: !!user.deviceId });
+      }
+
+      // Device lock (BlackBerry-style): the PIN alone isn't enough to sign in
+      // once it's bound to a device — this is what actually answers "someone
+      // has my PIN now, so what." `deviceId` is a random id the client
+      // generates once and keeps in localStorage; it's a deterrent against
+      // casual PIN sharing/leaks, not a cryptographic guarantee (a client
+      // that skips sending it, or sends a fake one, isn't stopped by this —
+      // it's meant to block "typed your PIN into a different phone," not a
+      // determined attacker forging raw API requests). The first device to
+      // ever log in with a given PIN claims it; an admin can clear the lock
+      // from the roster/devices panel if someone gets a new phone.
+      if (user.deviceId && deviceId && user.deviceId !== deviceId) {
+        return json({ error: 'device_mismatch' }, 403);
+      }
+      if (!user.deviceId && deviceId) {
+        user.deviceId = deviceId;
+        await this.state.storage.put(`user:${pinHash}`, user);
+        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: true });
+        await this.state.storage.put(`userIdToPinHash:${user.id}`, pinHash);
       }
 
       if (roster && roster.status !== 'claimed') {
@@ -284,7 +306,7 @@ export class Registry {
       if (typeof avatarUrl === 'string' || avatarUrl === null) user.avatarUrl = avatarUrl ? String(avatarUrl).slice(0, 500) : null;
       if (typeof department === 'string') user.department = department.trim().slice(0, 60) || null;
       await this.state.storage.put(`user:${user.pinHash}`, user);
-      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null });
+      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: !!user.deviceId });
       return json({ ok: true, displayName: user.displayName, avatarUrl: user.avatarUrl || null, department: user.department || null });
     }
 
@@ -301,7 +323,7 @@ export class Registry {
       }
       user.e2eePublicKey = publicKey;
       await this.state.storage.put(`user:${user.pinHash}`, user);
-      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey });
+      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey, hasDeviceLock: !!user.deviceId });
       return json({ ok: true });
     }
 
@@ -337,6 +359,8 @@ export class Registry {
       await this.state.storage.put(`userChats:${me.id}`, [...myChatIds, chatId]);
       const otherChatIds = (await this.state.storage.get(`userChats:${other.id}`)) || [];
       await this.state.storage.put(`userChats:${other.id}`, [...otherChatIds, chatId]);
+      const allChatIds = (await this.state.storage.get('allChatIds')) || [];
+      await this.state.storage.put('allChatIds', [...allChatIds, chatId]);
 
       return json({ chat, existing: false });
     }
@@ -369,6 +393,8 @@ export class Registry {
         const list = (await this.state.storage.get(`userChats:${uid}`)) || [];
         await this.state.storage.put(`userChats:${uid}`, [...list, chatId]);
       }
+      const allChatIds = (await this.state.storage.get('allChatIds')) || [];
+      await this.state.storage.put('allChatIds', [...allChatIds, chatId]);
       return json({ chat, notFound });
     }
 
@@ -476,6 +502,71 @@ export class Registry {
       entry.status = 'disabled';
       await this.state.storage.put(`roster:${id}`, entry);
       return json({ ok: true, entry });
+    }
+
+    // ---- Global message retention ----
+    // A single admin-set window applies everywhere — 0/absent means "keep
+    // forever" (the default, no behavior change unless an admin opts in).
+    // The actual purge happens on a daily Cron Trigger (see the `scheduled`
+    // export), which reads this value and asks every ChatRoom to drop
+    // anything older than the cutoff.
+    if (request.method === 'GET' && url.pathname === '/admin/retention') {
+      const requesterId = url.searchParams.get('requesterId');
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      const retentionDays = (await this.state.storage.get('retentionDays')) || 0;
+      return json({ retentionDays });
+    }
+    if (request.method === 'POST' && url.pathname === '/admin/retention') {
+      const { requesterId, retentionDays } = await request.json();
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      const days = Number(retentionDays) || 0;
+      if (![0, 30, 90, 365].includes(days)) return json({ error: 'invalid_value' }, 400);
+      await this.state.storage.put('retentionDays', days);
+      return json({ ok: true, retentionDays: days });
+    }
+
+    // ---- Device lock management ----
+    // Lists everyone who's ever logged in (not just admin-roster invites —
+    // this covers self-created PINs too) with whether their PIN is currently
+    // bound to a device, so an admin can find and reset anyone's lock.
+    if (request.method === 'GET' && url.pathname === '/admin/users') {
+      const requesterId = url.searchParams.get('requesterId');
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      const map = await this.state.storage.list({ prefix: 'userById:' });
+      const users = [];
+      for (const rec of map.values()) {
+        users.push({ id: rec.id, displayName: rec.displayName || 'Unnamed', hasDeviceLock: !!rec.hasDeviceLock });
+      }
+      return json({ users });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/admin/reset-device') {
+      const { requesterId, userId } = await request.json();
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      const pinHash = await this.state.storage.get(`userIdToPinHash:${userId}`);
+      if (!pinHash) return json({ error: 'not_found' }, 404);
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_found' }, 404);
+      user.deviceId = null;
+      await this.state.storage.put(`user:${pinHash}`, user);
+      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: false });
+      return json({ ok: true });
+    }
+
+    // Internal-only — used by the scheduled retention purge to enumerate
+    // every chat that's ever been created without needing to scan every
+    // user's chat list individually.
+    if (request.method === 'GET' && url.pathname === '/internal/all-chat-ids') {
+      const allChatIds = (await this.state.storage.get('allChatIds')) || [];
+      return json({ chatIds: allChatIds });
+    }
+    if (request.method === 'GET' && url.pathname === '/internal/retention-days') {
+      const retentionDays = (await this.state.storage.get('retentionDays')) || 0;
+      return json({ retentionDays });
     }
 
     return new Response('not found', { status: 404 });
@@ -774,6 +865,29 @@ export class ChatRoom {
       return json({ reads });
     }
 
+    // Called once a day by the top-level `scheduled` handler when an admin
+    // has set a retention window. Drops anything older than the cutoff and
+    // hands back the R2 keys of any attachments that went with them, since
+    // only the caller (which holds the MEDIA binding context) can delete
+    // those — this Durable Object only manages the message list itself.
+    if (request.method === 'POST' && url.pathname === '/purge-old') {
+      const { cutoffTs } = await request.json();
+      if (!cutoffTs) return json({ error: 'missing_cutoff' }, 400);
+      const msgs = await this.loadMessages();
+      const toRemove = msgs.filter((m) => m.ts < cutoffTs);
+      if (toRemove.length) {
+        const kept = msgs.filter((m) => m.ts >= cutoffTs);
+        this.messages = kept;
+        await this.state.storage.put('messages', kept);
+        this.broadcast(JSON.stringify({ type: 'purged', cutoffTs }), null);
+      }
+      const mediaKeys = toRemove
+        .filter((m) => m.attachment && m.attachment.url)
+        .map((m) => (m.attachment.url.match(/\/api\/media\/([^/]+)$/) || [])[1])
+        .filter(Boolean);
+      return json({ removed: toRemove.length, mediaKeys });
+    }
+
     // Messages are end-to-end encrypted client-side — this Durable Object
     // only ever stores/relays opaque ciphertext (+ IV) it cannot read.
     // `alg` is just metadata for the client ('dm' vs 'group', which key to
@@ -1042,7 +1156,7 @@ export default {
         const body = await request.json().catch(() => ({}));
         const res = await registryStub.fetch('https://internal/session', {
           method: 'POST',
-          body: JSON.stringify({ pinHash, displayName: body.displayName || null }),
+          body: JSON.stringify({ pinHash, displayName: body.displayName || null, deviceId: body.deviceId || null }),
         });
         return res;
       }
@@ -1071,9 +1185,49 @@ export default {
           const body = await request.json().catch(() => ({}));
           return registryStub.fetch('https://internal/admin/roster', {
             method: 'POST',
-            body: JSON.stringify({ requesterId: who.userId, name: body.name, department: body.department }),
+            body: JSON.stringify({ requesterId: who.userId, name: body.name, department: body.department, email: body.email }),
           });
         }
+      }
+
+      if (url.pathname === '/api/admin/retention') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        if (request.method === 'GET') {
+          return registryStub.fetch(`https://internal/admin/retention?requesterId=${encodeURIComponent(who.userId)}`);
+        }
+        if (request.method === 'POST') {
+          const body = await request.json().catch(() => ({}));
+          return registryStub.fetch('https://internal/admin/retention', {
+            method: 'POST',
+            body: JSON.stringify({ requesterId: who.userId, retentionDays: body.retentionDays }),
+          });
+        }
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/admin/users') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        return registryStub.fetch(`https://internal/admin/users?requesterId=${encodeURIComponent(who.userId)}`);
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/admin/reset-device') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/admin/reset-device', {
+          method: 'POST',
+          body: JSON.stringify({ requesterId: who.userId, userId: body.userId }),
+        });
       }
 
       if (request.method === 'POST' && url.pathname === '/api/admin/roster/disable') {
@@ -1392,6 +1546,41 @@ export default {
       return json({ error: 'not_found' }, 404);
     } catch (err) {
       return json({ error: 'server_error', message: String(err && err.message || err) }, 500);
+    }
+  },
+
+  // Runs once a day (see wrangler.jsonc's triggers.crons). A no-op unless an
+  // admin has explicitly set a retention window — the default is "keep
+  // everything forever," matching how this worked before retention existed.
+  async scheduled(event, env, ctx) {
+    try {
+      const registryStub = env.REGISTRY.get(env.REGISTRY.idFromName('global-registry-v1'));
+      const retRes = await registryStub.fetch('https://internal/internal/retention-days');
+      const { retentionDays } = await retRes.json();
+      if (!retentionDays) return;
+
+      const cutoffTs = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+      const listRes = await registryStub.fetch('https://internal/internal/all-chat-ids');
+      const { chatIds } = await listRes.json();
+
+      for (const chatId of chatIds || []) {
+        try {
+          const roomStub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(chatId));
+          const res = await roomStub.fetch('https://internal/purge-old', {
+            method: 'POST',
+            body: JSON.stringify({ cutoffTs }),
+          });
+          const { mediaKeys } = await res.json();
+          if (env.MEDIA && mediaKeys && mediaKeys.length) {
+            await Promise.all(mediaKeys.map((key) => env.MEDIA.delete(key).catch(() => {})));
+          }
+        } catch (e) {
+          // One chat failing shouldn't stop the rest of the sweep — it'll be
+          // retried on tomorrow's run regardless.
+        }
+      }
+    } catch (e) {
+      // Never let a retention-sweep failure affect anything else this worker does.
     }
   },
 };
