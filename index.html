@@ -975,6 +975,16 @@
   let socketLastActivityAt = 0;
   let sessionChats = [];
   let activeChatId = null;
+  // True right after the user taps Back to the mobile chat list.
+  // `activeChatId` deliberately stays set (still needed for read state etc.)
+  // so it alone can't tell "actually viewing this chat" apart from "backed
+  // out of it but a background update just touched it" — this flag is the
+  // real signal. Without it, ANY of the many `if (activeChatId === chatId)
+  // renderConv()` call sites scattered through the incoming-message/edit/
+  // reaction/etc. handlers would force the chat back open the instant
+  // something happened in it, which is exactly the "a message opens itself"
+  // glitch. Cleared the moment openChat() is called for real.
+  let stayOnMobileChatList = false;
   let myRawPin = null; // in-memory only for this unlocked session -- never persisted or sent anywhere
   let notifySocket = null;
   let notifyHeartbeatTimer = null;
@@ -1346,6 +1356,16 @@
     // reject the new PIN the person just chose.
     state.pin = hashPin(a);
     save();
+    // ensureMyE2eeKeyPair() only ever uploads the public key ONCE per page
+    // load and silently swallows failures — if that one attempt happened to
+    // fire (and fail) using the now-deleted OLD pinHash because it raced
+    // with this PIN change, nothing would ever retry it, and this account
+    // would stay invisible to everyone else's encryption forever until the
+    // next full reload. Re-uploading explicitly under the confirmed-current
+    // pinHash closes that gap.
+    if (myE2eeKeyPair){
+      apiFetch('/e2ee/public-key', { method: 'POST', body: JSON.stringify({ publicKey: myE2eeKeyPair.publicKeyB64, deviceId: myDeviceId }) }).catch(()=>{});
+    }
     document.getElementById('forcePinNewInput').value = '';
     document.getElementById('forcePinConfirmInput').value = '';
     closeModal('forcePinChangeOverlay');
@@ -1667,7 +1687,13 @@
     const name = chatDisplayName(chat);
     emptyState.style.display = 'none';
     activeConv.style.display = 'flex';
-    appEl.classList.add('show-chat');
+    // Don't force the conversation pane open on mobile if the person
+    // deliberately backed out to the chat list — renderConv() gets called
+    // from all over (incoming messages, edits, reactions, key resolution
+    // finishing, etc.), not just from actually opening a chat, and it has
+    // no other way to tell those apart. See stayOnMobileChatList.
+    const forceStayOnList = window.innerWidth <= 760 && stayOnMobileChatList;
+    if (!forceStayOnList) appEl.classList.add('show-chat');
     renderAvatar(convAvatar, name, chat.type==='group', chatAvatarUrl(chat));
     convTitle.textContent = name;
 
@@ -2016,6 +2042,7 @@
   searchInput.addEventListener('input', renderChatList);
   document.getElementById('backBtn').addEventListener('click', ()=>{
     appEl.classList.remove('show-chat');
+    stayOnMobileChatList = true;
   });
 
   document.getElementById('lockBtn').addEventListener('click', lockApp);
@@ -2342,6 +2369,7 @@
   // mobile Safari/Chrome when the screen locks) can silently miss messages
   // pushed over the WebSocket, and the cache alone would then go stale.
   async function openChat(chatId){
+    stayOnMobileChatList = false; // a real, explicit "enter this chat" always wins
     discardActiveRecording();
     if (voicePlayer && !voicePlayer.paused) voicePlayer.pause(); // leaving the chat shouldn't leave a voice note playing with no visible player
     const r = await apiFetch(`/chats/${chatId}/messages`);
@@ -3187,7 +3215,15 @@
     for (const id of chat.memberIds){
       memberDeviceKeys[id] = id === myUserId ? { [myDeviceId]: myE2eeKeyPair.publicKeyB64 } : await fetchPeerEffectiveDeviceKeys(id);
     }
-    if (chat.memberIds.some(id => !memberDeviceKeys[id] || !Object.keys(memberDeviceKeys[id]).length)) return null; // still waiting on someone — nobody has EVER uploaded any key for them, old or new
+    const missingIds = chat.memberIds.filter(id => !memberDeviceKeys[id] || !Object.keys(memberDeviceKeys[id]).length);
+    if (missingIds.length){
+      // Genuinely nobody has ever seen a key for this person — old or new —
+      // meaning they've never opened the app with E2EE active even once.
+      // Logged so "still waiting" has a concrete, checkable reason instead
+      // of being an unexplained permanent spinner.
+      console.warn('[e2ee] still waiting on a key for', { chatId: chat.id, missingIds, names: missingIds.map(id => userNameCache[id] || id) });
+      return null;
+    }
 
     const rawKey = crypto.getRandomValues(new Uint8Array(32));
     const newWraps = {};
