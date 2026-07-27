@@ -196,7 +196,8 @@
     background:rgba(5,6,8,0.32);
   }
   .sidebar-foot-main{ display:flex; align-items:center; gap:8px; }
-  .me-avatar{ width:25px; height:25px; border-radius:8px; background:linear-gradient(135deg, var(--ice), var(--fire)); display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:700; color:#0a0d12; flex-shrink:0; }
+  .me-avatar{ width:25px; height:25px; border-radius:8px; background:linear-gradient(135deg, var(--ice), var(--fire)); display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:700; color:#0a0d12; flex-shrink:0; cursor:pointer; }
+  #myProfileInfo{ cursor:pointer; }
   .me-name{ font-size:11px; font-weight:600; color:var(--text-hi); }
   .me-pin{ font-size:8.5px; color:var(--text-mid); }
   .sidebar-foot-main .icon-btn{ width:26px; height:26px; font-size:12.5px; border-radius:8px; background:rgba(255,255,255,0.08); border-color:var(--glass-brd-hi); }
@@ -311,6 +312,29 @@
   mark.search-hit{ background:rgba(255,210,63,0.4); color:inherit; border-radius:3px; padding:0 1px; }
   mark.search-hit.current{ background:var(--ice); color:#0a0d12; }
   #msgSearchBtn.is-active{ background:rgba(0,212,255,0.18); border-color:var(--ice); }
+
+  .profile-photo{
+    width:88px; height:88px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+    font-size:28px; font-weight:700; color:#0a0d12; background:linear-gradient(135deg, var(--ice), var(--fire));
+    flex-shrink:0;
+  }
+  .roster-new-pin{
+    background:rgba(0,212,255,0.1); border:1px solid rgba(0,212,255,0.35); border-radius:12px;
+    padding:12px; text-align:center; margin-bottom:14px;
+  }
+  .roster-new-pin .rp-pin{ font-family:'SF Mono', ui-monospace, monospace; font-size:20px; letter-spacing:.1em; color:var(--ice); font-weight:700; }
+  .roster-new-pin .rp-note{ font-size:11px; color:var(--text-mid); margin-top:4px; }
+  .roster-entry{ display:flex; align-items:center; gap:10px; padding:9px 4px; border-bottom:1px solid var(--glass-brd); }
+  .roster-entry:last-child{ border-bottom:none; }
+  .roster-entry-info{ flex:1; min-width:0; }
+  .roster-entry-name{ font-size:13px; font-weight:600; }
+  .roster-entry-meta{ font-size:11px; color:var(--text-mid); }
+  .roster-status{ font-size:10.5px; padding:2px 8px; border-radius:20px; font-weight:600; flex-shrink:0; }
+  .roster-status.pending{ background:rgba(255,176,32,0.15); color:#ffb020; }
+  .roster-status.claimed{ background:rgba(61,220,132,0.15); color:#3ddc84; }
+  .roster-status.disabled{ background:rgba(255,106,106,0.15); color:#ff6a6a; }
+  .roster-disable-btn{ font-size:11px; color:var(--text-mid); cursor:pointer; flex-shrink:0; padding:4px 8px; }
+  .roster-disable-btn:hover{ color:#ff6a6a; }
 
   .ns-row{ display:flex; justify-content:space-between; align-items:center; padding:9px 0; border-bottom:1px solid var(--glass-brd); font-size:13px; }
   .ns-row:last-of-type{ border-bottom:none; }
@@ -494,11 +518,12 @@
       <div class="chat-list" id="chatList"></div>
       <div class="sidebar-foot">
         <div class="sidebar-foot-main">
-          <div class="me-avatar" id="meAvatar">ME</div>
-          <div>
+          <div class="me-avatar" id="meAvatar" title="Edit your profile">ME</div>
+          <div id="myProfileInfo" title="Edit your profile">
             <div class="me-name" id="meName">You</div>
             <div class="me-pin mono" id="mePinLabel">PArA PIN active</div>
           </div>
+          <div class="icon-btn" id="adminRosterBtn" title="Team roster (admin)" style="display:none;">👥</div>
           <div class="icon-btn" id="notifyStatusBtn" title="Notification settings">🔔</div>
           <div class="icon-btn" id="shareBtn" title="Share my PIN">▦</div>
           <div class="icon-btn" id="lockBtn" title="Lock">🔒</div>
@@ -683,6 +708,44 @@
   </div>
 </div>
 
+<!-- ============ MY PROFILE MODAL ============ -->
+<div class="overlay" id="profileOverlay">
+  <div class="modal lg" style="text-align:center;">
+    <h3>Your profile</h3>
+    <div class="hint">This is what others see in chats.</div>
+    <div style="display:flex; flex-direction:column; align-items:center; margin:8px 0 6px;">
+      <div class="profile-photo" id="profilePhotoPreview"></div>
+      <input type="file" id="profilePhotoInput" accept="image/*" style="display:none;">
+      <div class="btn" id="profilePhotoBtn" style="margin-top:10px;">Change photo</div>
+    </div>
+    <input type="text" id="profileNameInput" placeholder="Your name" maxlength="40" style="margin-top:14px;">
+    <input type="text" id="profileDeptInput" placeholder="Department / role (optional)" maxlength="60">
+    <div class="modal-actions">
+      <div class="btn" onclick="closeModal('profileOverlay')">Cancel</div>
+      <div class="btn primary" id="profileSaveBtn">Save</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ ADMIN ROSTER MODAL ============ -->
+<div class="overlay" id="rosterOverlay">
+  <div class="modal lg">
+    <h3>Team roster</h3>
+    <div class="hint">Pre-add someone and hand them the PIN yourself — no phone number or email needed. The PIN is shown once; write it down or share it right away.</div>
+    <div style="display:flex; gap:8px;">
+      <input type="text" id="rosterNameInput" placeholder="Full name" style="flex:1;">
+      <input type="text" id="rosterDeptInput" placeholder="Department (optional)" style="flex:1;">
+    </div>
+    <div class="hint" id="rosterError" style="display:none; color:#ff6a6a; margin-top:-6px;"></div>
+    <div class="btn primary" id="rosterAddBtn" style="margin-bottom:14px;">Generate PIN</div>
+    <div id="rosterNewPin" class="roster-new-pin" style="display:none;"></div>
+    <div class="contact-pick" id="rosterList" style="max-height:280px;"></div>
+    <div class="modal-actions">
+      <div class="btn primary" onclick="closeModal('rosterOverlay')">Done</div>
+    </div>
+  </div>
+</div>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js"></script>
 <script>
@@ -817,6 +880,10 @@
   let pendingAttachment = null; // { blob, url (object URL for preview), width, height }
   let notifyPrefs = {}; // chatId -> 'all' | 'mentions' | 'mute' (default 'all' when absent)
   let replyingTo = null; // { id, fromName, text } snapshot of the message being replied to, or null
+  let myAvatarUrl = null;
+  let myDepartment = null;
+  let iAmAdmin = false;
+  let userAvatarCache = {}; // userId -> avatarUrl | null
 
   async function apiFetch(path, opts = {}){
     const headers = { 'content-type': 'application/json', ...(opts.headers || {}) };
@@ -877,7 +944,11 @@
     let r = await apiFetch('/session', { method: 'POST', body: JSON.stringify({ displayName: cachedName }) });
 
     if (!r.ok) {
-      showSessionBanner(r.networkError ? "Can't reach the PArA PIN server — check your connection." : 'Something went wrong starting your session.');
+      if (r.body && r.body.error === 'pin_disabled') {
+        showSessionBanner('This PIN has been disabled. Contact your admin if that seems wrong.');
+      } else {
+        showSessionBanner(r.networkError ? "Can't reach the PArA PIN server — check your connection." : 'Something went wrong starting your session.');
+      }
       return;
     }
     hideSessionBanner();
@@ -892,14 +963,18 @@
 
     myUserId = r.body.userId;
     myDisplayName = r.body.displayName;
+    myAvatarUrl = r.body.avatarUrl || null;
+    myDepartment = r.body.department || null;
+    iAmAdmin = !!r.body.isAdmin;
     sessionChats = r.body.chats || [];
     activeChatId = null;
     messagesByChat = {};
     userNameCache = {};
+    userAvatarCache = {};
 
     document.getElementById('meName').textContent = myDisplayName || 'You';
-    document.getElementById('meAvatar').textContent = initials(myDisplayName || 'You');
-    document.getElementById('meAvatar').style.background = colorFor(myUserId || 'me');
+    renderMyAvatar();
+    document.getElementById('adminRosterBtn').style.display = iAmAdmin ? 'flex' : 'none';
 
     // Seed every chat's last-message preview and unread count from the
     // server right away — without this, the chat list only ever learned
@@ -1148,7 +1223,10 @@
     if (needed.size === 0) return;
     const r = await apiFetch('/users?ids=' + [...needed].join(','));
     if (r.ok && r.body.users) {
-      for (const u of r.body.users) userNameCache[u.id] = u.displayName || 'PArA PIN user';
+      for (const u of r.body.users) {
+        userNameCache[u.id] = u.displayName || 'PArA PIN user';
+        userAvatarCache[u.id] = u.avatarUrl || null;
+      }
     }
     for (const id of needed) if (!(id in userNameCache)) userNameCache[id] = 'PArA PIN user';
   }
@@ -1170,10 +1248,26 @@
     return prefix + m.text;
   }
 
-  function renderAvatar(el, name, isGroup){
-    el.textContent = isGroup ? '' : initials(name);
+  function renderAvatar(el, name, isGroup, avatarUrl){
     el.classList.toggle('group', !!isGroup);
-    el.style.background = colorFor(name);
+    if (avatarUrl){
+      el.style.background = `center/cover no-repeat url("${avatarUrl}")`;
+      el.textContent = '';
+    } else {
+      el.textContent = isGroup ? '' : initials(name);
+      el.style.background = colorFor(name);
+    }
+  }
+
+  function renderMyAvatar(){
+    renderAvatar(document.getElementById('meAvatar'), myDisplayName || 'You', false, myAvatarUrl);
+  }
+
+  // DMs can show the other person's photo; groups don't have one of their own.
+  function chatAvatarUrl(chat){
+    if (chat.type === 'group') return null;
+    const otherId = chat.memberIds.find(id => id !== myUserId);
+    return otherId ? (userAvatarCache[otherId] || null) : null;
   }
 
   function renderChatList(){
@@ -1196,7 +1290,7 @@
       row.className = 'chat-item' + (chat.id === activeChatId ? ' active' : '');
       const av = document.createElement('div');
       av.className = 'avatar' + (chat.type==='group' ? ' group' : '');
-      renderAvatar(av, name, chat.type==='group');
+      renderAvatar(av, name, chat.type==='group', chatAvatarUrl(chat));
 
       const body = document.createElement('div');
       body.className = 'ci-body';
@@ -1243,7 +1337,7 @@
     emptyState.style.display = 'none';
     activeConv.style.display = 'flex';
     appEl.classList.add('show-chat');
-    renderAvatar(convAvatar, name, chat.type==='group');
+    renderAvatar(convAvatar, name, chat.type==='group', chatAvatarUrl(chat));
     convTitle.textContent = name;
 
     const typing = typingUsers[chat.id];
@@ -1538,7 +1632,7 @@
       row.style.cursor = 'default';
       const av = document.createElement('div');
       av.className = 'avatar';
-      renderAvatar(av, name, false);
+      renderAvatar(av, name, false, isMe ? myAvatarUrl : userAvatarCache[id]);
       row.appendChild(av);
       const nm = document.createElement('div');
       nm.className = 'pname';
@@ -1607,6 +1701,160 @@
     } else {
       done();
     }
+  });
+
+  // ---------------- my profile (photo, name, department) ----------------
+  const profilePhotoPreview = document.getElementById('profilePhotoPreview');
+  const profilePhotoInput = document.getElementById('profilePhotoInput');
+  const profileNameInput = document.getElementById('profileNameInput');
+  const profileDeptInput = document.getElementById('profileDeptInput');
+  const profileSaveBtn = document.getElementById('profileSaveBtn');
+  let pendingProfilePhoto = null; // { blob, url } staged until Save; url is an object URL for local preview only
+
+  function renderProfilePhotoPreview(url){
+    if (url){
+      profilePhotoPreview.style.background = `center/cover no-repeat url("${url}")`;
+      profilePhotoPreview.textContent = '';
+    } else {
+      profilePhotoPreview.style.background = 'linear-gradient(135deg, var(--ice), var(--fire))';
+      profilePhotoPreview.textContent = initials(profileNameInput.value || myDisplayName || 'You');
+    }
+  }
+
+  function openProfileModal(){
+    profileNameInput.value = myDisplayName || '';
+    profileDeptInput.value = myDepartment || '';
+    if (pendingProfilePhoto && pendingProfilePhoto.url) URL.revokeObjectURL(pendingProfilePhoto.url);
+    pendingProfilePhoto = null;
+    renderProfilePhotoPreview(myAvatarUrl);
+    openModal('profileOverlay');
+  }
+
+  document.getElementById('meAvatar').addEventListener('click', openProfileModal);
+  document.getElementById('myProfileInfo').addEventListener('click', openProfileModal);
+  profileNameInput.addEventListener('input', ()=>{ if (!pendingProfilePhoto && !myAvatarUrl) renderProfilePhotoPreview(null); });
+
+  document.getElementById('profilePhotoBtn').addEventListener('click', ()=> profilePhotoInput.click());
+  profilePhotoInput.addEventListener('change', async ()=>{
+    const file = profilePhotoInput.files[0];
+    profilePhotoInput.value = '';
+    if (!file || !file.type.startsWith('image/')){ showSessionBanner('Pick an image for your profile photo.'); return; }
+    try {
+      const resized = await resizeImageFile(file, 480, 0.85);
+      if (pendingProfilePhoto && pendingProfilePhoto.url) URL.revokeObjectURL(pendingProfilePhoto.url);
+      pendingProfilePhoto = { blob: resized.blob, url: URL.createObjectURL(resized.blob) };
+      renderProfilePhotoPreview(pendingProfilePhoto.url);
+    } catch(e){
+      showSessionBanner("Couldn't process that photo — try a different one.");
+    }
+  });
+
+  profileSaveBtn.addEventListener('click', async ()=>{
+    const name = profileNameInput.value.trim();
+    if (!name){ showSessionBanner('Enter a display name.'); return; }
+    profileSaveBtn.disabled = true;
+    let avatarUrl = myAvatarUrl;
+    if (pendingProfilePhoto){
+      const uploadRes = await apiFetch('/upload', {
+        method: 'POST',
+        headers: { 'content-type': pendingProfilePhoto.blob.type || 'image/jpeg', 'x-file-name': 'profile.jpg' },
+        body: pendingProfilePhoto.blob,
+      });
+      if (uploadRes.ok && uploadRes.body.url){
+        avatarUrl = uploadRes.body.url;
+      } else {
+        profileSaveBtn.disabled = false;
+        showSessionBanner("Couldn't upload the photo — try again.");
+        return;
+      }
+    }
+    const department = profileDeptInput.value.trim();
+    const r = await apiFetch('/profile', { method: 'POST', body: JSON.stringify({ displayName: name, avatarUrl, department }) });
+    profileSaveBtn.disabled = false;
+    if (r.ok){
+      myDisplayName = r.body.displayName;
+      myAvatarUrl = r.body.avatarUrl;
+      myDepartment = r.body.department;
+      localStorage.setItem('parapin_displayname', myDisplayName);
+      document.getElementById('meName').textContent = myDisplayName || 'You';
+      renderMyAvatar();
+      if (pendingProfilePhoto){ URL.revokeObjectURL(pendingProfilePhoto.url); pendingProfilePhoto = null; }
+      closeModal('profileOverlay');
+      renderChatList();
+      if (activeChatId) renderConv();
+    } else {
+      showSessionBanner("Couldn't save your profile — try again.");
+    }
+  });
+
+  // ---------------- admin roster (lightweight HR-linked onboarding) ----------------
+  const rosterNameInput = document.getElementById('rosterNameInput');
+  const rosterDeptInput = document.getElementById('rosterDeptInput');
+  const rosterError = document.getElementById('rosterError');
+  const rosterNewPin = document.getElementById('rosterNewPin');
+  const rosterListEl = document.getElementById('rosterList');
+
+  function showRosterError(msg){ rosterError.textContent = msg; rosterError.style.display = 'block'; }
+  function hideRosterError(){ rosterError.style.display = 'none'; }
+
+  async function loadRoster(){
+    rosterListEl.innerHTML = '<div class="hint">Loading…</div>';
+    const r = await apiFetch('/admin/roster');
+    if (!r.ok){ rosterListEl.innerHTML = '<div class="hint">Could not load the roster.</div>'; return; }
+    const entries = r.body.entries || [];
+    if (!entries.length){ rosterListEl.innerHTML = '<div class="hint">Nobody added yet.</div>'; return; }
+    rosterListEl.innerHTML = '';
+    entries.forEach(e=>{
+      const row = document.createElement('div');
+      row.className = 'roster-entry';
+      const info = document.createElement('div');
+      info.className = 'roster-entry-info';
+      info.innerHTML = `<div class="roster-entry-name">${escapeHtml(e.name)}</div><div class="roster-entry-meta">${escapeHtml(e.department || 'No department set')}</div>`;
+      row.appendChild(info);
+      const status = document.createElement('div');
+      status.className = 'roster-status ' + e.status;
+      status.textContent = e.status;
+      row.appendChild(status);
+      if (e.status !== 'disabled'){
+        const disableBtn = document.createElement('div');
+        disableBtn.className = 'roster-disable-btn';
+        disableBtn.textContent = 'Disable';
+        disableBtn.addEventListener('click', async ()=>{
+          if (!confirm(`Disable ${e.name}'s PIN? They won't be able to sign in again.`)) return;
+          const dr = await apiFetch('/admin/roster/disable', { method: 'POST', body: JSON.stringify({ id: e.id }) });
+          if (dr.ok) loadRoster();
+          else showSessionBanner("Couldn't disable that entry — try again.");
+        });
+        row.appendChild(disableBtn);
+      }
+      rosterListEl.appendChild(row);
+    });
+  }
+
+  document.getElementById('adminRosterBtn').addEventListener('click', ()=>{
+    rosterNameInput.value = '';
+    rosterDeptInput.value = '';
+    hideRosterError();
+    rosterNewPin.style.display = 'none';
+    openModal('rosterOverlay');
+    loadRoster();
+  });
+
+  document.getElementById('rosterAddBtn').addEventListener('click', async function(){
+    const btn = this;
+    if (btn.disabled) return;
+    const name = rosterNameInput.value.trim();
+    if (!name){ showRosterError('Enter a name.'); return; }
+    hideRosterError();
+    btn.disabled = true;
+    const r = await apiFetch('/admin/roster', { method: 'POST', body: JSON.stringify({ name, department: rosterDeptInput.value.trim() }) });
+    btn.disabled = false;
+    if (!r.ok){ showRosterError('Could not add them — try again.'); return; }
+    rosterNameInput.value = '';
+    rosterDeptInput.value = '';
+    rosterNewPin.style.display = 'block';
+    rosterNewPin.innerHTML = `<div class="rp-pin">${r.body.pin.split('').join(' ')}</div><div class="rp-note">${escapeHtml(r.body.entry.name)}'s PIN — shown once, share it with them now. They'll enter it like any other PArA PIN.</div>`;
+    loadRoster();
   });
 
   // ---------------- opening a chat: fetch history + connect realtime ----------------
@@ -2882,7 +3130,7 @@
       row.className = 'pick-row';
       const av = document.createElement('div');
       av.className = 'avatar';
-      renderAvatar(av, name, false);
+      renderAvatar(av, name, false, userAvatarCache[otherId]);
       row.innerHTML = `<input type="checkbox" data-id="${otherId}">`;
       row.appendChild(av);
       const nm = document.createElement('div');

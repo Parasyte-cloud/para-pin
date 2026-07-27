@@ -145,21 +145,52 @@ export class Registry {
       const { pinHash, displayName } = await request.json();
       if (!pinHash) return json({ error: 'missing_pin_hash' }, 400);
 
+      // A roster entry pre-provisioned by an admin (see /admin/roster) claims
+      // itself the first time its PIN is actually used — the person gets
+      // their name/department pre-filled instead of the free-text "what
+      // should we call you" step, and the entry is marked claimed so the
+      // admin can see who's actually signed on.
+      const rosterId = await this.state.storage.get(`rosterByPin:${pinHash}`);
+      let roster = rosterId ? await this.state.storage.get(`roster:${rosterId}`) : null;
+      if (roster && roster.status === 'disabled') {
+        return json({ error: 'pin_disabled' }, 403);
+      }
+
       let user = await this.state.storage.get(`user:${pinHash}`);
       if (!user) {
         user = {
           id: crypto.randomUUID(),
           pinHash,
-          displayName: displayName || null,
+          displayName: (roster && roster.name) || displayName || null,
+          department: (roster && roster.department) || null,
+          avatarUrl: null,
           createdAt: Date.now(),
         };
         await this.state.storage.put(`user:${pinHash}`, user);
         await this.state.storage.put(`userChats:${user.id}`, []);
-        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName });
+        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl });
+
+        // Bootstrap: nobody is admin yet, so whoever this very first account
+        // turns out to be becomes the admin — there's no HR system to source
+        // that decision from, so "first person to ever open this deployment"
+        // is the least-surprising stand-in for "whoever set this up."
+        const admins = (await this.state.storage.get('admins')) || [];
+        const anyUserExists = await this.state.storage.get('anyUserExists');
+        if (!anyUserExists && admins.length === 0) {
+          await this.state.storage.put('admins', [user.id]);
+        }
+        await this.state.storage.put('anyUserExists', true);
       } else if (displayName && !user.displayName) {
         user.displayName = displayName;
         await this.state.storage.put(`user:${pinHash}`, user);
-        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName });
+        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null });
+      }
+
+      if (roster && roster.status !== 'claimed') {
+        roster.status = 'claimed';
+        roster.userId = user.id;
+        roster.claimedAt = Date.now();
+        await this.state.storage.put(`roster:${roster.id}`, roster);
       }
 
       const chatIds = (await this.state.storage.get(`userChats:${user.id}`)) || [];
@@ -184,7 +215,28 @@ export class Registry {
         }));
       }
 
-      return json({ userId: user.id, displayName: user.displayName, chats, summaries });
+      const admins = (await this.state.storage.get('admins')) || [];
+      return json({
+        userId: user.id,
+        displayName: user.displayName,
+        avatarUrl: user.avatarUrl || null,
+        department: user.department || null,
+        isAdmin: admins.includes(user.id),
+        chats,
+        summaries,
+      });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/profile') {
+      const { pinHash, displayName, avatarUrl, department } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      if (typeof displayName === 'string' && displayName.trim()) user.displayName = displayName.trim().slice(0, 40);
+      if (typeof avatarUrl === 'string' || avatarUrl === null) user.avatarUrl = avatarUrl ? String(avatarUrl).slice(0, 500) : null;
+      if (typeof department === 'string') user.department = department.trim().slice(0, 60) || null;
+      await this.state.storage.put(`user:${user.pinHash}`, user);
+      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null });
+      return json({ ok: true, displayName: user.displayName, avatarUrl: user.avatarUrl || null, department: user.department || null });
     }
 
     if (request.method === 'GET' && url.pathname === '/users') {
@@ -283,7 +335,74 @@ export class Registry {
       const pinHash = url.searchParams.get('pinHash');
       const user = await this.state.storage.get(`user:${pinHash}`);
       if (!user) return json({ ok: false });
-      return json({ ok: true, userId: user.id, displayName: user.displayName });
+      const admins = (await this.state.storage.get('admins')) || [];
+      return json({ ok: true, userId: user.id, displayName: user.displayName, isAdmin: admins.includes(user.id) });
+    }
+
+    // ---- Admin roster: lightweight stand-in for "HR-linked onboarding" ----
+    // No real HR system exists to source this from, so an admin pre-adds a
+    // person by name/department, gets a freshly generated PIN back exactly
+    // once (never stored in plaintext — same as every other PIN in this
+    // app), and hands it to them directly. The first time that PIN is
+    // actually used, /session claims the entry and pre-fills their profile.
+    if (request.method === 'GET' && url.pathname === '/admin/roster') {
+      const requesterId = url.searchParams.get('requesterId');
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      const list = (await this.state.storage.get('rosterList')) || [];
+      const entries = [];
+      for (const id of list) {
+        const e = await this.state.storage.get(`roster:${id}`);
+        if (e) entries.push(e);
+      }
+      entries.sort((a, b) => b.createdAt - a.createdAt);
+      return json({ entries });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/admin/roster') {
+      const { requesterId, name, department } = await request.json();
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      if (!name || !name.trim()) return json({ error: 'missing_name' }, 400);
+
+      let pin = null;
+      let pinHash = null;
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const candidate = String(Math.floor(1000000 + Math.random() * 9000000));
+        const candidateHash = await sha256Hex(candidate);
+        const existingUser = await this.state.storage.get(`user:${candidateHash}`);
+        const existingRoster = await this.state.storage.get(`rosterByPin:${candidateHash}`);
+        if (!existingUser && !existingRoster) { pin = candidate; pinHash = candidateHash; break; }
+      }
+      if (!pin) return json({ error: 'could_not_generate_pin' }, 500);
+
+      const id = crypto.randomUUID();
+      const entry = {
+        id,
+        name: name.trim().slice(0, 60),
+        department: (department || '').trim().slice(0, 60) || null,
+        status: 'pending',
+        userId: null,
+        createdAt: Date.now(),
+        claimedAt: null,
+      };
+      await this.state.storage.put(`roster:${id}`, entry);
+      await this.state.storage.put(`rosterByPin:${pinHash}`, id);
+      const list = (await this.state.storage.get('rosterList')) || [];
+      await this.state.storage.put('rosterList', [...list, id]);
+
+      return json({ entry, pin });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/admin/roster/disable') {
+      const { requesterId, id } = await request.json();
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      const entry = await this.state.storage.get(`roster:${id}`);
+      if (!entry) return json({ error: 'not_found' }, 404);
+      entry.status = 'disabled';
+      await this.state.storage.put(`roster:${id}`, entry);
+      return json({ ok: true, entry });
     }
 
     return new Response('not found', { status: 404 });
@@ -780,6 +899,48 @@ export default {
           body: JSON.stringify({ pinHash, displayName: body.displayName || null }),
         });
         return res;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/profile') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        const res = await registryStub.fetch('https://internal/profile', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, displayName: body.displayName, avatarUrl: body.avatarUrl, department: body.department }),
+        });
+        return res;
+      }
+
+      if (url.pathname === '/api/admin/roster') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        if (request.method === 'GET') {
+          return registryStub.fetch(`https://internal/admin/roster?requesterId=${encodeURIComponent(who.userId)}`);
+        }
+        if (request.method === 'POST') {
+          const body = await request.json().catch(() => ({}));
+          return registryStub.fetch('https://internal/admin/roster', {
+            method: 'POST',
+            body: JSON.stringify({ requesterId: who.userId, name: body.name, department: body.department }),
+          });
+        }
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/admin/roster/disable') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/admin/roster/disable', {
+          method: 'POST',
+          body: JSON.stringify({ requesterId: who.userId, id: body.id }),
+        });
       }
 
       if (request.method === 'GET' && url.pathname === '/api/presence') {
