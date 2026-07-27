@@ -20,6 +20,29 @@ function authHash(request, url) {
   return request.headers.get('X-Para-Pin-Hash') || url.searchParams.get('pinHash') || null;
 }
 
+// Builds the cached "public view" of a user that other people's clients can
+// look up via GET /users — kept in its own function so every place that
+// writes it (session, profile edits, key uploads, device resets, admin
+// promotion, etc.) stays in sync instead of each hand-rolling the same
+// object and inevitably drifting out of sync with each other (which is
+// exactly how a previous round's `hasDeviceLock` bug happened).
+function userByIdSnapshot(user, admins) {
+  const deviceIds = Array.isArray(user.deviceIds) ? user.deviceIds : [];
+  const allKeys = (user.devicePublicKeys && typeof user.devicePublicKeys === 'object') ? user.devicePublicKeys : {};
+  const trustedKeys = {};
+  for (const did of deviceIds) if (allKeys[did]) trustedKeys[did] = allKeys[did];
+  return {
+    id: user.id,
+    displayName: user.displayName,
+    avatarUrl: user.avatarUrl || null,
+    e2eePublicKey: user.e2eePublicKey || null,
+    devicePublicKeys: trustedKeys,
+    hasDeviceLock: deviceIds.length > 0,
+    deviceCount: deviceIds.length,
+    isAdmin: Array.isArray(admins) ? admins.includes(user.id) : undefined,
+  };
+}
+
 // ================= Web Push (RFC 8291 payload encryption + VAPID) =================
 // No npm 'web-push' library available in the Workers runtime, so this implements
 // the spec directly against Web Crypto: ECDH key agreement + two-stage HKDF to
@@ -125,11 +148,35 @@ async function sendWebPush(subscription, payloadObj, env) {
       'Content-Type': 'application/octet-stream',
       'Content-Encoding': 'aes128gcm',
       'TTL': '86400',
+      // Without an explicit Urgency, push services fall back to "normal" —
+      // and Apple's implementation in particular is known to sit on
+      // normal/unspecified-priority pushes and deliver them late (or not at
+      // all) once the device is in Low Power Mode or the browser/PWA hasn't
+      // been used in a while, which looks exactly like "sometimes it just
+      // doesn't come." Marking every message notification "high" is the
+      // documented fix — it tells the OS this is worth waking up for.
+      'Urgency': 'high',
       'Authorization': `vapid t=${jwt}, k=${env.VAPID_PUBLIC_KEY}`,
     },
     body,
   });
   return { ok: res.ok, status: res.status };
+}
+
+// A single transient failure (a network blip, or a 5xx from the push
+// service itself) previously meant that one notification was just gone —
+// nothing anywhere retried it, which is exactly the kind of thing that adds
+// up to "notifications come sometimes, not every time" without ever
+// throwing an error worth noticing. One short retry covers that without
+// meaningfully delaying delivery. 404/410 (subscription gone for good)
+// still isn't retried — that's not a transient failure, retrying can't help.
+async function sendWebPushWithRetry(subscription, payloadObj, env) {
+  let result = await sendWebPush(subscription, payloadObj, env);
+  if (!result.ok && result.status !== 404 && result.status !== 410) {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    result = await sendWebPush(subscription, payloadObj, env);
+  }
+  return result;
 }
 
 // ================= Transactional email (Resend) =================
@@ -211,7 +258,7 @@ export class Registry {
         };
         await this.state.storage.put(`user:${pinHash}`, user);
         await this.state.storage.put(`userChats:${user.id}`, []);
-        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl, e2eePublicKey: null, hasDeviceLock: false });
+        await this.state.storage.put(`userById:${user.id}`, userByIdSnapshot(user));
         await this.state.storage.put(`userIdToPinHash:${user.id}`, pinHash);
 
         // Bootstrap: nobody is admin yet, so whoever this very first account
@@ -234,7 +281,7 @@ export class Registry {
       if (displayName && !user.displayName) {
         user.displayName = displayName;
         await this.state.storage.put(`user:${pinHash}`, user);
-        await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: user.deviceIds.length > 0, deviceCount: user.deviceIds.length });
+        await this.state.storage.put(`userById:${user.id}`, userByIdSnapshot(user));
       }
 
       // Device trust: the PIN alone isn't enough to sign in from a device
@@ -251,7 +298,7 @@ export class Registry {
         if (user.deviceIds.length === 0) {
           user.deviceIds = [deviceId];
           await this.state.storage.put(`user:${pinHash}`, user);
-          await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: true, deviceCount: 1 });
+          await this.state.storage.put(`userById:${user.id}`, userByIdSnapshot(user));
           await this.state.storage.put(`userIdToPinHash:${user.id}`, pinHash);
         } else {
           return json({ error: 'device_approval_required' }, 403);
@@ -329,24 +376,44 @@ export class Registry {
       if (typeof avatarUrl === 'string' || avatarUrl === null) user.avatarUrl = avatarUrl ? String(avatarUrl).slice(0, 500) : null;
       if (typeof department === 'string') user.department = department.trim().slice(0, 60) || null;
       await this.state.storage.put(`user:${user.pinHash}`, user);
-      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: Array.isArray(user.deviceIds) && user.deviceIds.length > 0, deviceCount: Array.isArray(user.deviceIds) ? user.deviceIds.length : 0 });
+      await this.state.storage.put(`userById:${user.id}`, userByIdSnapshot(user));
       return json({ ok: true, displayName: user.displayName, avatarUrl: user.avatarUrl || null, department: user.department || null });
     }
 
-    // Uploads this device's E2EE public key (ECDH P-256, raw bytes, base64url)
-    // for the account. Safe to call on every login — it just keeps the
-    // server's copy in sync with whatever's actually in this browser's
-    // IndexedDB. The matching private key never leaves the device.
+    // Uploads THIS device's E2EE public key (ECDH P-256, raw bytes,
+    // base64url) for the account. Safe to call on every login — it just
+    // keeps the server's copy in sync with whatever's actually in this
+    // browser's IndexedDB. The matching private key never leaves the device.
+    //
+    // Two fields get written here, for backward-compatibility reasons:
+    //  - `devicePublicKeys[deviceId]` is the current, authoritative record —
+    //    every trusted device gets its own entry, which is what makes
+    //    multi-device E2EE (a message wrapped separately for each of a
+    //    person's devices) possible at all.
+    //  - `e2eePublicKey` (singular) is the OLD pre-multi-device field. DMs
+    //    created before multi-device shipped were encrypted with a key
+    //    derived directly from this single field, with no wrap stored
+    //    anywhere — so it's the only way old DM history stays decryptable.
+    //    It keeps updating for as long as the account only has one trusted
+    //    device (the common case, and exactly the situation the old scheme
+    //    assumed), then freezes the moment a second device joins — from
+    //    that point on it just serves as a fixed fallback key for whichever
+    //    device was original, rather than a live "latest device" pointer
+    //    that would otherwise silently break DMs every time someone signs
+    //    into a new device (which is the bug this replaces).
     if (request.method === 'POST' && url.pathname === '/e2ee/public-key') {
-      const { pinHash, publicKey } = await request.json();
+      const { pinHash, publicKey, deviceId } = await request.json();
       const user = await this.state.storage.get(`user:${pinHash}`);
       if (!user) return json({ error: 'not_registered' }, 401);
       if (typeof publicKey !== 'string' || !publicKey || publicKey.length > 500) {
         return json({ error: 'invalid_key' }, 400);
       }
-      user.e2eePublicKey = publicKey;
+      if (!Array.isArray(user.deviceIds)) user.deviceIds = user.deviceId ? [user.deviceId] : [];
+      if (!user.devicePublicKeys || typeof user.devicePublicKeys !== 'object') user.devicePublicKeys = {};
+      if (deviceId) user.devicePublicKeys[deviceId] = publicKey;
+      if (user.deviceIds.length <= 1) user.e2eePublicKey = publicKey;
       await this.state.storage.put(`user:${user.pinHash}`, user);
-      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey, hasDeviceLock: Array.isArray(user.deviceIds) && user.deviceIds.length > 0, deviceCount: Array.isArray(user.deviceIds) ? user.deviceIds.length : 0 });
+      await this.state.storage.put(`userById:${user.id}`, userByIdSnapshot(user));
       return json({ ok: true });
     }
 
@@ -569,9 +636,44 @@ export class Registry {
       const map = await this.state.storage.list({ prefix: 'userById:' });
       const users = [];
       for (const rec of map.values()) {
-        users.push({ id: rec.id, displayName: rec.displayName || 'Unnamed', hasDeviceLock: !!rec.hasDeviceLock, deviceCount: rec.deviceCount || (rec.hasDeviceLock ? 1 : 0) });
+        users.push({ id: rec.id, displayName: rec.displayName || 'Unnamed', hasDeviceLock: !!rec.hasDeviceLock, deviceCount: rec.deviceCount || (rec.hasDeviceLock ? 1 : 0), isAdmin: admins.includes(rec.id) });
       }
       return json({ users });
+    }
+
+    // Admin status is account-level (controls access to this Admin Console)
+    // and is completely separate from who created a given group — creating
+    // a group doesn't make you its "admin" in any special sense here; every
+    // member of a group has the same abilities (see /leave-group etc.).
+    // Anyone already an admin can promote or demote anyone else, including
+    // themselves, EXCEPT the last remaining admin can't demote themselves —
+    // otherwise the account roster/retention/device panel would become
+    // permanently unreachable with no way back in short of editing storage
+    // directly.
+    if (request.method === 'POST' && url.pathname === '/admin/promote') {
+      const { requesterId, userId } = await request.json();
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      if (!userId) return json({ error: 'missing_fields' }, 400);
+      const pinHash = await this.state.storage.get(`userIdToPinHash:${userId}`);
+      if (!pinHash) return json({ error: 'not_found' }, 404);
+      if (!admins.includes(userId)) {
+        admins.push(userId);
+        await this.state.storage.put('admins', admins);
+      }
+      return json({ ok: true });
+    }
+    if (request.method === 'POST' && url.pathname === '/admin/demote') {
+      const { requesterId, userId } = await request.json();
+      let admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      if (!userId) return json({ error: 'missing_fields' }, 400);
+      if (admins.length <= 1 && admins.includes(userId)) {
+        return json({ error: 'last_admin' }, 400);
+      }
+      admins = admins.filter((id) => id !== userId);
+      await this.state.storage.put('admins', admins);
+      return json({ ok: true });
     }
 
     if (request.method === 'POST' && url.pathname === '/admin/reset-device') {
@@ -590,8 +692,9 @@ export class Registry {
       // and just not approving the lost one for anything new.
       user.deviceIds = [];
       user.pendingDeviceLink = null;
+      user.devicePublicKeys = {};
       await this.state.storage.put(`user:${pinHash}`, user);
-      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: false, deviceCount: 0 });
+      await this.state.storage.put(`userById:${user.id}`, userByIdSnapshot(user));
       return json({ ok: true });
     }
 
@@ -616,7 +719,7 @@ export class Registry {
       await this.state.storage.delete(`user:${oldPinHash}`);
       await this.state.storage.put(`user:${newPinHash}`, user);
       await this.state.storage.put(`userIdToPinHash:${user.id}`, newPinHash);
-      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: user.deviceIds.length > 0, deviceCount: user.deviceIds.length });
+      await this.state.storage.put(`userById:${user.id}`, userByIdSnapshot(user));
 
       // The roster entry (if any) was keyed by the OLD pin hash for lookup
       // purposes; that mapping is now dead weight since the account is
@@ -683,10 +786,16 @@ export class Registry {
 
       if (!Array.isArray(user.deviceIds)) user.deviceIds = [];
       if (!user.deviceIds.includes(pending.deviceId)) user.deviceIds.push(pending.deviceId);
+      const approvedDeviceId = pending.deviceId;
       user.pendingDeviceLink = null;
       await this.state.storage.put(`user:${pinHash}`, user);
-      await this.state.storage.put(`userById:${user.id}`, { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, e2eePublicKey: user.e2eePublicKey || null, hasDeviceLock: true, deviceCount: user.deviceIds.length });
-      return json({ ok: true });
+      await this.state.storage.put(`userById:${user.id}`, userByIdSnapshot(user));
+      // Returned so the APPROVING device can immediately re-wrap its chat
+      // keys for the newly-trusted device (see rewrapAllChatsForDevice on
+      // the client) — without this, the new device would sit there able to
+      // sign in but unable to decrypt anything until someone happened to
+      // send a fresh message in every chat.
+      return json({ ok: true, approvedDeviceId });
     }
 
     // Lets a device that's waiting after /device-link/request poll for the
@@ -810,7 +919,7 @@ export class UserChannel {
           const stillValid = [];
           for (const sub of subs) {
             try {
-              const result = await sendWebPush(sub, pushPayload, this.env);
+              const result = await sendWebPushWithRetry(sub, pushPayload, this.env);
               // 404/410 = the browser/OS has permanently unsubscribed this endpoint — drop it.
               if (result.status !== 404 && result.status !== 410) stillValid.push(sub);
             } catch (e) {
@@ -869,7 +978,7 @@ export class UserChannel {
       const stillValid = [];
       for (const sub of subs) {
         try {
-          const result = await sendWebPush(sub, payload, this.env);
+          const result = await sendWebPushWithRetry(sub, payload, this.env);
           if (result.ok) { delivered++; stillValid.push(sub); }
           else {
             errors.push(`status ${result.status}${result.error ? ': ' + result.error : ''}`);
@@ -896,7 +1005,7 @@ export class UserChannel {
       const stillValid = [];
       for (const sub of subs) {
         try {
-          const result = await sendWebPush(sub, payload, this.env);
+          const result = await sendWebPushWithRetry(sub, payload, this.env);
           if (result.ok) delivered++;
           if (result.status !== 404 && result.status !== 410) stillValid.push(sub);
         } catch (e) {
@@ -1117,14 +1226,24 @@ export class ChatRoom {
       const { wraps: incoming } = await request.json();
       if (!incoming || typeof incoming !== 'object') return json({ error: 'invalid' }, 400);
       const wraps = (await this.state.storage.get('e2eeWraps')) || {};
-      for (const [memberId, wrap] of Object.entries(incoming)) {
-        if (wrap && typeof wrap.ephemeralPub === 'string' && typeof wrap.iv === 'string' && typeof wrap.wrapped === 'string') {
-          wraps[memberId] = {
-            ephemeralPub: wrap.ephemeralPub.slice(0, 200),
-            iv: wrap.iv.slice(0, 50),
-            wrapped: wrap.wrapped.slice(0, 500),
-          };
+      const isWrapObj = (w) => w && typeof w.ephemeralPub === 'string' && typeof w.iv === 'string' && typeof w.wrapped === 'string';
+      const sanitizeWrap = (w) => ({ ephemeralPub: w.ephemeralPub.slice(0, 200), iv: w.iv.slice(0, 50), wrapped: w.wrapped.slice(0, 500) });
+      for (const [memberId, entry] of Object.entries(incoming)) {
+        if (!entry || typeof entry !== 'object') continue;
+        if (isWrapObj(entry)) {
+          // Legacy flat shape — kept for compatibility, but current clients
+          // always send the nested per-device shape below.
+          wraps[memberId] = sanitizeWrap(entry);
+          continue;
         }
+        // Nested shape: { deviceId: wrapObj, ... }. Merged per-device so
+        // adding a wrap for one newly-approved device never disturbs a
+        // member's other, already-working devices.
+        const existing = (wraps[memberId] && typeof wraps[memberId] === 'object' && !isWrapObj(wraps[memberId])) ? wraps[memberId] : {};
+        for (const [deviceId, wrap] of Object.entries(entry)) {
+          if (isWrapObj(wrap)) existing[deviceId] = sanitizeWrap(wrap);
+        }
+        wraps[memberId] = existing;
       }
       await this.state.storage.put('e2eeWraps', wraps);
       return json({ ok: true, wraps });
@@ -1428,6 +1547,20 @@ export default {
         });
       }
 
+      if (request.method === 'POST' && (url.pathname === '/api/admin/promote' || url.pathname === '/api/admin/demote')) {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const body = await request.json().catch(() => ({}));
+        const action = url.pathname.endsWith('promote') ? 'promote' : 'demote';
+        return registryStub.fetch(`https://internal/admin/${action}`, {
+          method: 'POST',
+          body: JSON.stringify({ requesterId: who.userId, userId: body.userId }),
+        });
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/admin/roster/disable') {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
@@ -1542,10 +1675,10 @@ export default {
       if (request.method === 'POST' && url.pathname === '/api/e2ee/public-key') {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
-        const { publicKey } = await request.json();
+        const { publicKey, deviceId } = await request.json();
         const res = await registryStub.fetch('https://internal/e2ee/public-key', {
           method: 'POST',
-          body: JSON.stringify({ pinHash, publicKey }),
+          body: JSON.stringify({ pinHash, publicKey, deviceId: deviceId || null }),
         });
         return res;
       }

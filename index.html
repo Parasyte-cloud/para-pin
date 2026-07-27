@@ -735,7 +735,7 @@
     </label>
     <div class="hint" id="profileDeviceStatus" style="margin-top:14px; margin-bottom:0; color:#7ee08a;"></div>
     <div class="btn" id="approveDeviceOpenBtn" style="margin-top:10px;">Approve a new device</div>
-    <div class="hint" style="margin-top:8px; margin-bottom:0; color:#ffb84d;">Heads up: end-to-end encryption keys aren't synced across devices yet. A second approved device may not be able to decrypt existing group chats, and can cause your other device to temporarily lose sync on some conversations. Safe to use for sign-in; message history may be inconsistent between devices until this is fixed.</div>
+    <div class="hint" style="margin-top:8px; margin-bottom:0;">A newly-approved device gets its own encryption key and can read new messages right away. Any chat history from before it was added stays unreadable on that device only — same as most encrypted chat apps.</div>
     <div class="modal-actions">
       <div class="btn" onclick="closeModal('profileOverlay')">Cancel</div>
       <div class="btn primary" id="profileSaveBtn">Save</div>
@@ -800,7 +800,7 @@
     <div class="admin-console-tabs">
       <div class="admin-console-tab active" data-tab="retention">Retention</div>
       <div class="admin-console-tab" data-tab="roster">Roster</div>
-      <div class="admin-console-tab" data-tab="devices">Devices</div>
+      <div class="admin-console-tab" data-tab="devices">Devices & admins</div>
     </div>
     <div class="admin-console-body">
       <section class="admin-console-section" data-section="retention">
@@ -814,8 +814,8 @@
         </select>
       </section>
       <section class="admin-console-section" data-section="roster" style="display:none;">
-        <h3>Team roster</h3>
-        <div class="hint">Pre-add someone and hand them the PIN yourself, or add an email to have it sent automatically. Whoever uses it will be asked to choose their own PIN the first time they sign in.</div>
+        <h3>Team roster (HR-linked onboarding)</h3>
+        <div class="hint">This is the onboarding flow: pre-add someone by name here and hand them the PIN yourself, or add an email to have it sent automatically. Whoever uses it will be asked to choose their own PIN the first time they sign in.</div>
         <div style="display:flex; gap:8px;">
           <input type="text" id="rosterNameInput" placeholder="Full name" style="flex:1;">
           <input type="text" id="rosterDeptInput" placeholder="Department (optional)" style="flex:1;">
@@ -827,8 +827,8 @@
         <div class="contact-pick" id="rosterList" style="max-height:none;"></div>
       </section>
       <section class="admin-console-section" data-section="devices" style="display:none;">
-        <h3>Devices</h3>
-        <div class="hint">Everyone's PIN locks to whichever devices they've trusted (they add more by approving them from an existing device — see their profile). If someone loses every device at once, reset them here so the next login starts fresh.</div>
+        <h3>Devices & admins</h3>
+        <div class="hint">Everyone's PIN locks to whichever devices they've trusted (they add more by approving them from an existing device — see their profile). If someone loses every device at once, reset them here so the next login starts fresh. "Admin" here means access to this console (roster, retention, devices) — it's separate from creating a group, which doesn't give anyone special powers over that group.</div>
         <div class="contact-pick" id="deviceList" style="max-height:none;"></div>
       </section>
     </div>
@@ -1172,6 +1172,10 @@
     const errEl = document.getElementById('deviceApprovalError');
     errEl.style.display = 'none';
     btn.disabled = true;
+    // Generate (and upload) this device's own E2EE keypair now, before
+    // asking for approval — the approving device needs this device's public
+    // key on hand to hand it a wrap for each chat right after approving it.
+    await ensureMyE2eeKeyPair();
     const r = await apiFetch('/device-link/request', { method: 'POST', body: JSON.stringify({ deviceId: myDeviceId }) });
     btn.disabled = false;
     if (!r.ok){
@@ -1225,6 +1229,7 @@
       msgEl.style.color = '#7ee08a';
       msgEl.textContent = 'Device approved.';
       msgEl.style.display = 'block';
+      if (r.body.approvedDeviceId) rewrapAllChatsForDevice(r.body.approvedDeviceId); // fire-and-forget — lets the new device start decrypting without waiting on a fresh message
       setTimeout(()=>closeModal('approveDeviceOverlay'), 1200);
     } else {
       msgEl.style.color = '#ff6a6a';
@@ -2123,13 +2128,24 @@
       row.className = 'roster-entry';
       const info = document.createElement('div');
       info.className = 'roster-entry-info';
-      info.innerHTML = `<div class="roster-entry-name">${escapeHtml(u.displayName)}</div>`;
+      info.innerHTML = `<div class="roster-entry-name">${escapeHtml(u.displayName)}${u.isAdmin ? ' <span style="opacity:.6; font-weight:400;">· Admin</span>' : ''}</div>`;
       row.appendChild(info);
       const status = document.createElement('div');
       status.className = 'roster-status ' + (u.hasDeviceLock ? 'claimed' : 'pending');
       const n = u.deviceCount || 0;
       status.textContent = u.hasDeviceLock ? `${n} device${n === 1 ? '' : 's'}` : 'not set yet';
       row.appendChild(status);
+      const adminBtn = document.createElement('div');
+      adminBtn.className = 'roster-disable-btn';
+      adminBtn.textContent = u.isAdmin ? 'Remove admin' : 'Make admin';
+      adminBtn.addEventListener('click', async ()=>{
+        const action = u.isAdmin ? 'demote' : 'promote';
+        if (u.isAdmin && !confirm(`Remove admin access from ${u.displayName}?`)) return;
+        const rr = await apiFetch(`/admin/${action}`, { method: 'POST', body: JSON.stringify({ userId: u.id }) });
+        if (rr.ok) loadDevices();
+        else showSessionBanner(rr.body && rr.body.error === 'last_admin' ? "Can't remove the last remaining admin." : "Couldn't update admin access — try again.");
+      });
+      row.appendChild(adminBtn);
       if (u.hasDeviceLock){
         const resetBtn = document.createElement('div');
         resetBtn.className = 'roster-disable-btn';
@@ -2782,31 +2798,35 @@
   //     The private key is generated non-extractable and lives only in this
   //     browser's IndexedDB — it never leaves the device, not even to us.
   //     The public key is uploaded to the server so other members can find it.
-  //   - DMs: no server-stored key material at all. Both sides independently
-  //     derive the same AES key from (my private key, their public key) via
-  //     ECDH + HKDF — knowing both public keys (the server does) still isn't
-  //     enough to compute this without one of the private keys.
-  //   - Groups: whoever first opens the chat generates a random AES-256 group
-  //     key, then wraps (encrypts) a copy of it for every member via a fresh
-  //     ECDH exchange per member, and uploads only the wrapped copies. Each
-  //     member unwraps their own copy with their own private key.
+  //   - DMs and groups both work the same way: whoever's device first opens
+  //     the chat generates a random AES-256 key, then wraps (encrypts) a
+  //     copy of it for every member's every currently-trusted device via a
+  //     fresh ECDH exchange, and uploads only the wrapped copies. Each
+  //     device unwraps its own copy with its own private key. This is what
+  //     makes multi-device support possible: a message is encrypted once,
+  //     and every one of a person's trusted devices can independently
+  //     unwrap the same underlying key.
+  //   - Approving a new device (see the device-link flow) hands that device
+  //     a fresh wrap of every existing chat's key, so it can decrypt new
+  //     messages right away — but it still can't read anything from before
+  //     it was added, same as most encrypted chat apps with device linking.
   //
   // Known, deliberate limitations (kept simple on purpose for a small
   // internal team tool, not a hardened secure-messenger product):
-  //   - No forward secrecy / ratcheting — a DM's key is fixed as long as
-  //     neither person's keypair changes; a group's key is fixed for the
-  //     life of the group. A real Signal-style ratchet is a much bigger
-  //     project and wasn't in scope here.
+  //   - No forward secrecy / ratcheting — a chat's key is fixed for its
+  //     lifetime once established. A real Signal-style ratchet is a much
+  //     bigger project and wasn't in scope here.
   //   - No safety-number / key-verification UI — whatever public key the
   //     server hands you for someone is trusted on first use, the same trust
   //     model the rest of this PIN-based app already uses everywhere.
-  //   - No multi-device sync. Clearing this browser's storage (or a new
-  //     device) generates a brand-new keypair — old messages encrypted under
-  //     the old key become unreadable here, and any group needs someone to
-  //     re-open it so the group key gets wrapped for the new key too.
-  //   - Messages sent before this shipped stay exactly as they were (plain
-  //     text the server could already read) — nothing is retroactively
-  //     encrypted or deleted.
+  //   - Chats created before multi-device shipped are bridged via a frozen
+  //     legacy key (see the worker's /e2ee/public-key handler) so old DM
+  //     history stays readable on the ORIGINAL device only — a new second
+  //     device was never part of that legacy exchange and can't retroactively
+  //     join it, only chats/messages from after it was added.
+  //   - Messages sent before E2EE shipped at all stay exactly as they were
+  //     (plain text the server could already read) — nothing is
+  //     retroactively encrypted or deleted.
   //   - Because the server can't read content anymore, a background push
   //     notification can only say "new message from so-and-so," not show a
   //     text preview, and "mentions only" can't be evaluated on a closed app
@@ -2881,7 +2901,7 @@
       }
       // Idempotent — safe on every login, keeps the server's copy of our
       // public key in sync with whatever's actually in this browser.
-      apiFetch('/e2ee/public-key', { method: 'POST', body: JSON.stringify({ publicKey: myE2eeKeyPair.publicKeyB64 }) }).catch(()=>{});
+      apiFetch('/e2ee/public-key', { method: 'POST', body: JSON.stringify({ publicKey: myE2eeKeyPair.publicKeyB64, deviceId: myDeviceId }) }).catch(()=>{});
       return myE2eeKeyPair;
     })();
     return myE2eeReady;
@@ -2917,26 +2937,100 @@
     return new Uint8Array(pt);
   }
 
-  // Resolved per-chat AES keys (DM: derived shared key; group: unwrapped
-  // group key). Peer public keys only get cached once known — a still-null
-  // lookup is retried next time rather than stuck forever.
+  // Resolved per-chat AES keys. `chatKeyCache` holds the CryptoKey used for
+  // encrypt/decrypt; `chatRawKeyCache` keeps the same key's raw bytes
+  // alongside it purely so a newly-approved device can be handed a fresh
+  // wrap of the SAME key later (see rewrapAllChatsForDevice) without making
+  // the CryptoKey itself extractable to the rest of the app.
   const chatKeyCache = {};
+  const chatRawKeyCache = {};
   const chatKeyLastAttempt = {};
-  const peerPublicKeyCache = {};
+  const peerDeviceKeysCache = {};   // userId -> {deviceId: pubkeyB64}, current multi-device keys
+  const peerLegacyKeyCache = {};    // userId -> pubkeyB64 | null, the pre-multi-device single key
+  const chatLegacyDmKeyCache = {};  // chat.id -> CryptoKey | null, decrypt-only fallback for old DMs
 
-  async function fetchPeerPublicKey(userId){
-    if (peerPublicKeyCache[userId]) return peerPublicKeyCache[userId];
+  async function fetchPeerDeviceKeys(userId){
+    if (peerDeviceKeysCache[userId]) return peerDeviceKeysCache[userId];
+    const r = await apiFetch(`/users?ids=${encodeURIComponent(userId)}`);
+    const rec = r.ok && r.body.users && r.body.users[0];
+    const keys = (rec && rec.devicePublicKeys) || {};
+    if (Object.keys(keys).length) peerDeviceKeysCache[userId] = keys;
+    return keys;
+  }
+
+  // The OLD pre-multi-device single public key for a user — frozen
+  // server-side the moment that account trusts a second device (see the
+  // worker's /e2ee/public-key handler). Only ever used to decrypt DM history
+  // that predates multi-device support; never used to encrypt anything new.
+  async function fetchPeerLegacyPublicKey(userId){
+    if (userId in peerLegacyKeyCache) return peerLegacyKeyCache[userId];
     const r = await apiFetch(`/users?ids=${encodeURIComponent(userId)}`);
     const rec = r.ok && r.body.users && r.body.users[0];
     const key = (rec && rec.e2eePublicKey) || null;
-    if (key) peerPublicKeyCache[userId] = key;
+    peerLegacyKeyCache[userId] = key;
     return key;
   }
 
+  async function ensureLegacyDmKey(chat){
+    if (!chat || chat.type !== 'dm') return null;
+    if (chat.id in chatLegacyDmKeyCache) return chatLegacyDmKeyCache[chat.id];
+    await ensureMyE2eeKeyPair();
+    const otherId = chat.memberIds.find(id => id !== myUserId);
+    const otherPub = otherId ? await fetchPeerLegacyPublicKey(otherId) : null;
+    const key = otherPub ? await e2eeDeriveAesKey(myE2eeKeyPair.privateKey, otherPub, E2EE_DM_INFO) : null;
+    chatLegacyDmKeyCache[chat.id] = key;
+    return key;
+  }
+
+  // Tries the chat's current (multi-device, wrap-based) key first; if that
+  // fails to decrypt — which only happens for content encrypted before
+  // multi-device shipped — falls back to the old pairwise-derived DM key.
+  // Groups have no equivalent fallback: they never had a single-peer-key
+  // scheme to fall back to in the first place.
+  async function decryptWithFallback(chat, primaryKey, fn){
+    try { return await fn(primaryKey); }
+    catch(e){
+      const legacy = await ensureLegacyDmKey(chat);
+      if (!legacy) throw e;
+      return await fn(legacy);
+    }
+  }
+
+  // A member's wrap is stored one of two ways: the OLD flat shape used
+  // before multi-device existed (`wraps[userId]` IS the wrap object
+  // directly — groups only; DMs never had wraps pre-multi-device), or the
+  // current nested shape (`wraps[userId][deviceId]` is the wrap object).
+  // Reading both means groups created before this shipped keep working
+  // with zero migration step.
+  function resolveMyWrap(wraps){
+    const mine = wraps[myUserId];
+    if (!mine) return null;
+    if (typeof mine.ephemeralPub === 'string') return mine; // legacy flat shape
+    return mine[myDeviceId] || null;
+  }
+
+  async function unwrapRawKey(wrap){
+    const unwrapKey = await e2eeDeriveAesKey(myE2eeKeyPair.privateKey, wrap.ephemeralPub, E2EE_GROUP_WRAP_INFO);
+    const raw = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: e2eeB64ToBuf(wrap.iv) }, unwrapKey, e2eeB64ToBuf(wrap.wrapped));
+    return new Uint8Array(raw);
+  }
+
+  async function wrapRawKeyForDevice(rawKey, devicePubB64){
+    const ephemeral = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+    const ephemeralRawPub = await crypto.subtle.exportKey('raw', ephemeral.publicKey);
+    const wrapKey = await e2eeDeriveAesKey(ephemeral.privateKey, devicePubB64, E2EE_GROUP_WRAP_INFO);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const wrapped = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, wrapKey, rawKey);
+    return { ephemeralPub: e2eeBufToB64(ephemeralRawPub), iv: e2eeBufToB64(iv), wrapped: e2eeBufToB64(wrapped) };
+  }
+
   // Resolves (and caches) the AES-GCM key usable for a chat, or null if it
-  // isn't possible yet (a member hasn't uploaded a public key by opening the
-  // app since this shipped, or a group's key hasn't been established). Retry
-  // attempts are throttled so repeated re-renders don't hammer the network.
+  // isn't possible yet. DMs and groups now use the exact same scheme: a
+  // random per-chat key, wrapped once per member per trusted device via a
+  // fresh ephemeral ECDH exchange. That's what makes multi-device E2EE
+  // possible at all — a message is encrypted once, and each of a person's
+  // devices can unwrap the same underlying key independently, rather than
+  // DMs depending on one fixed pairwise-derived key like before.
   async function ensureChatKey(chat){
     if (!chat) return null;
     if (chatKeyCache[chat.id]) return chatKeyCache[chat.id];
@@ -2945,53 +3039,82 @@
     chatKeyLastAttempt[chat.id] = Date.now();
     await ensureMyE2eeKeyPair();
 
-    if (chat.type === 'dm'){
-      const otherId = chat.memberIds.find(id => id !== myUserId);
-      const otherPub = otherId ? await fetchPeerPublicKey(otherId) : null;
-      if (!otherPub) return null;
-      const key = await e2eeDeriveAesKey(myE2eeKeyPair.privateKey, otherPub, E2EE_DM_INFO);
-      chatKeyCache[chat.id] = key;
-      return key;
-    }
-
-    // Group: try to unwrap an existing wrap first.
     const r = await apiFetch(`/chats/${chat.id}/e2ee-wraps`);
     const wraps = (r.ok && r.body.wraps) || {};
-    const myWrap = wraps[myUserId];
+    const myWrap = resolveMyWrap(wraps);
     if (myWrap){
       try {
-        const unwrapKey = await e2eeDeriveAesKey(myE2eeKeyPair.privateKey, myWrap.ephemeralPub, E2EE_GROUP_WRAP_INFO);
-        const rawGroupKey = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: e2eeB64ToBuf(myWrap.iv) }, unwrapKey, e2eeB64ToBuf(myWrap.wrapped));
-        const key = await crypto.subtle.importKey('raw', rawGroupKey, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+        const rawKey = await unwrapRawKey(myWrap);
+        const key = await crypto.subtle.importKey('raw', rawKey, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
         chatKeyCache[chat.id] = key;
+        chatRawKeyCache[chat.id] = rawKey;
         return key;
       } catch(e){
         return null;
       }
     }
 
-    // No wrap for me yet — establish the group key for everyone, but only
-    // once every member has uploaded a public key at least once.
-    const memberPubs = {};
-    for (const id of chat.memberIds){
-      memberPubs[id] = id === myUserId ? myE2eeKeyPair.publicKeyB64 : await fetchPeerPublicKey(id);
+    if (Object.keys(wraps).length > 0){
+      // Someone else already has a key for this chat — I just don't have a
+      // wrap yet (new device, or joined a group after it was created).
+      // Manufacturing a brand-new key here would silently fork the chat
+      // into two incompatible keys, so instead this waits for an
+      // already-trusted device to hand me a wrap — automatic right after
+      // device approval (see rewrapAllChatsForDevice), or the next time
+      // this chat's messages get touched after that happens.
+      return null;
     }
-    if (Object.values(memberPubs).some(p => !p)) return null; // still waiting on someone
 
-    const rawGroupKey = crypto.getRandomValues(new Uint8Array(32));
+    // Nothing has ever been established for this chat — safe to create it.
+    if (chat.type === 'dm'){
+      // Both participants could reach this at the same moment; only the
+      // lexicographically-smaller userId actually establishes, so the two
+      // sides don't race to create different, incompatible keys.
+      const smallest = [...chat.memberIds].sort()[0];
+      if (myUserId !== smallest) return null;
+    }
+
+    const memberDeviceKeys = {};
+    for (const id of chat.memberIds){
+      memberDeviceKeys[id] = id === myUserId ? { [myDeviceId]: myE2eeKeyPair.publicKeyB64 } : await fetchPeerDeviceKeys(id);
+    }
+    if (chat.memberIds.some(id => !memberDeviceKeys[id] || !Object.keys(memberDeviceKeys[id]).length)) return null; // still waiting on someone
+
+    const rawKey = crypto.getRandomValues(new Uint8Array(32));
     const newWraps = {};
     for (const id of chat.memberIds){
-      const ephemeral = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
-      const ephemeralRawPub = await crypto.subtle.exportKey('raw', ephemeral.publicKey);
-      const wrapKey = await e2eeDeriveAesKey(ephemeral.privateKey, memberPubs[id], E2EE_GROUP_WRAP_INFO);
-      const iv = crypto.getRandomValues(new Uint8Array(12));
-      const wrapped = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, wrapKey, rawGroupKey);
-      newWraps[id] = { ephemeralPub: e2eeBufToB64(ephemeralRawPub), iv: e2eeBufToB64(iv), wrapped: e2eeBufToB64(wrapped) };
+      newWraps[id] = {};
+      for (const [did, pub] of Object.entries(memberDeviceKeys[id])){
+        newWraps[id][did] = await wrapRawKeyForDevice(rawKey, pub);
+      }
     }
     await apiFetch(`/chats/${chat.id}/e2ee-wraps`, { method: 'POST', body: JSON.stringify({ wraps: newWraps }) });
-    const key = await crypto.subtle.importKey('raw', rawGroupKey, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+    const key = await crypto.subtle.importKey('raw', rawKey, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
     chatKeyCache[chat.id] = key;
+    chatRawKeyCache[chat.id] = rawKey;
     return key;
+  }
+
+  // Called right after this (already-trusted) device approves a new device
+  // for the SAME account. That new device generated its own keypair and
+  // uploaded its public key before requesting approval, but has no way to
+  // get the actual chat keys — only a device that already holds them can
+  // hand out a wrap for a new one. This does that for every chat, so the
+  // new device can start decrypting new messages right away instead of
+  // waiting for someone to happen to send something in each chat.
+  async function rewrapAllChatsForDevice(newDeviceId){
+    try {
+      delete peerDeviceKeysCache[myUserId]; // force a fresh lookup — the new key was likely just uploaded moments ago
+      const mine = await fetchPeerDeviceKeys(myUserId);
+      const newDevicePub = mine[newDeviceId];
+      if (!newDevicePub) return; // the new device hasn't uploaded its key yet — nothing to wrap against
+      for (const chat of sessionChats){
+        const key = await ensureChatKey(chat);
+        if (!key || !chatRawKeyCache[chat.id]) continue;
+        const wrap = await wrapRawKeyForDevice(chatRawKeyCache[chat.id], newDevicePub);
+        await apiFetch(`/chats/${chat.id}/e2ee-wraps`, { method: 'POST', body: JSON.stringify({ wraps: { [myUserId]: { [newDeviceId]: wrap } } }) });
+      }
+    } catch(e) {}
   }
 
   // Decrypts whatever's decryptable across a chat's messages, mutating them
@@ -3009,11 +3132,11 @@
         continue; // not marked done — retried next time this chat's messages are touched
       }
       if (m.ciphertext && m.iv){
-        try { m.text = await e2eeDecryptString(key, m.iv, m.ciphertext); }
+        try { m.text = await decryptWithFallback(chat, key, (k) => e2eeDecryptString(k, m.iv, m.ciphertext)); }
         catch(e){ m.text = "🔒 Couldn't decrypt this message on this device."; }
       }
       if (m.attachment && m.attachment.nameCiphertext && m.attachment.nameIv){
-        try { m.attachment.name = await e2eeDecryptString(key, m.attachment.nameIv, m.attachment.nameCiphertext); }
+        try { m.attachment.name = await decryptWithFallback(chat, key, (k) => e2eeDecryptString(k, m.attachment.nameIv, m.attachment.nameCiphertext)); }
         catch(e){ m.attachment.name = 'Attachment'; }
       }
       if (m.attachment && m.attachment.fileIv && !m.attachment._decryptedUrl && !m.attachment._decrypting){
@@ -3022,7 +3145,7 @@
           try {
             const res = await fetch(m.attachment.url);
             const ciphertextBytes = new Uint8Array(await res.arrayBuffer());
-            const plainBytes = await e2eeDecryptBytes(key, m.attachment.fileIv, ciphertextBytes);
+            const plainBytes = await decryptWithFallback(chat, key, (k) => e2eeDecryptBytes(k, m.attachment.fileIv, ciphertextBytes));
             m.attachment._decryptedUrl = URL.createObjectURL(new Blob([plainBytes], { type: m.attachment.mime || 'application/octet-stream' }));
           } catch(e){
             m.attachment._decryptedUrl = null;
