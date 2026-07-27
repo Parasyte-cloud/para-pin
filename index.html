@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
 <title>PArA PIN</title>
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
@@ -191,10 +191,15 @@
     align-self:center;
   }
 
-  .sidebar-foot{ padding:12px 16px; border-top:1px solid var(--glass-brd); display:flex; align-items:center; gap:10px; }
-  .me-avatar{ width:30px; height:30px; border-radius:9px; background:linear-gradient(135deg, var(--ice), var(--fire)); display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; color:#0a0d12; }
-  .me-name{ font-size:12.5px; font-weight:600; }
-  .me-pin{ font-size:10px; color:var(--text-low); }
+  .sidebar-foot{
+    padding:12px 16px; border-top:1px solid var(--glass-brd); display:flex; align-items:center; gap:10px;
+    background:rgba(5,6,8,0.32);
+  }
+  .me-avatar{ width:30px; height:30px; border-radius:9px; background:linear-gradient(135deg, var(--ice), var(--fire)); display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; color:#0a0d12; flex-shrink:0; }
+  .me-name{ font-size:12.5px; font-weight:600; color:var(--text-hi); }
+  .me-pin{ font-size:10px; color:var(--text-mid); }
+  .sidebar-foot .icon-btn{ background:rgba(255,255,255,0.08); border-color:var(--glass-brd-hi); }
+  .sidebar-foot .icon-btn:hover{ background:rgba(255,255,255,0.14); }
   #lockBtn{ margin-left:auto; }
 
   /* ---------- conversation ---------- */
@@ -618,6 +623,27 @@
   const lockMsg = document.getElementById('lockMsg');
   const lockEl = document.getElementById('lock');
   const appEl = document.getElementById('app');
+
+  // iOS Safari doesn't resize the layout viewport when the keyboard opens —
+  // it only shrinks the visual viewport, and a `position:fixed` shell like
+  // #app doesn't follow that. The browser then tries to "help" by zooming
+  // and panning the whole page to scroll the focused field into view, which
+  // is exactly the broken/zoomed-out-of-shape composer bug. Fix: track the
+  // real visible area ourselves and resize #app to match, so the composer
+  // naturally ends up sitting right above the keyboard instead.
+  function syncViewportSize(){
+    const vv = window.visualViewport;
+    if (!vv) return;
+    appEl.style.height = vv.height + 'px';
+    appEl.style.top = vv.offsetTop + 'px';
+    lockEl.style.height = vv.height + 'px';
+    lockEl.style.top = vv.offsetTop + 'px';
+  }
+  if (window.visualViewport){
+    window.visualViewport.addEventListener('resize', syncViewportSize);
+    window.visualViewport.addEventListener('scroll', syncViewportSize);
+    syncViewportSize();
+  }
 
   let mode = state.pin ? 'enter' : 'create';
   let buffer = '';
@@ -1126,6 +1152,11 @@
       renderChatList();
     } else {
       showSessionBanner("Message didn't send — check your connection and try again.");
+      // Don't lose what they typed — put it back if they're still on the same chat.
+      if (activeChatId === chatId && !msgInput.value){
+        msgInput.value = text;
+        msgInput.style.height = Math.min(msgInput.scrollHeight, 120) + 'px';
+      }
     }
   }
   sendBtn.addEventListener('click', sendMessage);
@@ -1166,22 +1197,29 @@
   dmNameInput.addEventListener('input', ()=>{
     dmNameInput.value = dmNameInput.value.replace(/\D/g,'').slice(0,7);
   });
-  document.getElementById('dmCreateBtn').addEventListener('click', async ()=>{
+  document.getElementById('dmCreateBtn').addEventListener('click', async function(){
+    const btn = this;
+    if (btn.disabled) return; // guard against double-tap firing two chat creations
     const pin = dmNameInput.value.trim();
     if (!/^\d{7}$/.test(pin)){ showDmError('Enter their 7-digit PArA PIN.'); return; }
     hideDmError();
-    const targetPinHash = await sha256Hex(pin);
-    const r = await apiFetch('/contacts', { method:'POST', body: JSON.stringify({ targetPinHash }) });
-    if (!r.ok){
-      showDmError(r.body && r.body.error === 'pin_not_found' ? 'No PArA PIN found with that number.' : (r.body && r.body.error === 'cannot_add_self' ? "That's your own PIN." : 'Could not add contact — try again.'));
-      return;
+    btn.disabled = true;
+    try {
+      const targetPinHash = await sha256Hex(pin);
+      const r = await apiFetch('/contacts', { method:'POST', body: JSON.stringify({ targetPinHash }) });
+      if (!r.ok){
+        showDmError(r.body && r.body.error === 'pin_not_found' ? 'No PArA PIN found with that number.' : (r.body && r.body.error === 'cannot_add_self' ? "That's your own PIN." : 'Could not add contact — try again.'));
+        return;
+      }
+      if (!sessionChats.some(c => c.id === r.body.chat.id)) sessionChats.push(r.body.chat);
+      activeChatId = r.body.chat.id;
+      closeModal('dmOverlay');
+      await ensureNamesLoaded();
+      await openChat(r.body.chat.id);
+      renderChatList();
+    } finally {
+      btn.disabled = false;
     }
-    if (!sessionChats.some(c => c.id === r.body.chat.id)) sessionChats.push(r.body.chat);
-    activeChatId = r.body.chat.id;
-    closeModal('dmOverlay');
-    await ensureNamesLoaded();
-    await openChat(r.body.chat.id);
-    renderChatList();
   });
   dmNameInput.addEventListener('keydown', (e)=>{
     if (e.key === 'Enter') document.getElementById('dmCreateBtn').click();
@@ -1245,6 +1283,7 @@
   groupExtraPinsInput.addEventListener('input', updateGroupBtn);
 
   groupCreateBtn.addEventListener('click', async ()=>{
+    if (groupCreateBtn.dataset.busy === '1') return; // guard against double-tap firing two group creations
     const name = groupNameInput.value.trim();
     const extraRaw = groupExtraPinsInput.value.trim();
     const extraPins = extraRaw ? extraRaw.split(/[\s,]+/).filter(Boolean) : [];
@@ -1253,15 +1292,22 @@
       if (!/^\d{7}$/.test(p)){ showGroupError(`"${p}" isn't a valid 7-digit PIN.`); return; }
     }
     if (!name || (selectedContacts.size === 0 && extraPins.length === 0)) return;
-    const memberPinHashes = await Promise.all(extraPins.map(p => sha256Hex(p)));
-    const r = await apiFetch('/groups', { method:'POST', body: JSON.stringify({ name, memberIds: [...selectedContacts], memberPinHashes }) });
-    if (!r.ok){ showGroupError('Could not create group — try again.'); return; }
-    sessionChats.push(r.body.chat);
-    activeChatId = r.body.chat.id;
-    closeModal('groupOverlay');
-    await ensureNamesLoaded();
-    await openChat(r.body.chat.id);
-    renderChatList();
+    groupCreateBtn.dataset.busy = '1';
+    groupCreateBtn.disabled = true;
+    try {
+      const memberPinHashes = await Promise.all(extraPins.map(p => sha256Hex(p)));
+      const r = await apiFetch('/groups', { method:'POST', body: JSON.stringify({ name, memberIds: [...selectedContacts], memberPinHashes }) });
+      if (!r.ok){ showGroupError('Could not create group — try again.'); return; }
+      sessionChats.push(r.body.chat);
+      activeChatId = r.body.chat.id;
+      closeModal('groupOverlay');
+      await ensureNamesLoaded();
+      await openChat(r.body.chat.id);
+      renderChatList();
+    } finally {
+      groupCreateBtn.dataset.busy = '0';
+      updateGroupBtn();
+    }
   });
 
   window.closeModal = function(id){ document.getElementById(id).classList.remove('show'); };
