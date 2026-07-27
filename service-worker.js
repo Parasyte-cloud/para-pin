@@ -30,3 +30,30 @@ self.addEventListener('fetch', (e) => {
     })
   );
 });
+
+// ---- Web Push: fires even when no PArA PIN tab is open at all ----
+self.addEventListener('push', (event) => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch (e) {}
+  const title = data.title || 'PArA PIN';
+  const options = {
+    body: data.body || '',
+    icon: '/icon-192.png',
+    badge: '/icon-192.png',
+    tag: data.chatId ? 'parapin-' + data.chatId : 'parapin',
+    data: { chatId: data.chatId || null },
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if ('focus' in client) return client.focus();
+      }
+      if (self.clients.openWindow) return self.clients.openWindow('/');
+    })
+  );
+});

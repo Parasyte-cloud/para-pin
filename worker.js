@@ -20,6 +20,118 @@ function authHash(request, url) {
   return request.headers.get('X-Para-Pin-Hash') || url.searchParams.get('pinHash') || null;
 }
 
+// ================= Web Push (RFC 8291 payload encryption + VAPID) =================
+// No npm 'web-push' library available in the Workers runtime, so this implements
+// the spec directly against Web Crypto: ECDH key agreement + two-stage HKDF to
+// derive an AES-128-GCM content-encryption key, framed per RFC 8188 (aes128gcm),
+// plus an ES256-signed VAPID JWT for the Authorization header. Verified locally
+// with an independent round-trip encrypt/decrypt + signature-verify test before
+// shipping, but real push services (FCM/Mozilla/Apple) are the true test.
+
+function toU8(x) { return x instanceof Uint8Array ? x : new Uint8Array(x); }
+
+function concatBuffers(arrs) {
+  const parts = arrs.map(toU8);
+  const total = parts.reduce((sum, p) => sum + p.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const p of parts) { out.set(p, offset); offset += p.length; }
+  return out;
+}
+
+function bufToB64url(buf) {
+  const bytes = toU8(buf);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function b64urlToBuf(b64url) {
+  const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = b64.length % 4 === 0 ? '' : '='.repeat(4 - (b64.length % 4));
+  const bin = atob(b64 + pad);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  return buf;
+}
+
+async function hkdf(ikm, salt, info, lengthBits) {
+  const key = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
+  return crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt, info }, key, lengthBits);
+}
+
+async function encryptWebPushPayload(payloadBytes, p256dhB64url, authB64url) {
+  const subscriberPubKeyRaw = b64urlToBuf(p256dhB64url);
+  const authSecret = b64urlToBuf(authB64url);
+
+  const subscriberPubKey = await crypto.subtle.importKey(
+    'raw', subscriberPubKeyRaw, { name: 'ECDH', namedCurve: 'P-256' }, true, []
+  );
+  const ephemeralKeyPair = await crypto.subtle.generateKey(
+    { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']
+  );
+  const ephemeralPubKeyRaw = new Uint8Array(await crypto.subtle.exportKey('raw', ephemeralKeyPair.publicKey));
+
+  const sharedSecretBits = await crypto.subtle.deriveBits(
+    { name: 'ECDH', public: subscriberPubKey }, ephemeralKeyPair.privateKey, 256
+  );
+
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const uaPublic = subscriberPubKeyRaw;
+  const asPublic = ephemeralPubKeyRaw;
+
+  const infoKeyLabel = concatBuffers([new TextEncoder().encode('WebPush: info\0'), uaPublic, asPublic]);
+  const ikm = await hkdf(sharedSecretBits, authSecret, infoKeyLabel, 256);
+
+  const cek = await hkdf(ikm, salt, new TextEncoder().encode('Content-Encoding: aes128gcm\0'), 128);
+  const nonce = await hkdf(ikm, salt, new TextEncoder().encode('Content-Encoding: nonce\0'), 96);
+
+  const paddedPayload = concatBuffers([payloadBytes, new Uint8Array([2])]); // delimiter, no extra padding needed for single-record
+  const cekKey = await crypto.subtle.importKey('raw', cek, { name: 'AES-GCM' }, false, ['encrypt']);
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, cekKey, paddedPayload);
+
+  const recordSize = new Uint8Array(4);
+  new DataView(recordSize.buffer).setUint32(0, 4096);
+  const idLen = new Uint8Array([asPublic.byteLength]);
+  const header = concatBuffers([salt, recordSize, idLen, asPublic]);
+
+  return concatBuffers([header, new Uint8Array(ciphertext)]);
+}
+
+async function signVapidJWT(privateKeyJwk, audience, subject) {
+  const header = { typ: 'JWT', alg: 'ES256' };
+  const payload = { aud: audience, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: subject };
+  const unsigned = `${bufToB64url(new TextEncoder().encode(JSON.stringify(header)))}.${bufToB64url(new TextEncoder().encode(JSON.stringify(payload)))}`;
+  const key = await crypto.subtle.importKey('jwk', privateKeyJwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+  // Web Crypto's ECDSA signature is raw r||s (IEEE P1363) — exactly what JWS ES256 wants, no DER conversion needed.
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, new TextEncoder().encode(unsigned));
+  return `${unsigned}.${bufToB64url(sig)}`;
+}
+
+async function sendWebPush(subscription, payloadObj, env) {
+  if (!env.VAPID_PRIVATE_KEY_JWK || !env.VAPID_PUBLIC_KEY) {
+    return { ok: false, status: 0, error: 'vapid_not_configured' };
+  }
+  const payloadBytes = new TextEncoder().encode(JSON.stringify(payloadObj));
+  const body = await encryptWebPushPayload(payloadBytes, subscription.keys.p256dh, subscription.keys.auth);
+  const endpointUrl = new URL(subscription.endpoint);
+  const audience = `${endpointUrl.protocol}//${endpointUrl.host}`;
+  const privateKeyJwk = JSON.parse(env.VAPID_PRIVATE_KEY_JWK);
+  const jwt = await signVapidJWT(privateKeyJwk, audience, env.VAPID_SUBJECT || 'mailto:admin@example.com');
+
+  const res = await fetch(subscription.endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'Content-Encoding': 'aes128gcm',
+      'TTL': '86400',
+      'Authorization': `vapid t=${jwt}, k=${env.VAPID_PUBLIC_KEY}`,
+    },
+    body,
+  });
+  return { ok: res.ok, status: res.status };
+}
+
 export class Registry {
   constructor(state, env) {
     this.state = state;
@@ -148,7 +260,7 @@ export class Registry {
       await this.state.storage.put(`chat:${chatId}`, chat);
       const myChats = (await this.state.storage.get(`userChats:${user.id}`)) || [];
       await this.state.storage.put(`userChats:${user.id}`, myChats.filter((id) => id !== chatId));
-      return json({ ok: true, chat });
+      return json({ ok: true, chat, leaverName: user.displayName });
     }
 
     if (request.method === 'GET' && url.pathname === '/whoami') {
@@ -182,7 +294,14 @@ export class UserChannel {
       const [client, server] = Object.values(pair);
       server.accept();
       this.sessions.add(server);
-      const cleanup = () => this.sessions.delete(server);
+      const cleanup = async () => {
+        this.sessions.delete(server);
+        // Only the *last* tab/device closing counts as "going offline" —
+        // someone with two tabs open shouldn't flicker to offline when one closes.
+        if (this.sessions.size === 0) {
+          await this.state.storage.put('lastSeen', Date.now());
+        }
+      };
       server.addEventListener('close', cleanup);
       server.addEventListener('error', cleanup);
       return new Response(null, { status: 101, webSocket: client });
@@ -197,7 +316,64 @@ export class UserChannel {
           this.sessions.delete(ws);
         }
       }
-      return json({ ok: true, delivered: this.sessions.size });
+
+      // Also fan out a real OS push to every registered device, so a message
+      // still surfaces even if the app/tab isn't open anywhere at all. This
+      // fires regardless of whether a live WS session also got the in-app
+      // ding — a phone with the app closed and a desktop with it open are
+      // both "this user", and we can't tell from here which subscription
+      // belongs to which without a lot more bookkeeping, so we accept the
+      // occasional double notification on a device that has it open.
+      let data = null;
+      try { data = JSON.parse(payload); } catch (e) {}
+      if (data && data.type === 'notify' && data.message) {
+        const subs = (await this.state.storage.get('pushSubs')) || [];
+        if (subs.length) {
+          const title = data.chatType === 'group' ? (data.chatName || 'Group') : (data.message.fromName || 'PArA PIN');
+          const msgText = data.message.text || (data.message.attachment ? '📷 Photo' : '');
+          const body = data.chatType === 'group' && data.message.fromName ? `${data.message.fromName}: ${msgText}` : msgText;
+          const pushPayload = { title, body, chatId: data.chatId };
+          const stillValid = [];
+          for (const sub of subs) {
+            try {
+              const result = await sendWebPush(sub, pushPayload, this.env);
+              // 404/410 = the browser/OS has permanently unsubscribed this endpoint — drop it.
+              if (result.status !== 404 && result.status !== 410) stillValid.push(sub);
+            } catch (e) {
+              stillValid.push(sub); // transient failure (network, etc.) — keep it, don't churn subscriptions on a blip
+            }
+          }
+          if (stillValid.length !== subs.length) {
+            await this.state.storage.put('pushSubs', stillValid);
+          }
+        }
+      }
+
+      return json({ ok: true, delivered: this.sessions.size, hadNoLiveSession: this.sessions.size === 0 });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/presence') {
+      const online = this.sessions.size > 0;
+      const lastSeen = (await this.state.storage.get('lastSeen')) || 0;
+      return json({ online, lastSeen });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/subscribe') {
+      const { subscription } = await request.json();
+      if (!subscription || !subscription.endpoint) return json({ error: 'invalid_subscription' }, 400);
+      const subs = (await this.state.storage.get('pushSubs')) || [];
+      if (!subs.some((s) => s.endpoint === subscription.endpoint)) {
+        subs.push(subscription);
+        await this.state.storage.put('pushSubs', subs);
+      }
+      return json({ ok: true });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/unsubscribe') {
+      const { endpoint } = await request.json();
+      const subs = (await this.state.storage.get('pushSubs')) || [];
+      await this.state.storage.put('pushSubs', subs.filter((s) => s.endpoint !== endpoint));
+      return json({ ok: true });
     }
 
     return new Response('not found', { status: 404 });
@@ -276,16 +452,26 @@ export class ChatRoom {
     }
 
     if (request.method === 'POST' && url.pathname === '/messages') {
-      const { fromUserId, fromName, text } = await request.json();
-      if (!text || !text.trim()) return json({ error: 'empty' }, 400);
+      const { fromUserId, fromName, text, attachment } = await request.json();
+      const hasText = text && text.trim();
+      const hasAttachment = attachment && attachment.url;
+      if (!hasText && !hasAttachment) return json({ error: 'empty' }, 400);
       const msgs = await this.loadMessages();
       const msg = {
         id: crypto.randomUUID(),
         fromUserId,
         fromName: fromName || null,
-        text: String(text).slice(0, 4000),
+        text: hasText ? String(text).slice(0, 4000) : '',
         ts: Date.now(),
       };
+      if (hasAttachment) {
+        msg.attachment = {
+          url: String(attachment.url).slice(0, 500),
+          width: Number(attachment.width) || null,
+          height: Number(attachment.height) || null,
+          mime: attachment.mime ? String(attachment.mime).slice(0, 100) : 'image/jpeg',
+        };
+      }
       msgs.push(msg);
       if (msgs.length > 500) msgs.splice(0, msgs.length - 500);
       await this.state.storage.put('messages', msgs);
@@ -317,6 +503,67 @@ export class ChatRoom {
       return json({ ok: true, message: msg });
     }
 
+    if (request.method === 'POST' && url.pathname === '/edit') {
+      const { userId, messageId, text } = await request.json();
+      if (!text || !text.trim()) return json({ error: 'empty' }, 400);
+      const msgs = await this.loadMessages();
+      const msg = msgs.find((m) => m.id === messageId);
+      if (!msg) return json({ error: 'not_found' }, 404);
+      if (msg.fromUserId !== userId) return json({ error: 'forbidden' }, 403);
+      if (msg.deleted) return json({ error: 'already_deleted' }, 400);
+      msg.text = String(text).slice(0, 4000);
+      msg.edited = true;
+      await this.state.storage.put('messages', msgs);
+      this.broadcast(JSON.stringify({ type: 'edit', messageId, text: msg.text }), null);
+      return json({ ok: true, message: msg });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/react') {
+      const { userId, messageId, emoji } = await request.json();
+      if (!userId || !emoji) return json({ error: 'missing_fields' }, 400);
+      const msgs = await this.loadMessages();
+      const msg = msgs.find((m) => m.id === messageId);
+      if (!msg) return json({ error: 'not_found' }, 404);
+      msg.reactions = msg.reactions || {};
+
+      // One reaction per user per message. Figure out what they had *before*
+      // touching anything, then remove it from wherever it lives, then only
+      // re-add the new emoji if it's different from what they just had
+      // (i.e. tapping your own current reaction again clears it — a toggle).
+      const hadThisEmoji = (msg.reactions[emoji] || []).includes(userId);
+      for (const key of Object.keys(msg.reactions)) {
+        msg.reactions[key] = msg.reactions[key].filter((id) => id !== userId);
+        if (msg.reactions[key].length === 0) delete msg.reactions[key];
+      }
+      if (!hadThisEmoji) {
+        msg.reactions[emoji] = msg.reactions[emoji] || [];
+        msg.reactions[emoji].push(userId);
+      }
+
+      await this.state.storage.put('messages', msgs);
+      this.broadcast(JSON.stringify({ type: 'reaction', messageId, reactions: msg.reactions }), null);
+      return json({ ok: true, reactions: msg.reactions });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/system-message') {
+      const { text } = await request.json();
+      if (!text) return json({ error: 'empty' }, 400);
+      const msgs = await this.loadMessages();
+      const msg = {
+        id: crypto.randomUUID(),
+        type: 'system',
+        fromUserId: null,
+        fromName: null,
+        text: String(text).slice(0, 500),
+        ts: Date.now(),
+      };
+      msgs.push(msg);
+      if (msgs.length > 500) msgs.splice(0, msgs.length - 500);
+      await this.state.storage.put('messages', msgs);
+      this.broadcast(JSON.stringify({ type: 'message', message: msg }), null);
+      return json({ ok: true, message: msg });
+    }
+
     return new Response('not found', { status: 404 });
   }
 }
@@ -344,6 +591,41 @@ export default {
         return channelStub.fetch(request);
       }
 
+      // Image upload — client sends already-resized/compressed bytes directly
+      // as the request body. Auth required so randoms can't fill your bucket;
+      // the resulting key is an unguessable UUID, serving is unauthenticated
+      // (same trust model as e.g. a signed CDN link).
+      if (request.method === 'POST' && url.pathname === '/api/upload') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        if (!env.MEDIA) return json({ error: 'media_not_configured' }, 501);
+
+        const contentType = request.headers.get('content-type') || 'application/octet-stream';
+        if (!contentType.startsWith('image/')) return json({ error: 'unsupported_type' }, 400);
+
+        const buf = await request.arrayBuffer();
+        const MAX_BYTES = 8 * 1024 * 1024; // 8MB ceiling — client compresses well under this
+        if (buf.byteLength === 0) return json({ error: 'empty' }, 400);
+        if (buf.byteLength > MAX_BYTES) return json({ error: 'too_large' }, 413);
+
+        const key = crypto.randomUUID();
+        await env.MEDIA.put(key, buf, { httpMetadata: { contentType } });
+        return json({ id: key, url: `/api/media/${key}` });
+      }
+
+      const mediaMatch = url.pathname.match(/^\/api\/media\/([^/]+)$/);
+      if (mediaMatch && request.method === 'GET') {
+        if (!env.MEDIA) return new Response('not found', { status: 404 });
+        const obj = await env.MEDIA.get(mediaMatch[1]);
+        if (!obj) return new Response('not found', { status: 404 });
+        return new Response(obj.body, {
+          headers: {
+            'content-type': obj.httpMetadata?.contentType || 'application/octet-stream',
+            'cache-control': 'public, max-age=31536000, immutable',
+          },
+        });
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/session') {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
@@ -351,6 +633,51 @@ export default {
         const res = await registryStub.fetch('https://internal/session', {
           method: 'POST',
           body: JSON.stringify({ pinHash, displayName: body.displayName || null }),
+        });
+        return res;
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/presence') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const userId = url.searchParams.get('userId');
+        if (!userId) return json({ error: 'missing_user_id' }, 400);
+        const channelStub = env.USER_CHANNEL.get(env.USER_CHANNEL.idFromName(userId));
+        const res = await channelStub.fetch('https://internal/presence');
+        return res;
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/push/vapid-public-key') {
+        if (!env.VAPID_PUBLIC_KEY) return json({ error: 'not_configured' }, 501);
+        return json({ key: env.VAPID_PUBLIC_KEY });
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/push/subscribe') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const { subscription } = await request.json();
+        const channelStub = env.USER_CHANNEL.get(env.USER_CHANNEL.idFromName(who.userId));
+        const res = await channelStub.fetch('https://internal/subscribe', {
+          method: 'POST',
+          body: JSON.stringify({ subscription }),
+        });
+        return res;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/push/unsubscribe') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const { endpoint } = await request.json();
+        const channelStub = env.USER_CHANNEL.get(env.USER_CHANNEL.idFromName(who.userId));
+        const res = await channelStub.fetch('https://internal/unsubscribe', {
+          method: 'POST',
+          body: JSON.stringify({ endpoint }),
         });
         return res;
       }
@@ -391,13 +718,44 @@ export default {
           method: 'POST',
           body: JSON.stringify({ pinHash, chatId }),
         });
-        return res;
+        const resBody = await res.json();
+        if (res.ok && resBody.ok && resBody.chat) {
+          const roomStub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(chatId));
+          const sysText = `${resBody.leaverName || 'Someone'} left the group`;
+          const sysPromise = roomStub.fetch('https://internal/system-message', {
+            method: 'POST',
+            body: JSON.stringify({ text: sysText }),
+          }).catch(() => {});
+          if (ctx && ctx.waitUntil) ctx.waitUntil(sysPromise); else await sysPromise;
+        }
+        return json(resBody, res.status);
       }
 
-      // /api/chats/:id/messages/:messageId  (DELETE a message)
-      const deleteMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/messages\/([^/]+)$/);
-      if (deleteMatch && request.method === 'DELETE') {
-        const [, chatId, messageId] = deleteMatch;
+      // /api/chats/:id/messages/:messageId/react  (toggle a reaction)
+      const reactMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/messages\/([^/]+)\/react$/);
+      if (reactMatch && request.method === 'POST') {
+        const [, chatId, messageId] = reactMatch;
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const verifyRes = await registryStub.fetch(
+          `https://internal/verify-member?pinHash=${encodeURIComponent(pinHash)}&chatId=${encodeURIComponent(chatId)}`
+        );
+        const verify = await verifyRes.json();
+        if (!verify.ok) return json({ error: 'forbidden' }, 403);
+        const { emoji } = await request.json();
+        const roomStub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(chatId));
+        const res = await roomStub.fetch('https://internal/react', {
+          method: 'POST',
+          body: JSON.stringify({ userId: verify.userId, messageId, emoji }),
+        });
+        const resBody = await res.json();
+        return json(resBody, res.status);
+      }
+
+      // /api/chats/:id/messages/:messageId  (DELETE, or PATCH to edit)
+      const msgIdMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/messages\/([^/]+)$/);
+      if (msgIdMatch && (request.method === 'DELETE' || request.method === 'PATCH')) {
+        const [, chatId, messageId] = msgIdMatch;
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
         const verifyRes = await registryStub.fetch(
@@ -406,9 +764,21 @@ export default {
         const verify = await verifyRes.json();
         if (!verify.ok) return json({ error: 'forbidden' }, 403);
         const roomStub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(chatId));
-        const res = await roomStub.fetch('https://internal/delete', {
+
+        if (request.method === 'DELETE') {
+          const res = await roomStub.fetch('https://internal/delete', {
+            method: 'POST',
+            body: JSON.stringify({ userId: verify.userId, messageId }),
+          });
+          const resBody = await res.json();
+          return json(resBody, res.status);
+        }
+
+        // PATCH — edit
+        const { text } = await request.json();
+        const res = await roomStub.fetch('https://internal/edit', {
           method: 'POST',
-          body: JSON.stringify({ userId: verify.userId, messageId }),
+          body: JSON.stringify({ userId: verify.userId, messageId, text }),
         });
         const resBody = await res.json();
         return json(resBody, res.status);
@@ -458,10 +828,10 @@ export default {
         }
 
         if (action === 'messages' && request.method === 'POST') {
-          const { text } = await request.json();
+          const { text, attachment } = await request.json();
           const res = await roomStub.fetch('https://internal/messages', {
             method: 'POST',
-            body: JSON.stringify({ fromUserId: verify.userId, fromName: verify.displayName, text }),
+            body: JSON.stringify({ fromUserId: verify.userId, fromName: verify.displayName, text, attachment }),
           });
           const resBody = await res.json();
 

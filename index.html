@@ -215,23 +215,54 @@
   .bubble-row{ display:flex; gap:8px; max-width:68%; }
   .bubble-row.me{ align-self:flex-end; flex-direction:row-reverse; }
   .bubble{
-    position:relative; padding:10px 30px 10px 14px; border-radius:16px; font-size:13.5px; line-height:1.45; word-wrap:break-word;
+    position:relative; padding:10px 14px; border-radius:16px; font-size:13.5px; line-height:1.45; word-wrap:break-word;
     border:1px solid var(--glass-brd);
   }
-  .bubble-row:not(.me) .bubble{ background:rgba(255,255,255,0.05); border-top-left-radius:4px; padding-right:14px; }
-  .bubble-row.me .bubble{ background:linear-gradient(135deg, rgba(0,212,255,0.22), rgba(255,106,0,0.16)); border-top-right-radius:4px; border-color:rgba(0,212,255,0.25); }
+  .bubble-row:not(.me) .bubble{ background:rgba(255,255,255,0.05); border-top-left-radius:4px; }
+  .bubble-row.me .bubble{ background:linear-gradient(135deg, rgba(0,212,255,0.22), rgba(255,106,0,0.16)); border-top-right-radius:4px; border-color:rgba(0,212,255,0.25); padding-right:46px; }
   .bubble.deleted{ font-style:italic; opacity:.6; padding-right:14px; }
   .bubble .from{ font-size:10.5px; font-weight:700; color:var(--ice); margin-bottom:2px; display:block; }
   .bubble .ts{ font-size:9.5px; color:var(--text-low); margin-top:4px; display:flex; align-items:center; justify-content:flex-end; gap:4px; }
   .bubble .tick{ font-size:10px; color:var(--text-low); letter-spacing:-1px; }
   .bubble .tick.read{ color:var(--ice); }
+  .bubble .edited-label{ font-style:italic; opacity:.8; }
   .deleted-label{ color:var(--text-low); }
-  .msg-delete{
-    position:absolute; top:4px; right:6px; width:16px; height:16px; border-radius:50%;
-    display:flex; align-items:center; justify-content:center; font-size:12px; line-height:1;
-    color:var(--text-low); cursor:pointer; opacity:.55;
+
+  .msg-actions{ position:absolute; top:4px; right:6px; display:flex; gap:2px; }
+  .msg-action-btn{
+    width:17px; height:17px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+    font-size:11px; line-height:1; color:var(--text-low); cursor:pointer; opacity:.6;
   }
-  .msg-delete:hover{ opacity:1; color:#ff6a6a; background:rgba(255,255,255,0.08); }
+  .msg-action-btn:hover{ opacity:1; background:rgba(255,255,255,0.1); }
+  .msg-delete:hover{ color:#ff6a6a; }
+  .msg-edit:hover{ color:var(--ice); }
+
+  .msg-react-btn{
+    align-self:flex-end; width:22px; height:22px; border-radius:50%; flex-shrink:0; margin-bottom:2px;
+    display:flex; align-items:center; justify-content:center; font-size:13px; color:var(--text-low);
+    background:rgba(255,255,255,0.04); border:1px solid var(--glass-brd); cursor:pointer; opacity:.6;
+  }
+  .msg-react-btn:hover, .msg-react-btn:active{ opacity:1; color:var(--ice); border-color:var(--glass-brd-hi); }
+
+  .react-picker{
+    align-self:flex-end; display:flex; gap:4px; background:rgba(10,13,18,0.92); border:1px solid var(--glass-brd-hi);
+    border-radius:16px; padding:6px 8px; margin-bottom:2px; backdrop-filter:blur(12px);
+  }
+  .react-option{ font-size:16px; cursor:pointer; transition:transform .1s ease; line-height:1; }
+  .react-option:hover{ transform:scale(1.25); }
+
+  .reaction-row{ display:flex; flex-wrap:wrap; gap:4px; margin:-4px 0 2px; padding-left:4px; }
+  .reaction-row.me{ justify-content:flex-end; padding-left:0; padding-right:4px; }
+  .reaction-pill{
+    font-size:11px; background:rgba(255,255,255,0.06); border:1px solid var(--glass-brd); border-radius:10px;
+    padding:2px 7px; cursor:pointer; color:var(--text-mid);
+  }
+  .reaction-pill.mine{ border-color:rgba(0,212,255,0.5); background:rgba(0,212,255,0.12); color:var(--text-hi); }
+
+  .system-msg{
+    align-self:center; font-size:10.5px; color:var(--text-low); font-style:italic;
+    padding:4px 12px; margin:4px 0;
+  }
 
   .empty-state{ flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; color:var(--text-low); }
   .empty-state .app-icon{ width:52px; height:52px; opacity:.5; }
@@ -250,6 +281,18 @@
   }
   .send-btn:hover{ filter:brightness(1.1); }
   .send-btn:active{ transform:scale(0.92); }
+  .attach-btn{ flex-shrink:0; font-size:17px; }
+
+  .attach-preview{
+    display:flex; align-items:center; gap:10px; padding:8px 18px; border-top:1px solid var(--glass-brd);
+    background:rgba(255,255,255,0.03);
+  }
+  .attach-preview img{ width:40px; height:40px; object-fit:cover; border-radius:8px; }
+  .attach-preview-name{ flex:1; font-size:12px; color:var(--text-mid); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+  .msg-image{ display:block; max-width:220px; max-height:280px; border-radius:12px; cursor:pointer; object-fit:cover; }
+  .bubble:has(.msg-image){ padding:6px; }
+  .bubble:has(.msg-image) .ts{ padding:4px 6px 0; }
 
   .back-btn{ display:none; flex-shrink:0; }
 
@@ -381,7 +424,14 @@
           </div>
         </div>
         <div class="messages" id="messages"></div>
+        <div id="attachPreviewBar" class="attach-preview" style="display:none;">
+          <img id="attachPreviewImg" alt="">
+          <div class="attach-preview-name" id="attachPreviewName"></div>
+          <div class="icon-btn" id="attachCancelBtn" title="Remove">×</div>
+        </div>
         <div class="composer">
+          <input type="file" id="attachInput" accept="image/*" style="display:none;">
+          <div class="icon-btn attach-btn" id="attachBtn" title="Attach image">📷</div>
           <textarea id="msgInput" rows="1" placeholder="Message..."></textarea>
           <button class="send-btn" id="sendBtn">➤</button>
         </div>
@@ -432,6 +482,11 @@
       <div class="btn primary" onclick="closeModal('shareOverlay')">Done</div>
     </div>
   </div>
+</div>
+
+<!-- ============ IMAGE LIGHTBOX ============ -->
+<div class="overlay" id="lightboxOverlay" style="background:rgba(0,0,0,0.9);">
+  <img id="lightboxImg" style="max-width:92vw;max-height:88vh;border-radius:10px;" src="" alt="">
 </div>
 
 <!-- ============ GROUP MEMBERS MODAL ============ -->
@@ -546,6 +601,12 @@
   let typingClearTimers = {}; // chatId -> timeout id
   let lastTypingSentAt = 0;
   let convSubOverride = null; // transient "X is typing..." swap-in for the active chat
+  let editingMessageId = null;
+  let openReactPickerFor = null;
+  const QUICK_REACTIONS = ['👍','❤️','😂','😮','😢','🙏'];
+  let presenceByUser = {}; // userId -> { online, lastSeen }
+  let presencePollTimer = null;
+  let pendingAttachment = null; // { blob, url (object URL for preview), width, height }
 
   async function apiFetch(path, opts = {}){
     const headers = { 'content-type': 'application/json', ...(opts.headers || {}) };
@@ -775,6 +836,9 @@
     if (notifySocket) { notifySocket.close(); notifySocket = null; }
     unreadCounts = {};
     updateTitleBadge();
+    if (editingMessageId) cancelEdit();
+    openReactPickerFor = null; typingUsers = {}; readState = {}; presenceByUser = {};
+    stopPresencePolling();
     myPinHash = null; myUserId = null; myDisplayName = null; myRawPin = null;
     sessionChats = []; messagesByChat = {}; activeChatId = null;
     lockEl.style.display = 'flex';
@@ -850,6 +914,15 @@
     return msgs[msgs.length-1];
   }
 
+  function previewText(m){
+    if (m.type === 'system') return m.text;
+    if (m.deleted) return (m.fromUserId===myUserId?'You: ':'') + 'Message deleted';
+    const prefix = m.fromUserId===myUserId ? 'You: ' : '';
+    if (m.attachment && !m.text) return prefix + '📷 Photo';
+    if (m.attachment) return prefix + '📷 ' + m.text;
+    return prefix + m.text;
+  }
+
   function renderAvatar(el, name, isGroup){
     el.textContent = isGroup ? '' : initials(name);
     el.classList.toggle('group', !!isGroup);
@@ -887,7 +960,7 @@
           <div class="ci-name">${escapeHtml(name)}</div>
           <div class="ci-time">${lm ? fmtTime(lm.ts) : ''}</div>
         </div>
-        <div class="ci-last">${lm ? escapeHtml((lm.fromUserId===myUserId?'You: ':'') + lm.text) : 'Tap to open'}</div>
+        <div class="ci-last">${lm ? escapeHtml(previewText(lm)) : 'Tap to open'}</div>
       `;
       row.appendChild(av);
       row.appendChild(body);
@@ -914,6 +987,7 @@
       emptyState.style.display = 'flex';
       activeConv.style.display = 'none';
       appEl.classList.remove('show-chat');
+      stopPresencePolling();
       return;
     }
     const name = chatDisplayName(chat);
@@ -930,9 +1004,19 @@
       convSub.classList.add('typing');
     } else {
       convSub.classList.remove('typing');
-      convSub.textContent = chat.type === 'group'
-        ? chat.memberIds.length + ' members — tap to view'
-        : 'Direct message';
+      if (chat.type === 'group'){
+        convSub.textContent = chat.memberIds.length + ' members — tap to view';
+        convSub.style.cursor = 'pointer';
+      } else {
+        convSub.style.cursor = 'default';
+        const otherId = otherMemberId(chat);
+        const presence = otherId ? presenceByUser[otherId] : null;
+        if (presence){
+          convSub.textContent = presence.online ? 'Online' : fmtLastSeen(presence.lastSeen);
+        } else {
+          convSub.textContent = 'Direct message';
+        }
+      }
     }
 
     messagesEl.innerHTML = '';
@@ -948,6 +1032,15 @@
         messagesEl.appendChild(sep);
         lastDay = day;
       }
+
+      if (m.type === 'system'){
+        const sysRow = document.createElement('div');
+        sysRow.className = 'system-msg';
+        sysRow.textContent = m.text;
+        messagesEl.appendChild(sysRow);
+        return;
+      }
+
       const isMe = m.fromUserId === myUserId;
       const row = document.createElement('div');
       row.className = 'bubble-row' + (isMe ? ' me' : '');
@@ -960,43 +1053,161 @@
       if (m.deleted){
         inner += `<span class="deleted-label">Message deleted</span>`;
       } else {
-        inner += escapeHtml(m.text).replace(/\n/g,'<br>');
+        if (m.attachment && m.attachment.url){
+          inner += `<img class="msg-image" src="${escapeHtml(m.attachment.url)}" data-full="${escapeHtml(m.attachment.url)}" alt="Photo">`;
+        }
+        if (m.text) inner += escapeHtml(m.text).replace(/\n/g,'<br>');
       }
-      inner += `<span class="ts">${fmtTime(m.ts)}`;
+      inner += `<span class="ts">${m.edited && !m.deleted ? '<span class="edited-label">edited</span> ' : ''}${fmtTime(m.ts)}`;
       if (isMe && !m.deleted && chat.type === 'dm'){
         inner += `<span class="tick ${otherReadTs >= m.ts ? 'read' : ''}">${otherReadTs >= m.ts ? '✓✓' : '✓'}</span>`;
       }
       inner += `</span>`;
       bubble.innerHTML = inner;
-      if (isMe && !m.deleted){
-        const delBtn = document.createElement('div');
-        delBtn.className = 'msg-delete';
-        delBtn.title = 'Delete message';
-        delBtn.textContent = '×';
-        delBtn.dataset.id = m.id;
-        bubble.appendChild(delBtn);
+
+      if (!m.deleted){
+        const actions = document.createElement('div');
+        actions.className = 'msg-actions';
+        if (isMe){
+          const editBtn = document.createElement('div');
+          editBtn.className = 'msg-action-btn msg-edit';
+          editBtn.title = 'Edit message';
+          editBtn.textContent = '✎';
+          editBtn.dataset.id = m.id;
+          actions.appendChild(editBtn);
+        }
+        const delOrReact = document.createElement('div');
+        // delete only for own messages; react available on everyone's
+        if (isMe){
+          const delBtn = document.createElement('div');
+          delBtn.className = 'msg-action-btn msg-delete';
+          delBtn.title = 'Delete message';
+          delBtn.textContent = '×';
+          delBtn.dataset.id = m.id;
+          actions.appendChild(delBtn);
+        }
+        bubble.appendChild(actions);
+
+        const reactBtn = document.createElement('div');
+        reactBtn.className = 'msg-react-btn';
+        reactBtn.title = 'React';
+        reactBtn.textContent = '☺';
+        reactBtn.dataset.id = m.id;
+        row.appendChild(reactBtn);
+
+        if (openReactPickerFor === m.id){
+          const picker = document.createElement('div');
+          picker.className = 'react-picker';
+          picker.dataset.id = m.id;
+          QUICK_REACTIONS.forEach(em=>{
+            const opt = document.createElement('div');
+            opt.className = 'react-option';
+            opt.textContent = em;
+            opt.dataset.id = m.id;
+            opt.dataset.emoji = em;
+            picker.appendChild(opt);
+          });
+          row.appendChild(picker);
+        }
       }
+
       row.appendChild(bubble);
       messagesEl.appendChild(row);
+
+      if (m.reactions && Object.keys(m.reactions).length){
+        const pillRow = document.createElement('div');
+        pillRow.className = 'reaction-row' + (isMe ? ' me' : '');
+        Object.entries(m.reactions).forEach(([emoji, userIds])=>{
+          if (!userIds.length) return;
+          const pill = document.createElement('div');
+          pill.className = 'reaction-pill' + (userIds.includes(myUserId) ? ' mine' : '');
+          pill.dataset.id = m.id;
+          pill.dataset.emoji = emoji;
+          pill.textContent = emoji + ' ' + userIds.length;
+          pillRow.appendChild(pill);
+        });
+        messagesEl.appendChild(pillRow);
+      }
     });
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
 
-  messagesEl.addEventListener('click', async (e)=>{
-    const btn = e.target.closest('.msg-delete');
-    if (!btn || !activeChatId) return;
-    const messageId = btn.dataset.id;
-    if (!confirm('Delete this message? This can\'t be undone.')) return;
+  async function toggleReaction(messageId, emoji){
+    if (!activeChatId) return;
     const chatId = activeChatId;
-    const r = await apiFetch(`/chats/${chatId}/messages/${messageId}`, { method: 'DELETE' });
-    if (r.ok){
+    const r = await apiFetch(`/chats/${chatId}/messages/${messageId}/react`, { method: 'POST', body: JSON.stringify({ emoji }) });
+    if (r.ok && r.body.reactions){
       const msgs = messagesByChat[chatId];
       const m = msgs && msgs.find(mm => mm.id === messageId);
-      if (m){ m.deleted = true; m.text = ''; }
+      if (m) m.reactions = r.body.reactions;
+      openReactPickerFor = null;
       if (activeChatId === chatId) renderConv();
-      renderChatList();
+    }
+  }
+
+  messagesEl.addEventListener('click', async (e)=>{
+    const img = e.target.closest('.msg-image');
+    if (img){
+      document.getElementById('lightboxImg').src = img.dataset.full;
+      openModal('lightboxOverlay');
+      return;
+    }
+
+    if (!activeChatId) return;
+    const chatId = activeChatId;
+
+    const reactOpt = e.target.closest('.react-option');
+    if (reactOpt){ toggleReaction(reactOpt.dataset.id, reactOpt.dataset.emoji); return; }
+
+    const pill = e.target.closest('.reaction-pill');
+    if (pill){ toggleReaction(pill.dataset.id, pill.dataset.emoji); return; }
+
+    const reactBtn = e.target.closest('.msg-react-btn');
+    if (reactBtn){
+      openReactPickerFor = openReactPickerFor === reactBtn.dataset.id ? null : reactBtn.dataset.id;
+      renderConv();
+      return;
+    }
+
+    const editBtn = e.target.closest('.msg-edit');
+    if (editBtn){
+      const msgs = messagesByChat[chatId];
+      const m = msgs && msgs.find(mm => mm.id === editBtn.dataset.id);
+      if (!m) return;
+      editingMessageId = m.id;
+      msgInput.value = m.text;
+      msgInput.style.height = 'auto';
+      msgInput.style.height = Math.min(msgInput.scrollHeight, 120) + 'px';
+      msgInput.focus();
+      sendBtn.textContent = '✓';
+      sendBtn.title = 'Save edit';
+      return;
+    }
+
+    const delBtn = e.target.closest('.msg-delete');
+    if (delBtn){
+      const messageId = delBtn.dataset.id;
+      if (!confirm('Delete this message? This can\'t be undone.')) return;
+      const r = await apiFetch(`/chats/${chatId}/messages/${messageId}`, { method: 'DELETE' });
+      if (r.ok){
+        const msgs = messagesByChat[chatId];
+        const m = msgs && msgs.find(mm => mm.id === messageId);
+        if (m){ m.deleted = true; m.text = ''; }
+        if (editingMessageId === messageId) cancelEdit();
+        if (activeChatId === chatId) renderConv();
+        renderChatList();
+      }
+      return;
     }
   });
+
+  function cancelEdit(){
+    editingMessageId = null;
+    msgInput.value = '';
+    msgInput.style.height = 'auto';
+    sendBtn.textContent = '➤';
+    sendBtn.title = '';
+  }
 
   // ---------------- group members / leave group ----------------
   const membersOverlay = document.getElementById('membersOverlay');
@@ -1004,7 +1215,6 @@
   const membersTitle = document.getElementById('membersTitle');
   const leaveGroupBtn = document.getElementById('leaveGroupBtn');
 
-  convSub.style.cursor = 'pointer';
   convSub.addEventListener('click', async ()=>{
     const chat = getChat(activeChatId);
     if (!chat || chat.type !== 'group') return;
@@ -1113,11 +1323,15 @@
     if (r.ok && r.body.messages) mergeMessages(chatId, r.body.messages);
     else if (!(chatId in messagesByChat)) messagesByChat[chatId] = [];
     convSubOverride = null;
+    if (editingMessageId) cancelEdit();
+    if (pendingAttachment) clearAttachment();
+    openReactPickerFor = null;
     renderConv();
     renderChatList();
     connectSocket(chatId);
     refreshReadState(chatId);
     markChatRead(chatId);
+    startPresencePolling(getChat(chatId));
   }
 
   // ---------------- read receipts (DMs only — group "seen by" gets ambiguous fast) ----------------
@@ -1143,6 +1357,45 @@
     const otherId = chat.memberIds.find(id => id !== myUserId);
     const reads = readState[chat.id];
     return (reads && reads[otherId]) || 0;
+  }
+
+  // ---------------- presence (DMs only) ----------------
+  function otherMemberId(chat){
+    if (!chat || chat.type !== 'dm') return null;
+    return chat.memberIds.find(id => id !== myUserId) || null;
+  }
+
+  function fmtLastSeen(ts){
+    if (!ts) return 'Offline';
+    const diffMin = Math.round((Date.now() - ts) / 60000);
+    if (diffMin < 1) return 'Last seen just now';
+    if (diffMin < 60) return `Last seen ${diffMin}m ago`;
+    if (diffMin < 24 * 60) return `Last seen ${fmtTime(ts)}`;
+    return `Last seen ${fmtDay(ts)}`;
+  }
+
+  async function refreshPresence(chat){
+    const otherId = otherMemberId(chat);
+    if (!otherId) return;
+    const r = await apiFetch(`/presence?userId=${encodeURIComponent(otherId)}`);
+    if (r.ok){
+      presenceByUser[otherId] = { online: r.body.online, lastSeen: r.body.lastSeen };
+      if (activeChatId === chat.id) renderConv();
+    }
+  }
+
+  function stopPresencePolling(){
+    if (presencePollTimer){ clearInterval(presencePollTimer); presencePollTimer = null; }
+  }
+
+  function startPresencePolling(chat){
+    stopPresencePolling();
+    if (!chat || chat.type !== 'dm') return;
+    refreshPresence(chat);
+    presencePollTimer = setInterval(()=>{
+      const c = getChat(activeChatId);
+      if (c) refreshPresence(c); else stopPresencePolling();
+    }, 25000);
   }
 
   function connectSocket(chatId){
@@ -1185,6 +1438,21 @@
         }
         if (activeChatId === chatId) renderConv();
         renderChatList();
+      } else if (data.type === 'edit'){
+        const msgs = messagesByChat[chatId];
+        if (msgs){
+          const m = msgs.find(mm => mm.id === data.messageId);
+          if (m){ m.text = data.text; m.edited = true; }
+        }
+        if (activeChatId === chatId) renderConv();
+        renderChatList();
+      } else if (data.type === 'reaction'){
+        const msgs = messagesByChat[chatId];
+        if (msgs){
+          const m = msgs.find(mm => mm.id === data.messageId);
+          if (m) m.reactions = data.reactions;
+        }
+        if (activeChatId === chatId) renderConv();
       }
     });
     ws.addEventListener('close', ()=>{
@@ -1271,8 +1539,46 @@
     return typeof Notification !== 'undefined' && Notification.permission === 'granted';
   }
   function requestNotifyPermission(){
-    if (typeof Notification === 'undefined' || Notification.permission !== 'default') return;
-    Notification.requestPermission().catch(()=>{});
+    if (typeof Notification === 'undefined') return;
+    if (Notification.permission === 'granted'){ setupPushSubscription(); return; }
+    if (Notification.permission !== 'default') return;
+    Notification.requestPermission().then((perm)=>{
+      if (perm === 'granted') setupPushSubscription();
+    }).catch(()=>{});
+  }
+
+  // ---------------- real push notifications (survive the app being fully closed) ----------------
+  function urlBase64ToUint8Array(base64String){
+    const padding = '='.repeat((4 - base64String.length % 4) % 4);
+    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const rawData = atob(base64);
+    const out = new Uint8Array(rawData.length);
+    for (let i = 0; i < rawData.length; i++) out[i] = rawData.charCodeAt(i);
+    return out;
+  }
+
+  let vapidPublicKeyCache = null;
+  async function setupPushSubscription(){
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub){
+        if (!vapidPublicKeyCache){
+          const r = await apiFetch('/push/vapid-public-key');
+          if (!r.ok || !r.body.key) return; // VAPID not configured server-side yet — skip silently
+          vapidPublicKeyCache = r.body.key;
+        }
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(vapidPublicKeyCache),
+        });
+      }
+      await apiFetch('/push/subscribe', { method: 'POST', body: JSON.stringify({ subscription: sub.toJSON() }) });
+    } catch(e) {
+      // Push unsupported/blocked on this browser or OS — the in-app WS notifications still work
+      // whenever the app is open, so this is a soft failure, not something to surface to the user.
+    }
   }
 
   function handleNotify(data){
@@ -1289,7 +1595,8 @@
       if (notifyPermissionOk() && document.visibilityState !== 'visible'){
         try {
           const title = data.chatType === 'group' ? (data.chatName || 'Group') : (msg.fromName || 'PArA PIN');
-          const body = data.chatType === 'group' && msg.fromName ? `${msg.fromName}: ${msg.text}` : msg.text;
+          const msgText = msg.text || (msg.attachment ? '📷 Photo' : '');
+          const body = data.chatType === 'group' && msg.fromName ? `${msg.fromName}: ${msgText}` : msgText;
           const n = new Notification(title, { body, tag: 'parapin-' + chatId, icon: '/icon-192.png' });
           n.onclick = () => { window.focus(); };
         } catch(e) {}
@@ -1333,21 +1640,122 @@
   const msgInput = document.getElementById('msgInput');
   const sendBtn = document.getElementById('sendBtn');
 
+  // ---------------- image attachments ----------------
+  const attachBtn = document.getElementById('attachBtn');
+  const attachInput = document.getElementById('attachInput');
+  const attachPreviewBar = document.getElementById('attachPreviewBar');
+  const attachPreviewImg = document.getElementById('attachPreviewImg');
+  const attachPreviewName = document.getElementById('attachPreviewName');
+  const attachCancelBtn = document.getElementById('attachCancelBtn');
+
+  function resizeImageFile(file, maxDim, quality){
+    return new Promise((resolve, reject)=>{
+      const objUrl = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = ()=>{
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim){
+          if (width > height){ height = Math.round(height * maxDim / width); width = maxDim; }
+          else { width = Math.round(width * maxDim / height); height = maxDim; }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+        canvas.toBlob((blob)=>{
+          URL.revokeObjectURL(objUrl);
+          if (!blob) { reject(new Error('toBlob failed')); return; }
+          resolve({ blob, width, height });
+        }, 'image/jpeg', quality);
+      };
+      img.onerror = (e)=>{ URL.revokeObjectURL(objUrl); reject(e); };
+      img.src = objUrl;
+    });
+  }
+
+  function clearAttachment(){
+    if (pendingAttachment) URL.revokeObjectURL(pendingAttachment.url);
+    pendingAttachment = null;
+    attachPreviewBar.style.display = 'none';
+    attachPreviewImg.src = '';
+  }
+
+  attachBtn.addEventListener('click', ()=> attachInput.click());
+  attachCancelBtn.addEventListener('click', clearAttachment);
+  attachInput.addEventListener('change', async ()=>{
+    const file = attachInput.files[0];
+    attachInput.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/')){ showSessionBanner('Only images are supported right now.'); return; }
+    if (file.size > 20 * 1024 * 1024){ showSessionBanner('That image is too large (20MB max).'); return; }
+    try {
+      const resized = await resizeImageFile(file, 1600, 0.82);
+      clearAttachment();
+      pendingAttachment = { blob: resized.blob, url: URL.createObjectURL(resized.blob), width: resized.width, height: resized.height };
+      attachPreviewImg.src = pendingAttachment.url;
+      attachPreviewName.textContent = file.name + ' — ' + Math.round(resized.blob.size / 1024) + ' KB';
+      attachPreviewBar.style.display = 'flex';
+      msgInput.focus();
+    } catch(e){
+      showSessionBanner("Couldn't process that image — try a different one.");
+    }
+  });
+
   async function sendMessage(){
     const text = msgInput.value.trim();
-    if (!text || !activeChatId) return;
+    const attachment = pendingAttachment;
+    if ((!text && !attachment) || !activeChatId) return;
     const chatId = activeChatId;
+
+    if (editingMessageId){
+      const messageId = editingMessageId;
+      if (!text) return; // editing is text-only
+      cancelEdit();
+      const r = await apiFetch(`/chats/${chatId}/messages/${messageId}`, { method: 'PATCH', body: JSON.stringify({ text }) });
+      if (r.ok && r.body.message){
+        const msgs = messagesByChat[chatId];
+        const m = msgs && msgs.find(mm => mm.id === messageId);
+        if (m){ m.text = r.body.message.text; m.edited = true; }
+        if (activeChatId === chatId) renderConv();
+        renderChatList();
+      } else {
+        showSessionBanner("Couldn't save the edit — try again.");
+      }
+      return;
+    }
+
     msgInput.value = '';
     msgInput.style.height = 'auto';
-    const r = await apiFetch(`/chats/${chatId}/messages`, { method:'POST', body: JSON.stringify({ text }) });
+    clearAttachment();
+    sendBtn.disabled = true;
+
+    let attachmentPayload = null;
+    if (attachment){
+      const uploadRes = await apiFetch('/upload', {
+        method: 'POST',
+        headers: { 'content-type': attachment.blob.type || 'image/jpeg' },
+        body: attachment.blob,
+      });
+      if (uploadRes.ok && uploadRes.body.url){
+        attachmentPayload = { url: uploadRes.body.url, width: attachment.width, height: attachment.height, mime: attachment.blob.type };
+      } else {
+        sendBtn.disabled = false;
+        showSessionBanner("Couldn't upload the image — try again.");
+        return;
+      }
+    }
+
+    const r = await apiFetch(`/chats/${chatId}/messages`, { method:'POST', body: JSON.stringify({ text, attachment: attachmentPayload }) });
+    sendBtn.disabled = false;
     if (r.ok){
       mergeMessages(chatId, [r.body.message]);
       if (activeChatId === chatId) renderConv();
       renderChatList();
     } else {
       showSessionBanner("Message didn't send — check your connection and try again.");
-      // Don't lose what they typed — put it back if they're still on the same chat.
-      if (activeChatId === chatId && !msgInput.value){
+      // Don't lose what they typed — put it back if they're still on the same chat (text only; a
+      // failed image upload above already bailed out before we got here).
+      if (activeChatId === chatId && !msgInput.value && text){
         msgInput.value = text;
         msgInput.style.height = Math.min(msgInput.scrollHeight, 120) + 'px';
       }
@@ -1358,6 +1766,8 @@
     if (e.key === 'Enter' && !e.shiftKey){
       e.preventDefault();
       sendMessage();
+    } else if (e.key === 'Escape' && editingMessageId){
+      cancelEdit();
     }
   });
   msgInput.addEventListener('input', ()=>{

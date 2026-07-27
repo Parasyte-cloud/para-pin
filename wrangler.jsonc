@@ -17,5 +17,12 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Registry", "ChatRoom"] },
     { "tag": "v2", "new_sqlite_classes": ["UserChannel"] }
-  ]
+  ],
+  "r2_buckets": [
+    { "binding": "MEDIA", "bucket_name": "para-pin-media" }
+  ],
+  "vars": {
+    "VAPID_PUBLIC_KEY": "BHgMaer8-CVYer47TwT4jqy3mWDZmNpGfnR8j-j0ToABeD9VauBVizPxDCiGFdpnIVBhMO0nc2xo-KmgIuBTYgc",
+    "VAPID_SUBJECT": "mailto:infra@parasyte.cloud"
+  }
 }
