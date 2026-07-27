@@ -424,6 +424,34 @@ export class UserChannel {
       return json({ notifyPrefs });
     }
 
+    // Direct self-test — sends to every registered subscription regardless
+    // of notifyPrefs, and reports back per-subscription success/failure
+    // instead of swallowing it, so a bad push service response is visible
+    // instead of just "nothing arrived."
+    if (request.method === 'POST' && url.pathname === '/push-test') {
+      const subs = (await this.state.storage.get('pushSubs')) || [];
+      if (!subs.length) return json({ delivered: 0, total: 0, error: 'no_subscriptions' });
+      const payload = { title: 'PArA PIN', body: 'Test notification — if you see this, push works.', chatId: null };
+      let delivered = 0;
+      const errors = [];
+      const stillValid = [];
+      for (const sub of subs) {
+        try {
+          const result = await sendWebPush(sub, payload, this.env);
+          if (result.ok) { delivered++; stillValid.push(sub); }
+          else {
+            errors.push(`status ${result.status}${result.error ? ': ' + result.error : ''}`);
+            if (result.status !== 404 && result.status !== 410) stillValid.push(sub);
+          }
+        } catch (e) {
+          errors.push(e && e.message ? e.message : 'unknown error');
+          stillValid.push(sub);
+        }
+      }
+      if (stillValid.length !== subs.length) await this.state.storage.put('pushSubs', stillValid);
+      return json({ delivered, total: subs.length, errors: errors.length ? errors : undefined });
+    }
+
     if (request.method === 'POST' && url.pathname === '/notify-pref') {
       const { chatId, pref, displayName } = await request.json();
       if (!chatId || !['all', 'mentions', 'mute'].includes(pref)) return json({ error: 'invalid' }, 400);
@@ -781,6 +809,21 @@ export default {
           method: 'POST',
           body: JSON.stringify({ subscription, displayName: who.displayName }),
         });
+        return res;
+      }
+
+      // Sends a real push straight to whatever's registered for the caller,
+      // bypassing the whole notify/mute pipeline — a direct way to answer
+      // "did the browser subscribe, and did the push actually arrive" without
+      // guessing from a chat message that might be getting muted/filtered.
+      if (request.method === 'POST' && url.pathname === '/api/push/test') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const channelStub = env.USER_CHANNEL.get(env.USER_CHANNEL.idFromName(who.userId));
+        const res = await channelStub.fetch('https://internal/push-test', { method: 'POST' });
         return res;
       }
 

@@ -304,6 +304,21 @@
     display:flex; align-items:center; gap:10px; padding:8px 18px; border-top:1px solid var(--glass-brd);
     background:rgba(255,255,255,0.03);
   }
+  .msg-search-bar{ display:flex; align-items:center; gap:8px; padding:8px 16px; border-bottom:1px solid var(--glass-brd); background:rgba(255,255,255,0.02); }
+  .msg-search-bar input{ flex:1; background:rgba(255,255,255,0.04); border:1px solid var(--glass-brd); border-radius:10px; padding:7px 12px; color:var(--text-hi); font-size:13px; outline:none; font-family:inherit; }
+  .msg-search-bar input:focus{ border-color:rgba(0,212,255,0.4); }
+  .msg-search-count{ font-size:11px; color:var(--text-mid); white-space:nowrap; min-width:36px; text-align:center; }
+  mark.search-hit{ background:rgba(255,210,63,0.4); color:inherit; border-radius:3px; padding:0 1px; }
+  mark.search-hit.current{ background:var(--ice); color:#0a0d12; }
+  #msgSearchBtn.is-active{ background:rgba(0,212,255,0.18); border-color:var(--ice); }
+
+  .ns-row{ display:flex; justify-content:space-between; align-items:center; padding:9px 0; border-bottom:1px solid var(--glass-brd); font-size:13px; }
+  .ns-row:last-of-type{ border-bottom:none; }
+  .ns-val{ font-weight:600; }
+  .ns-val.ok{ color:#3ddc84; }
+  .ns-val.warn{ color:#ffb020; }
+  .ns-val.bad{ color:#ff6a6a; }
+
   .scan-video-wrap{
     position:relative; width:100%; max-width:280px; aspect-ratio:1/1; margin:8px auto 16px;
     border-radius:16px; overflow:hidden; background:#000;
@@ -484,6 +499,7 @@
             <div class="me-name" id="meName">You</div>
             <div class="me-pin mono" id="mePinLabel">PArA PIN active</div>
           </div>
+          <div class="icon-btn" id="notifyStatusBtn" title="Notification settings">🔔</div>
           <div class="icon-btn" id="shareBtn" title="Share my PIN">▦</div>
           <div class="icon-btn" id="lockBtn" title="Lock">🔒</div>
         </div>
@@ -508,14 +524,24 @@
             <div class="conv-title" id="convTitle"></div>
             <div class="conv-sub" id="convSub"></div>
           </div>
-          <div class="notify-pref-wrap" style="margin-left:auto; position:relative;">
-            <div class="icon-btn" id="notifyPrefBtn" title="Notifications">🔔</div>
-            <div id="notifyPrefMenu" class="notify-pref-menu" style="display:none;">
-              <div class="notify-pref-opt" data-pref="all">🔔 All messages</div>
-              <div class="notify-pref-opt" data-pref="mentions">@ Mentions only</div>
-              <div class="notify-pref-opt" data-pref="mute">🔕 Mute</div>
+          <div style="margin-left:auto; display:flex; align-items:center; gap:6px;">
+            <div class="icon-btn" id="msgSearchBtn" title="Search this chat">🔍</div>
+            <div class="notify-pref-wrap" style="position:relative;">
+              <div class="icon-btn" id="notifyPrefBtn" title="Notifications">🔔</div>
+              <div id="notifyPrefMenu" class="notify-pref-menu" style="display:none;">
+                <div class="notify-pref-opt" data-pref="all">🔔 All messages</div>
+                <div class="notify-pref-opt" data-pref="mentions">@ Mentions only</div>
+                <div class="notify-pref-opt" data-pref="mute">🔕 Mute</div>
+              </div>
             </div>
           </div>
+        </div>
+        <div id="msgSearchBar" class="msg-search-bar" style="display:none;">
+          <input type="text" id="msgSearchInput" placeholder="Search in this chat...">
+          <span id="msgSearchCount" class="msg-search-count"></span>
+          <div class="icon-btn" id="msgSearchPrevBtn" title="Previous match">↑</div>
+          <div class="icon-btn" id="msgSearchNextBtn" title="Next match">↓</div>
+          <div class="icon-btn" id="msgSearchCloseBtn" title="Close search">×</div>
         </div>
         <div class="messages" id="messages"></div>
         <div id="replyPreviewBar" class="reply-preview" style="display:none;">
@@ -589,6 +615,25 @@
     <div class="modal-actions">
       <div class="btn" onclick="closeModal('groupOverlay')">Cancel</div>
       <div class="btn primary" id="groupCreateBtn" disabled>Create group</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ NOTIFICATION STATUS MODAL ============ -->
+<div class="overlay" id="notifyStatusOverlay">
+  <div class="modal lg">
+    <h3>Notifications</h3>
+    <div class="hint">What's actually true on this device right now — the previous fixes were all guesses without this.</div>
+    <div class="ns-row"><span>Browser support</span><span id="nsSupport" class="ns-val">—</span></div>
+    <div class="ns-row"><span>Permission</span><span id="nsPermission" class="ns-val">—</span></div>
+    <div class="ns-row"><span>Push subscription</span><span id="nsSubscription" class="ns-val">—</span></div>
+    <div class="hint" id="nsDetail" style="margin-top:10px; color:var(--text-mid);"></div>
+    <div class="modal-actions">
+      <div class="btn" id="nsRefreshBtn">Re-check</div>
+      <div class="btn primary" id="nsTestBtn">Send test notification</div>
+    </div>
+    <div class="modal-actions" style="margin-top:2px;">
+      <div class="btn" onclick="closeModal('notifyStatusOverlay')">Close</div>
     </div>
   </div>
 </div>
@@ -680,6 +725,20 @@
   }
   function escapeHtml(s){
     return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  // ---------------- message search (within the open chat) ----------------
+  let searchQuery = '';
+  let searchMatchIds = []; // ordered oldest -> newest, matching render order
+  let searchCurrentIndex = -1;
+
+  function highlightSearchMatches(html, messageId){
+    if (!searchQuery || !searchMatchIds.includes(messageId)) return html;
+    const pattern = escapeHtml(searchQuery).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (!pattern) return html;
+    const isCurrent = searchMatchIds[searchCurrentIndex] === messageId;
+    const re = new RegExp(pattern, 'gi');
+    return html.replace(re, (match) => `<mark class="search-hit${isCurrent ? ' current' : ''}">${match}</mark>`);
   }
 
   // Highlights "@Full Name" for any actual current member of the chat — done
@@ -1270,7 +1329,7 @@
               + `</span></a>`;
           }
         }
-        if (m.text) inner += renderTextWithMentions(m.text, chat);
+        if (m.text) inner += highlightSearchMatches(renderTextWithMentions(m.text, chat), m.id);
       }
       inner += `<span class="ts">${m.edited && !m.deleted ? '<span class="edited-label">edited</span> ' : ''}${fmtTime(m.ts)}`;
       if (isMe && !m.deleted && chat.type === 'dm'){
@@ -1579,6 +1638,7 @@
     if (pendingAttachment) clearAttachment();
     if (replyingTo) cancelReply();
     closeMentionMenu();
+    if (msgSearchBar.style.display === 'flex') closeMsgSearch();
     openReactPickerFor = null;
     renderConv();
     renderChatList();
@@ -1598,6 +1658,79 @@
       opt.classList.toggle('active', opt.dataset.pref === pref);
     });
   }
+
+  // ---------------- message search UI ----------------
+  const msgSearchBtn = document.getElementById('msgSearchBtn');
+  const msgSearchBar = document.getElementById('msgSearchBar');
+  const msgSearchInput = document.getElementById('msgSearchInput');
+  const msgSearchCount = document.getElementById('msgSearchCount');
+
+  function updateSearchCount(){
+    msgSearchCount.textContent = searchMatchIds.length ? `${searchCurrentIndex + 1}/${searchMatchIds.length}` : (searchQuery ? '0/0' : '');
+  }
+
+  function scrollToCurrentMatch(){
+    if (searchCurrentIndex < 0) return;
+    const id = searchMatchIds[searchCurrentIndex];
+    const el = messagesEl.querySelector(`.bubble-row[data-msg-id="${CSS.escape(id)}"]`);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  function runSearch(){
+    searchQuery = msgSearchInput.value.trim();
+    const msgs = messagesByChat[activeChatId] || [];
+    if (!searchQuery){
+      searchMatchIds = [];
+      searchCurrentIndex = -1;
+      updateSearchCount();
+      renderConv();
+      return;
+    }
+    const q = searchQuery.toLowerCase();
+    searchMatchIds = msgs.filter(m => m.type !== 'system' && !m.deleted && m.text && m.text.toLowerCase().includes(q)).map(m => m.id);
+    searchCurrentIndex = searchMatchIds.length ? searchMatchIds.length - 1 : -1; // land on the most recent match first
+    updateSearchCount();
+    renderConv();
+    scrollToCurrentMatch();
+  }
+
+  function searchStep(dir){
+    if (!searchMatchIds.length) return;
+    searchCurrentIndex = (searchCurrentIndex + dir + searchMatchIds.length) % searchMatchIds.length;
+    updateSearchCount();
+    renderConv();
+    scrollToCurrentMatch();
+  }
+
+  function openMsgSearch(){
+    msgSearchBar.style.display = 'flex';
+    msgSearchBtn.classList.add('is-active');
+    msgSearchInput.focus();
+    runSearch();
+  }
+
+  function closeMsgSearch(){
+    msgSearchBar.style.display = 'none';
+    msgSearchBtn.classList.remove('is-active');
+    msgSearchInput.value = '';
+    searchQuery = '';
+    searchMatchIds = [];
+    searchCurrentIndex = -1;
+    if (activeChatId) renderConv();
+  }
+
+  msgSearchBtn.addEventListener('click', ()=>{
+    if (msgSearchBar.style.display === 'flex') closeMsgSearch();
+    else openMsgSearch();
+  });
+  document.getElementById('msgSearchCloseBtn').addEventListener('click', closeMsgSearch);
+  document.getElementById('msgSearchNextBtn').addEventListener('click', ()=> searchStep(1));
+  document.getElementById('msgSearchPrevBtn').addEventListener('click', ()=> searchStep(-1));
+  msgSearchInput.addEventListener('input', runSearch);
+  msgSearchInput.addEventListener('keydown', (e)=>{
+    if (e.key === 'Enter'){ e.preventDefault(); searchStep(e.shiftKey ? -1 : 1); }
+    else if (e.key === 'Escape'){ closeMsgSearch(); }
+  });
 
   // ---------------- read receipts (DMs only — group "seen by" gets ambiguous fast) ----------------
   async function refreshReadState(chatId){
@@ -1894,16 +2027,30 @@
     return out;
   }
 
+  // Every previous notification fix was a guess made blind — this silently
+  // swallowed every failure in the actual subscribe/register pipeline, so
+  // there was never any way to tell "permission denied" apart from "VAPID
+  // misconfigured" apart from "subscribe() rejected" apart from "worked fine
+  // but the server call failed." Recording exactly what happened here is
+  // what the notification status panel reads from.
+  let lastPushSetupError = null;
   let vapidPublicKeyCache = null;
   async function setupPushSubscription(){
-    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+    lastPushSetupError = null;
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)){
+      lastPushSetupError = 'This browser has no Push API (common in a plain Safari tab on iOS — install to the home screen first).';
+      return;
+    }
     try {
       const reg = await navigator.serviceWorker.ready;
       let sub = await reg.pushManager.getSubscription();
       if (!sub){
         if (!vapidPublicKeyCache){
           const r = await apiFetch('/push/vapid-public-key');
-          if (!r.ok || !r.body.key) return; // VAPID not configured server-side yet — skip silently
+          if (!r.ok || !r.body.key){
+            lastPushSetupError = `Server has no VAPID key configured (status ${r.status}).`;
+            return;
+          }
           vapidPublicKeyCache = r.body.key;
         }
         sub = await reg.pushManager.subscribe({
@@ -1911,12 +2058,96 @@
           applicationServerKey: urlBase64ToUint8Array(vapidPublicKeyCache),
         });
       }
-      await apiFetch('/push/subscribe', { method: 'POST', body: JSON.stringify({ subscription: sub.toJSON() }) });
+      const r = await apiFetch('/push/subscribe', { method: 'POST', body: JSON.stringify({ subscription: sub.toJSON() }) });
+      if (!r.ok) lastPushSetupError = `Subscribed with the browser, but the server rejected saving it (status ${r.status}).`;
     } catch(e) {
-      // Push unsupported/blocked on this browser or OS — the in-app WS notifications still work
-      // whenever the app is open, so this is a soft failure, not something to surface to the user.
+      lastPushSetupError = (e && e.message) ? e.message : 'subscribe() failed for an unknown reason.';
     }
   }
+
+  // ---------------- notification status / diagnostics panel ----------------
+  const nsSupport = document.getElementById('nsSupport');
+  const nsPermission = document.getElementById('nsPermission');
+  const nsSubscription = document.getElementById('nsSubscription');
+  const nsDetail = document.getElementById('nsDetail');
+  const nsTestBtn = document.getElementById('nsTestBtn');
+  const nsRefreshBtn = document.getElementById('nsRefreshBtn');
+
+  function setNsVal(el, text, level){
+    el.textContent = text;
+    el.className = 'ns-val' + (level ? ' ' + level : '');
+  }
+
+  async function refreshNotifyStatus(){
+    const hasNotification = typeof Notification !== 'undefined';
+    const hasSW = 'serviceWorker' in navigator;
+    const hasPush = 'PushManager' in window;
+    if (hasNotification && hasSW && hasPush){
+      setNsVal(nsSupport, 'Supported', 'ok');
+    } else {
+      const missing = [!hasNotification && 'Notifications', !hasSW && 'Service Worker', !hasPush && 'Push'].filter(Boolean).join(', ');
+      setNsVal(nsSupport, 'Missing: ' + missing, 'bad');
+    }
+
+    if (!hasNotification){
+      setNsVal(nsPermission, 'n/a', 'bad');
+    } else if (Notification.permission === 'granted'){
+      setNsVal(nsPermission, 'Granted', 'ok');
+    } else if (Notification.permission === 'denied'){
+      setNsVal(nsPermission, 'Denied', 'bad');
+    } else {
+      setNsVal(nsPermission, 'Not asked yet', 'warn');
+    }
+
+    let detail = '';
+    if (!hasSW || !hasPush){
+      setNsVal(nsSubscription, 'Unavailable', 'bad');
+    } else {
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        const sub = await reg.pushManager.getSubscription();
+        if (sub){
+          setNsVal(nsSubscription, 'Active', 'ok');
+          detail = 'Endpoint: ' + sub.endpoint.replace(/^https:\/\//, '').slice(0, 40) + '…';
+        } else if (Notification.permission !== 'granted'){
+          setNsVal(nsSubscription, 'Not set up', 'warn');
+          detail = 'Grant permission first, then hit Re-check.';
+        } else {
+          setNsVal(nsSubscription, 'Not set up', 'warn');
+          detail = lastPushSetupError || 'Permission is granted but no subscription exists yet — hit Re-check to retry.';
+        }
+      } catch(e){
+        setNsVal(nsSubscription, 'Error', 'bad');
+        detail = (e && e.message) || 'Failed to read subscription state.';
+      }
+    }
+    if (!detail && lastPushSetupError) detail = lastPushSetupError;
+    nsDetail.textContent = detail;
+  }
+
+  document.getElementById('notifyStatusBtn').addEventListener('click', async ()=>{
+    openModal('notifyStatusOverlay');
+    nsDetail.textContent = 'Checking…';
+    await refreshNotifyStatus();
+  });
+  nsRefreshBtn.addEventListener('click', async ()=>{
+    nsDetail.textContent = 'Re-checking…';
+    requestNotifyPermission();
+    await setupPushSubscription();
+    await refreshNotifyStatus();
+  });
+  nsTestBtn.addEventListener('click', async ()=>{
+    nsTestBtn.textContent = 'Sending…';
+    const r = await apiFetch('/push/test', { method: 'POST' });
+    nsTestBtn.textContent = 'Send test notification';
+    if (r.ok){
+      nsDetail.textContent = r.body.delivered > 0
+        ? `Sent to ${r.body.delivered} device${r.body.delivered === 1 ? '' : 's'} — it should arrive within a few seconds.`
+        : 'No push subscription is registered yet on the server for this device — hit Re-check first.';
+    } else {
+      nsDetail.textContent = 'Server-side test send failed: ' + (r.body && r.body.error ? r.body.error : `status ${r.status}`);
+    }
+  });
 
   function handleNotify(data){
     const chatId = data.chatId;
