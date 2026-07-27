@@ -389,7 +389,7 @@
 <div class="overlay" id="shareOverlay">
   <div class="modal lg" style="text-align:center;">
     <h3>Share your PArA PIN</h3>
-    <div class="hint">Anyone with this PIN can add you and start a chat.</div>
+    <div class="hint">Scan the code (or open its link) to add you instantly — or share the PIN directly.</div>
     <div id="sharePinDigits" class="mono" style="font-size:22px;letter-spacing:.08em;color:var(--ice);margin:6px 0 16px;"></div>
     <div id="qrCanvas" style="display:flex;justify-content:center;margin-bottom:16px;background:#fff;border-radius:14px;padding:16px;width:200px;height:200px;box-sizing:content-box;margin-left:auto;margin-right:auto;"></div>
     <div class="modal-actions" style="justify-content:center;">
@@ -420,6 +420,14 @@
   const LS_KEY = 'parapin_state_v1';
   const PIN_LEN = 7;
   const COLORS = ['#00d4ff','#ff6a00','#7c5cff','#00e0a4','#ff4d94','#ffd23f'];
+
+  // Deep link: a shared "Share your PArA PIN" QR/link points at /add/<pin>.
+  // Captured once on load; consumed after unlock once the app can act on it.
+  let pendingAddPin = null;
+  (function(){
+    const m = window.location.pathname.match(/^\/add\/(\d{7})$/);
+    if (m) pendingAddPin = m[1];
+  })();
 
   function colorFor(id){
     let h = 0;
@@ -840,6 +848,12 @@
     await ensureNamesLoaded();
     renderChatList();
     renderConv();
+    if (pendingAddPin){
+      const pin = pendingAddPin;
+      pendingAddPin = null;
+      history.replaceState(null, '', '/');
+      openAddFlow(pin);
+    }
   }
 
   searchInput.addEventListener('input', renderChatList);
@@ -855,7 +869,8 @@
     const qrEl = document.getElementById('qrCanvas');
     qrEl.innerHTML = '';
     if (window.QRCode) {
-      new QRCode(qrEl, { text: 'parapin:' + myRawPin, width: 180, height: 180, colorDark: '#0a0d12', colorLight: '#ffffff' });
+      const addUrl = window.location.origin + '/add/' + myRawPin;
+      new QRCode(qrEl, { text: addUrl, width: 180, height: 180, colorDark: '#0a0d12', colorLight: '#ffffff' });
     }
     openModal('shareOverlay');
   });
@@ -942,6 +957,15 @@
 
   function showDmError(msg){ dmError.textContent = msg; dmError.style.display = 'block'; }
   function hideDmError(){ dmError.style.display = 'none'; }
+
+  // Opened automatically when the app loads on a /add/<pin> deep link
+  // (from a scanned or tapped "Share your PArA PIN" QR/link).
+  function openAddFlow(pin){
+    dmNameInput.value = pin;
+    hideDmError();
+    openModal('dmOverlay');
+    setTimeout(()=>dmNameInput.focus(), 50);
+  }
 
   document.getElementById('newDmBtn').addEventListener('click', ()=>{
     dmNameInput.value = '';
