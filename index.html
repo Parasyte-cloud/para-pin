@@ -167,15 +167,20 @@
 
   .shell{ display:flex; width:100%; flex:1; min-height:0; padding:18px; gap:18px; }
 
-  /* ================= GLOBAL BOTTOM NAV ================= */
+  /* ================= GLOBAL BOTTOM NAV (floating pill) ================= */
+  #bottomNavWrap{
+    flex-shrink:0; display:flex; justify-content:center;
+    padding:0 14px calc(10px + env(safe-area-inset-bottom, 0px));
+  }
   #bottomNav{
-    flex-shrink:0; display:flex; align-items:stretch; justify-content:space-around;
-    background:rgba(8,10,14,0.7); backdrop-filter:blur(16px); border-top:1px solid var(--glass-brd);
-    padding:8px 6px calc(8px + env(safe-area-inset-bottom, 0px));
+    display:flex; align-items:stretch; justify-content:center; gap:2px;
+    background:rgba(8,10,14,0.7); backdrop-filter:blur(16px); border:1px solid var(--glass-brd);
+    border-radius:999px; padding:7px 10px; width:100%; max-width:520px;
+    box-shadow:0 8px 24px rgba(0,0,0,0.28);
   }
   .nav-tab{
     display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px;
-    flex:1; min-width:0; padding:6px 4px; border-radius:16px; cursor:pointer; position:relative;
+    flex:1; min-width:0; padding:6px 10px; border-radius:999px; cursor:pointer; position:relative;
     color:var(--text-mid); transition:background .15s ease, color .15s ease;
   }
   .nav-tab:hover{ background:rgba(var(--tint-rgb),0.04); }
@@ -186,9 +191,10 @@
     width:22px; height:22px; border-radius:50%; font-size:9px; margin:0;
   }
   .nav-tab-badge{
-    position:absolute; top:2px; right:calc(50% - 24px); min-width:16px; height:16px; padding:0 4px;
-    border-radius:10px; background:linear-gradient(135deg, var(--ice), var(--fire)); color:#0a0d12;
+    position:absolute; top:0px; right:calc(50% - 22px); min-width:16px; height:16px; padding:0 4px;
+    border-radius:999px; background:linear-gradient(135deg, var(--ice), var(--fire)); color:#0a0d12;
     font-size:9.5px; font-weight:700; display:flex; align-items:center; justify-content:center;
+    box-shadow:0 0 0 2px rgba(8,10,14,0.7);
   }
   /* ================= ACTIVE CALL BAR ================= */
   #activeCallBar{
@@ -220,8 +226,38 @@
   .incoming-call-accept{ background:#2ecf7a; }
   .incoming-call-accept:hover{ background:#22b566; }
 
+  /* ================= VIDEO CALL SCREEN =================
+     Deliberately literal white/black here rather than the theme-aware
+     --tint-rgb variable — a fullscreen video call sits on a solid black
+     backdrop regardless of app theme, same convention every video calling
+     app uses, so it shouldn't flip in light mode. */
+  .video-call-screen{ position:fixed; inset:0; z-index:60; background:#000; display:none; flex-direction:column; }
+  .video-call-screen.show{ display:flex; }
+  .video-call-screen .remote-video{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; background:#000; }
+  .video-call-screen .local-video-pip{
+    position:absolute; top:calc(16px + env(safe-area-inset-top,0px)); right:16px; width:110px; height:150px;
+    border-radius:16px; object-fit:cover; background:#161616; border:1px solid rgba(255,255,255,0.25); z-index:2;
+  }
+  .video-call-topbar{
+    position:relative; z-index:2; display:flex; flex-direction:column; align-items:center; gap:2px;
+    padding:calc(18px + env(safe-area-inset-top,0px)) 16px 8px; color:#fff; text-shadow:0 1px 4px rgba(0,0,0,0.6);
+  }
+  .video-call-name{ font-size:16px; font-weight:700; }
+  .video-call-status{ font-size:12px; opacity:.85; }
+  .video-call-controls{
+    position:relative; z-index:2; margin-top:auto; display:flex; justify-content:center; gap:18px;
+    padding:0 16px calc(28px + env(safe-area-inset-bottom,0px));
+  }
+  .video-call-btn{
+    width:54px; height:54px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+    font-size:21px; cursor:pointer; background:rgba(255,255,255,0.16); color:#fff; backdrop-filter:blur(8px);
+  }
+  .video-call-btn.active{ background:rgba(255,255,255,0.35); }
+  .video-call-btn.video-call-end-btn{ background:#ff4d4d; transform:rotate(135deg); }
+  .video-call-btn.video-call-end-btn:hover{ background:#ff2d2d; }
+
   @media (min-width: 761px){
-    #bottomNav{ max-width:760px; margin:0 auto; border-radius:20px 20px 0 0; border-left:1px solid var(--glass-brd); border-right:1px solid var(--glass-brd); }
+    #bottomNav{ max-width:420px; }
   }
 
   .sidebar{ width:340px; min-width:280px; display:flex; flex-direction:column; border-radius:20px; overflow:hidden; }
@@ -747,11 +783,6 @@
     </div>
   </div>
 
-  <!-- ============ GLOBAL BRAND FOOTER (always visible, not nested in the
-       sidebar — that panel slides off-screen on mobile whenever a chat is
-       open, which used to take this credit with it) ============ -->
-  <a class="brand-footer global-brand-footer" href="https://www.parasyte.cloud" target="_blank" rel="noopener noreferrer"><span>Powered by parasyte.cloud</span></a>
-
   <!-- ============ ACTIVE CALL BAR (voice call in progress / ringing out) ============ -->
   <div id="activeCallBar" style="display:none;">
     <div class="avatar" id="activeCallBarAvatar"></div>
@@ -764,35 +795,43 @@
   </div>
 
   <!-- ============ GLOBAL BOTTOM NAV ============ -->
-  <div id="bottomNav">
-    <div class="nav-tab" data-nav-tab="profile">
-      <div class="me-avatar nav-tab-avatar" id="meAvatar" title="Profile">ME</div>
-      <span>Profile</span>
-    </div>
-    <div class="nav-tab" data-nav-tab="calls">
-      <div class="nav-tab-icon">📞</div>
-      <span>Calls</span>
-      <div class="nav-tab-badge" id="navCallsBadge" style="display:none;"></div>
-    </div>
-    <div class="nav-tab" data-nav-tab="video">
-      <div class="nav-tab-icon">🎥</div>
-      <span>Video</span>
-    </div>
-    <div class="nav-tab active" data-nav-tab="chats">
-      <div class="nav-tab-icon">💬</div>
-      <span>Chats</span>
-      <div class="nav-tab-badge" id="navChatsBadge" style="display:none;"></div>
-    </div>
-    <div class="nav-tab" data-nav-tab="meetingroom">
-      <div class="nav-tab-icon">🗓️</div>
-      <span>Meeting Room</span>
-    </div>
-    <div class="nav-tab" data-nav-tab="settings">
-      <div class="nav-tab-icon">⚙️</div>
-      <span>Settings</span>
-      <div class="nav-tab-badge" id="navSettingsBadge" style="display:none;"></div>
+  <div id="bottomNavWrap">
+    <div id="bottomNav">
+      <div class="nav-tab" data-nav-tab="profile">
+        <div class="me-avatar nav-tab-avatar" id="meAvatar" title="Profile">ME</div>
+        <span>Profile</span>
+      </div>
+      <div class="nav-tab" data-nav-tab="calls">
+        <div class="nav-tab-icon">📞</div>
+        <span>Calls</span>
+        <div class="nav-tab-badge" id="navCallsBadge" style="display:none;"></div>
+      </div>
+      <div class="nav-tab" data-nav-tab="video">
+        <div class="nav-tab-icon">🎥</div>
+        <span>Video</span>
+      </div>
+      <div class="nav-tab active" data-nav-tab="chats">
+        <div class="nav-tab-icon">💬</div>
+        <span>Chats</span>
+        <div class="nav-tab-badge" id="navChatsBadge" style="display:none;"></div>
+      </div>
+      <div class="nav-tab" data-nav-tab="meetingroom">
+        <div class="nav-tab-icon">🗓️</div>
+        <span>Meeting Room</span>
+      </div>
+      <div class="nav-tab" data-nav-tab="settings">
+        <div class="nav-tab-icon">⚙️</div>
+        <span>Settings</span>
+        <div class="nav-tab-badge" id="navSettingsBadge" style="display:none;"></div>
+      </div>
     </div>
   </div>
+
+  <!-- ============ GLOBAL BRAND FOOTER (always visible, not nested in the
+       sidebar — that panel slides off-screen on mobile whenever a chat is
+       open, which used to take this credit with it. Deliberately the very
+       last thing on the screen, below the nav.) ============ -->
+  <a class="brand-footer global-brand-footer" href="https://www.parasyte.cloud" target="_blank" rel="noopener noreferrer"><span>Powered by parasyte.cloud</span></a>
 </div>
 
 <!-- ============ CHAT ROW CONTEXT MENU (long-press / right-click) ============ -->
@@ -1136,16 +1175,54 @@
   </div>
 </div>
 
+<!-- ============ VIDEO (contacts + recent video calls — mirrors Calls) ============ -->
+<div class="overlay admin-console-overlay" id="videoOverlay">
+  <div class="modal lg admin-console">
+    <div class="admin-console-head">
+      <div class="icon-btn" onclick="closeModal('videoOverlay')" title="Close">←</div>
+      <h2>Video</h2>
+      <div style="width:34px;"></div>
+    </div>
+    <div class="admin-console-body" style="max-width:640px;">
+      <section class="admin-console-section">
+        <h3>Recent</h3>
+        <div id="videoRecentList"></div>
+      </section>
+      <section class="admin-console-section">
+        <h3>Contacts</h3>
+        <div id="videoContactList"></div>
+      </section>
+    </div>
+    <a class="brand-footer global-brand-footer" href="https://www.parasyte.cloud" target="_blank" rel="noopener noreferrer"><span>Powered by parasyte.cloud</span></a>
+  </div>
+</div>
+
 <!-- ============ INCOMING CALL ============ -->
 <div class="overlay" id="incomingCallOverlay">
   <div class="incoming-call-card">
     <div class="avatar" id="incomingCallAvatar"></div>
     <div class="incoming-call-name" id="incomingCallName"></div>
-    <div class="incoming-call-sub">Incoming call…</div>
+    <div class="incoming-call-sub" id="incomingCallSub">Incoming call…</div>
     <div class="incoming-call-actions">
       <button class="incoming-call-btn incoming-call-decline" id="incomingCallDeclineBtn" title="Decline">📞</button>
       <button class="incoming-call-btn incoming-call-accept" id="incomingCallAcceptBtn" title="Accept">📞</button>
     </div>
+  </div>
+</div>
+
+<!-- ============ VIDEO CALL SCREEN (fullscreen, in-call) ============ -->
+<div class="video-call-screen" id="videoCallOverlay">
+  <video id="remoteVideoEl" class="remote-video" autoplay playsinline></video>
+  <video id="localVideoEl" class="local-video-pip" autoplay playsinline muted></video>
+  <div class="video-call-topbar">
+    <div class="video-call-name" id="videoCallPeerName"></div>
+    <div class="video-call-status" id="videoCallStatus"></div>
+  </div>
+  <div class="video-call-controls">
+    <div class="video-call-btn" id="videoCallMuteBtn" title="Mute">🎙️</div>
+    <div class="video-call-btn" id="videoCallCameraBtn" title="Turn camera off">🎥</div>
+    <div class="video-call-btn" id="videoCallSwitchBtn" title="Switch camera">🔄</div>
+    <div class="video-call-btn video-call-end-btn" id="videoCallEndBtn" title="End call">📞</div>
   </div>
 </div>
 
@@ -2592,12 +2669,13 @@
   // Coming soon) closes back to the Chats tab; failing that, an open
   // conversation (mobile single-pane view) closes back to the chat list.
   // At the root already, it's a no-op — nothing further to go back to.
-  const NAV_OVERLAY_IDS = ['rosterOverlay','settingsOverlay','comingSoonOverlay','callsOverlay','profileOverlay'];
+  const NAV_OVERLAY_IDS = ['rosterOverlay','settingsOverlay','comingSoonOverlay','callsOverlay','videoOverlay','profileOverlay'];
   function goBack(){
     const openOverlayId = NAV_OVERLAY_IDS.find(id => document.getElementById(id).classList.contains('show'));
     if (openOverlayId){
       closeModal(openOverlayId);
       callsOverlayOpen = false;
+      videoOverlayOpen = false;
       setActiveNavTab('chats');
       return;
     }
@@ -2697,7 +2775,7 @@
   let activeCallPeerAvatar = null;
   let activeCallDirection = null; // 'outgoing' | 'incoming'
   let rtcPeerConn = null;
-  let localAudioStream = null;
+  let localAudioStream = null; // holds whichever tracks this call needs — audio-only, or audio+video together
   let remoteAudioEl = null;
   let callStartedAt = null;
   let callTimerInterval = null;
@@ -2708,7 +2786,15 @@
   let pendingIceCandidates = [];
   let callMuted = false;
   let callsOverlayOpen = false;
+  let videoOverlayOpen = false;
   let unseenMissedCalls = 0;
+  // Video-call-only state — set the moment an offer is sent/received that
+  // carries video:true, cleared on teardown. cameraOff is a local mute of
+  // just the video track (camera stays granted, track just stops sending);
+  // currentFacingMode drives which physical camera switchCamera() requests.
+  let callHasVideo = false;
+  let cameraOff = false;
+  let currentFacingMode = 'user';
 
   async function getIceServers(){
     if (iceServersCache) return iceServersCache;
@@ -2788,9 +2874,21 @@
       if (ev.candidate) sendCallSignal(peerId, { kind: 'ice-candidate', callId: activeCallId, candidate: ev.candidate.toJSON() });
     });
     pc.addEventListener('track', (ev)=>{
-      if (!remoteAudioEl){ remoteAudioEl = new Audio(); remoteAudioEl.autoplay = true; }
-      remoteAudioEl.srcObject = ev.streams[0];
-      remoteAudioEl.play().catch(()=>{});
+      // A video call's remote audio+video tracks arrive as separate 'track'
+      // events but share the same underlying stream — routing the whole
+      // stream to the <video> element (rather than needing a second <audio>
+      // element) plays both, so this only needs to branch once on call type.
+      if (callHasVideo){
+        const videoEl = document.getElementById('remoteVideoEl');
+        if (videoEl.srcObject !== ev.streams[0]){
+          videoEl.srcObject = ev.streams[0];
+          videoEl.play().catch(()=>{});
+        }
+      } else {
+        if (!remoteAudioEl){ remoteAudioEl = new Audio(); remoteAudioEl.autoplay = true; }
+        remoteAudioEl.srcObject = ev.streams[0];
+        remoteAudioEl.play().catch(()=>{});
+      }
     });
     pc.addEventListener('connectionstatechange', ()=>{
       if (pc.connectionState === 'connected' && callState !== 'connected' && callState !== 'idle') onCallConnected();
@@ -2805,15 +2903,27 @@
     pendingIceCandidates = [];
   }
 
-  async function startOutgoingCall(peerId, peerName, peerAvatar){
+  function showLocalVideoPreview(){
+    if (!callHasVideo || !localAudioStream) return;
+    const el = document.getElementById('localVideoEl');
+    el.srcObject = localAudioStream;
+    el.play().catch(()=>{});
+  }
+
+  async function startOutgoingCall(peerId, peerName, peerAvatar, opts){
     if (callState !== 'idle'){ return; }
     if (!peerId){ return; }
+    const wantVideo = !!(opts && opts.video);
     try {
-      localAudioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      localAudioStream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: wantVideo ? { facingMode: currentFacingMode } : false,
+      });
     } catch(e){
-      alert('Microphone access is needed to make a call.');
+      alert(wantVideo ? 'Camera and microphone access is needed to make a video call.' : 'Microphone access is needed to make a call.');
       return;
     }
+    callHasVideo = wantVideo;
     activeCallId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
     activeCallPeerId = peerId;
     activeCallPeerName = peerName || 'PArA PIN user';
@@ -2822,11 +2932,12 @@
     callState = 'ringing-out';
     callStartedAt = null;
     renderCallUi();
+    showLocalVideoPreview();
     rtcPeerConn = await createPeerConnection(peerId);
     localAudioStream.getTracks().forEach(t=>rtcPeerConn.addTrack(t, localAudioStream));
     const offer = await rtcPeerConn.createOffer();
     await rtcPeerConn.setLocalDescription(offer);
-    await sendCallSignal(peerId, { kind: 'offer', callId: activeCallId, sdp: offer.sdp });
+    await sendCallSignal(peerId, { kind: 'offer', callId: activeCallId, sdp: offer.sdp, video: wantVideo });
     startRingback();
     ringTimeoutTimer = setTimeout(()=>{ if (callState === 'ringing-out') endCall('no-answer'); }, 30000);
   }
@@ -2845,6 +2956,7 @@
       activeCallPeerAvatar = signal.fromAvatarUrl || null;
       activeCallDirection = 'incoming';
       callState = 'ringing-in';
+      callHasVideo = !!signal.video;
       pendingRemoteOfferSdp = signal.sdp;
       renderCallUi();
       startRingtone();
@@ -2878,12 +2990,17 @@
     stopRingTone();
     if (ringTimeoutTimer){ clearTimeout(ringTimeoutTimer); ringTimeoutTimer = null; }
     try {
-      localAudioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      localAudioStream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: callHasVideo ? { facingMode: currentFacingMode } : false,
+      });
     } catch(e){
-      alert('Microphone access is needed to answer a call.');
+      alert(callHasVideo ? 'Camera and microphone access is needed to answer a video call.' : 'Microphone access is needed to answer a call.');
       declineCall('declined');
       return;
     }
+    renderCallUi();
+    showLocalVideoPreview();
     rtcPeerConn = await createPeerConnection(activeCallPeerId);
     localAudioStream.getTracks().forEach(t=>rtcPeerConn.addTrack(t, localAudioStream));
     await rtcPeerConn.setRemoteDescription({ type: 'offer', sdp: pendingRemoteOfferSdp });
@@ -2899,7 +3016,7 @@
     stopRingTone();
     if (ringTimeoutTimer){ clearTimeout(ringTimeoutTimer); ringTimeoutTimer = null; }
     sendCallSignal(activeCallPeerId, { kind: 'end', callId: activeCallId, reason: reason || 'declined' });
-    logCallEntry({ withUserId: activeCallPeerId, withName: activeCallPeerName, withAvatarUrl: activeCallPeerAvatar, direction: 'incoming', outcome: reason === 'no-answer' ? 'missed' : 'declined', durationSec: 0 });
+    logCallEntry({ withUserId: activeCallPeerId, withName: activeCallPeerName, withAvatarUrl: activeCallPeerAvatar, direction: 'incoming', outcome: reason === 'no-answer' ? 'missed' : 'declined', durationSec: 0, isVideo: callHasVideo });
     if (reason === 'no-answer') bumpMissedCallBadge();
     finishCall(reason || 'declined', true);
   }
@@ -2921,7 +3038,7 @@
       sendCallSignal(activeCallPeerId, { kind: 'end', callId: activeCallId, reason: reason || (wasConnected ? 'hangup' : 'no-answer'), durationSec });
     }
     const outcome = wasConnected ? 'answered' : 'missed';
-    logCallEntry({ withUserId: activeCallPeerId, withName: activeCallPeerName, withAvatarUrl: activeCallPeerAvatar, direction: activeCallDirection === 'incoming' ? 'incoming' : 'outgoing', outcome, durationSec });
+    logCallEntry({ withUserId: activeCallPeerId, withName: activeCallPeerName, withAvatarUrl: activeCallPeerAvatar, direction: activeCallDirection === 'incoming' ? 'incoming' : 'outgoing', outcome, durationSec, isVideo: callHasVideo });
     finishCall(reason, true);
   }
 
@@ -2936,31 +3053,51 @@
       const wasConnected = callState === 'connected';
       const durationSec = callStartedAt ? Math.round((Date.now() - callStartedAt) / 1000) : 0;
       const outcome = wasConnected ? 'answered' : (reason === 'busy' ? 'busy' : 'missed');
-      logCallEntry({ withUserId: activeCallPeerId, withName: activeCallPeerName, withAvatarUrl: activeCallPeerAvatar, direction: activeCallDirection === 'incoming' ? 'incoming' : 'outgoing', outcome, durationSec });
+      logCallEntry({ withUserId: activeCallPeerId, withName: activeCallPeerName, withAvatarUrl: activeCallPeerAvatar, direction: activeCallDirection === 'incoming' ? 'incoming' : 'outgoing', outcome, durationSec, isVideo: callHasVideo });
       if (!wasConnected && activeCallDirection === 'incoming') bumpMissedCallBadge();
     }
     if (rtcPeerConn){ try { rtcPeerConn.close(); } catch(e){} rtcPeerConn = null; }
     if (localAudioStream){ localAudioStream.getTracks().forEach(t=>t.stop()); localAudioStream = null; }
     if (remoteAudioEl){ remoteAudioEl.srcObject = null; }
+    const remoteVideoEl = document.getElementById('remoteVideoEl');
+    if (remoteVideoEl) remoteVideoEl.srcObject = null;
+    const localVideoEl = document.getElementById('localVideoEl');
+    if (localVideoEl) localVideoEl.srcObject = null;
     callState = 'idle';
     activeCallId = null; activeCallPeerId = null; activeCallPeerName = null; activeCallPeerAvatar = null;
     activeCallDirection = null; callStartedAt = null; pendingRemoteOfferSdp = null; pendingIceCandidates = [];
-    callMuted = false;
+    callMuted = false; callHasVideo = false; cameraOff = false;
     renderCallUi();
-    if (callsOverlayOpen) loadCallLog();
+    if (callsOverlayOpen) loadCallLogInto('callsRecentList', false);
+    if (videoOverlayOpen) loadCallLogInto('videoRecentList', true);
   }
 
   function renderCallUi(){
     const incoming = document.getElementById('incomingCallOverlay');
     const bar = document.getElementById('activeCallBar');
+    const videoScreen = document.getElementById('videoCallOverlay');
     if (callState === 'ringing-in'){
       renderAvatar(document.getElementById('incomingCallAvatar'), activeCallPeerName, false, activeCallPeerAvatar);
       document.getElementById('incomingCallName').textContent = activeCallPeerName;
+      document.getElementById('incomingCallSub').textContent = callHasVideo ? 'Incoming video call…' : 'Incoming call…';
       incoming.classList.add('show');
     } else {
       incoming.classList.remove('show');
     }
-    if (callState === 'ringing-out' || callState === 'connected'){
+    const ringingOrConnected = callState === 'ringing-out' || callState === 'connected';
+    if (ringingOrConnected && callHasVideo){
+      bar.style.display = 'none';
+      videoScreen.classList.add('show');
+      document.getElementById('videoCallPeerName').textContent = activeCallPeerName;
+      document.getElementById('videoCallStatus').textContent = callState === 'connected' ? '0:00' : 'Ringing…';
+      const muteBtn = document.getElementById('videoCallMuteBtn');
+      muteBtn.classList.toggle('active', callMuted);
+      muteBtn.textContent = callMuted ? '🔇' : '🎙️';
+      const camBtn = document.getElementById('videoCallCameraBtn');
+      camBtn.classList.toggle('active', cameraOff);
+      camBtn.textContent = cameraOff ? '📷' : '🎥';
+    } else if (ringingOrConnected){
+      videoScreen.classList.remove('show');
       renderAvatar(document.getElementById('activeCallBarAvatar'), activeCallPeerName, false, activeCallPeerAvatar);
       document.getElementById('activeCallBarName').textContent = activeCallPeerName;
       document.getElementById('activeCallBarStatus').textContent = callState === 'connected' ? '0:00' : 'Ringing…';
@@ -2970,28 +3107,66 @@
       muteBtn.textContent = callMuted ? '🔇' : '🎙️';
     } else {
       bar.style.display = 'none';
+      videoScreen.classList.remove('show');
     }
   }
 
   function updateCallTimerUi(){
     if (callState !== 'connected' || !callStartedAt) return;
-    const sec = Math.floor((Date.now() - callStartedAt) / 1000);
-    document.getElementById('activeCallBarStatus').textContent = fmtDuration(sec);
+    const text = fmtDuration(Math.floor((Date.now() - callStartedAt) / 1000));
+    if (callHasVideo) document.getElementById('videoCallStatus').textContent = text;
+    else document.getElementById('activeCallBarStatus').textContent = text;
   }
 
   function toggleCallMute(){
     if (!localAudioStream) return;
     callMuted = !callMuted;
     localAudioStream.getAudioTracks().forEach(t=>{ t.enabled = !callMuted; });
-    const muteBtn = document.getElementById('activeCallMuteBtn');
-    muteBtn.classList.toggle('active', callMuted);
-    muteBtn.textContent = callMuted ? '🔇' : '🎙️';
+    [document.getElementById('activeCallMuteBtn'), document.getElementById('videoCallMuteBtn')].forEach(btn=>{
+      if (!btn) return;
+      btn.classList.toggle('active', callMuted);
+      btn.textContent = callMuted ? '🔇' : '🎙️';
+    });
+  }
+
+  function toggleCamera(){
+    if (!localAudioStream || !callHasVideo) return;
+    cameraOff = !cameraOff;
+    localAudioStream.getVideoTracks().forEach(t=>{ t.enabled = !cameraOff; });
+    const camBtn = document.getElementById('videoCallCameraBtn');
+    camBtn.classList.toggle('active', cameraOff);
+    camBtn.textContent = cameraOff ? '📷' : '🎥';
+  }
+
+  // Swaps the physical camera mid-call — WebRTC has no "just change
+  // facingMode" for a live track, so this grabs a fresh video-only stream
+  // from the other camera and swaps it into the existing peer connection
+  // via replaceTrack (no renegotiation needed) rather than tearing the call
+  // down and rebuilding it.
+  async function switchCamera(){
+    if (!rtcPeerConn || !callHasVideo || !localAudioStream) return;
+    currentFacingMode = currentFacingMode === 'user' ? 'environment' : 'user';
+    try {
+      const newStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: currentFacingMode } });
+      const newTrack = newStream.getVideoTracks()[0];
+      if (!newTrack) return;
+      const sender = rtcPeerConn.getSenders().find(s => s.track && s.track.kind === 'video');
+      if (sender) await sender.replaceTrack(newTrack);
+      const oldVideoTrack = localAudioStream.getVideoTracks()[0];
+      if (oldVideoTrack){ localAudioStream.removeTrack(oldVideoTrack); oldVideoTrack.stop(); }
+      localAudioStream.addTrack(newTrack);
+      showLocalVideoPreview();
+    } catch(e){}
   }
 
   document.getElementById('incomingCallAcceptBtn').addEventListener('click', acceptCall);
   document.getElementById('incomingCallDeclineBtn').addEventListener('click', ()=>declineCall('declined'));
   document.getElementById('activeCallEndBtn').addEventListener('click', ()=>endCall());
   document.getElementById('activeCallMuteBtn').addEventListener('click', toggleCallMute);
+  document.getElementById('videoCallEndBtn').addEventListener('click', ()=>endCall());
+  document.getElementById('videoCallMuteBtn').addEventListener('click', toggleCallMute);
+  document.getElementById('videoCallCameraBtn').addEventListener('click', toggleCamera);
+  document.getElementById('videoCallSwitchBtn').addEventListener('click', switchCamera);
   document.getElementById('chatCallBtn').addEventListener('click', ()=>{
     const chat = getChat(activeChatId);
     if (!chat || chat.type !== 'dm') return;
@@ -3006,12 +3181,22 @@
     document.getElementById('navCallsBadge').style.display = 'none';
     openModal('callsOverlay');
     await ensureNamesLoaded();
-    renderCallsContactList();
-    await loadCallLog();
+    renderContactListInto('callsContactList', false);
+    await loadCallLogInto('callsRecentList', false);
   }
 
-  function renderCallsContactList(){
-    const list = document.getElementById('callsContactList');
+  async function openVideoOverlay(){
+    videoOverlayOpen = true;
+    openModal('videoOverlay');
+    await ensureNamesLoaded();
+    renderContactListInto('videoContactList', true);
+    await loadCallLogInto('videoRecentList', true);
+  }
+
+  // Shared by both the Calls tab and the Video tab — same DM contact list
+  // either way, the only difference is which kind of call a tap starts.
+  function renderContactListInto(containerId, videoMode){
+    const list = document.getElementById(containerId);
     list.innerHTML = '';
     const dmChats = sessionChats.filter(c => c.type === 'dm');
     if (dmChats.length === 0){
@@ -3024,37 +3209,41 @@
       const name = userNameCache[otherId] || 'PArA PIN user';
       const row = document.createElement('div');
       row.className = 'settings-row settings-row-action';
-      row.innerHTML = `<span style="display:flex;align-items:center;gap:10px;min-width:0;"><span class="avatar" style="width:32px;height:32px;font-size:12px;flex-shrink:0;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(name)}</span></span><span>📞</span>`;
+      row.innerHTML = `<span style="display:flex;align-items:center;gap:10px;min-width:0;"><span class="avatar" style="width:32px;height:32px;font-size:12px;flex-shrink:0;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(name)}</span></span><span>${videoMode ? '🎥' : '📞'}</span>`;
       renderAvatar(row.querySelector('.avatar'), name, false, userAvatarCache[otherId]);
       row.addEventListener('click', ()=>{
-        closeModal('callsOverlay');
-        callsOverlayOpen = false;
+        closeModal(videoMode ? 'videoOverlay' : 'callsOverlay');
+        callsOverlayOpen = false; videoOverlayOpen = false;
         setActiveNavTab('chats');
-        startOutgoingCall(otherId, name, userAvatarCache[otherId]);
+        startOutgoingCall(otherId, name, userAvatarCache[otherId], { video: videoMode });
       });
       list.appendChild(row);
     });
   }
 
-  async function loadCallLog(){
-    const listEl = document.getElementById('callsRecentList');
+  // Same call log for both tabs — Calls shows the voice entries, Video shows
+  // the video entries, filtered client-side by the isVideo flag each entry
+  // was logged with.
+  async function loadCallLogInto(listElId, videoMode){
+    const listEl = document.getElementById(listElId);
     const r = await apiFetch('/calls/log');
     if (!r.ok || !r.body || !r.body.log){ listEl.innerHTML = '<div class="hint">No recent calls yet.</div>'; return; }
-    if (r.body.log.length === 0){ listEl.innerHTML = '<div class="hint">No recent calls yet.</div>'; return; }
+    const entries = r.body.log.filter(e => !!e.isVideo === !!videoMode);
+    if (entries.length === 0){ listEl.innerHTML = '<div class="hint">No recent calls yet.</div>'; return; }
     listEl.innerHTML = '';
-    r.body.log.forEach(entry=>{
+    entries.forEach(entry=>{
       const row = document.createElement('div');
       row.className = 'settings-row settings-row-action';
       const dirIcon = entry.direction === 'outgoing' ? '↗' : '↙';
       const outcomeLabel = entry.outcome === 'missed' ? 'Missed' : entry.outcome === 'declined' ? 'Declined' : entry.outcome === 'busy' ? 'Busy' : fmtDuration(entry.durationSec);
       const color = (entry.outcome === 'missed' || entry.outcome === 'declined') ? 'color:#ff6a6a;' : 'color:var(--text-low);';
-      row.innerHTML = `<span style="display:flex;align-items:center;gap:10px;min-width:0;"><span class="avatar" style="width:32px;height:32px;font-size:12px;flex-shrink:0;"></span><span style="overflow:hidden;"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(entry.withName)}</div><div class="hint" style="margin:0;${color}">${dirIcon} ${outcomeLabel} · ${fmtDay(entry.ts)}</div></span></span><span>📞</span>`;
+      row.innerHTML = `<span style="display:flex;align-items:center;gap:10px;min-width:0;"><span class="avatar" style="width:32px;height:32px;font-size:12px;flex-shrink:0;"></span><span style="overflow:hidden;"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(entry.withName)}</div><div class="hint" style="margin:0;${color}">${dirIcon} ${outcomeLabel} · ${fmtDay(entry.ts)}</div></span></span><span>${videoMode ? '🎥' : '📞'}</span>`;
       renderAvatar(row.querySelector('.avatar'), entry.withName, false, entry.withAvatarUrl);
       row.addEventListener('click', ()=>{
-        closeModal('callsOverlay');
-        callsOverlayOpen = false;
+        closeModal(videoMode ? 'videoOverlay' : 'callsOverlay');
+        callsOverlayOpen = false; videoOverlayOpen = false;
         setActiveNavTab('chats');
-        startOutgoingCall(entry.withUserId, entry.withName, entry.withAvatarUrl);
+        startOutgoingCall(entry.withUserId, entry.withName, entry.withAvatarUrl, { video: videoMode });
       });
       listEl.appendChild(row);
     });
@@ -3286,13 +3475,13 @@
   // different copy, since none of the three exist yet (see the scoping
   // plan) but the nav real estate should already reflect where they'll live.
   const COMING_SOON_COPY = {
-    video: { icon: '🎥', title: 'Video', body: "Video calling rides on the same plan as Calls — now that 1:1 voice calling is in, video is the same signaling path with a camera track added." },
     meetingroom: { icon: '🗓️', title: 'Meeting Room', body: "Group meeting rooms (Zoom/Meet-style, more than 2 people) need a proper SFU rather than peer-to-peer — planned on Cloudflare Realtime SFU, as its own phase after 1:1 calls are working." },
   };
 
   function closeAllNavOverlays(){
-    ['rosterOverlay','settingsOverlay','comingSoonOverlay','profileOverlay','callsOverlay'].forEach(closeModal);
+    ['rosterOverlay','settingsOverlay','comingSoonOverlay','profileOverlay','callsOverlay','videoOverlay'].forEach(closeModal);
     callsOverlayOpen = false;
+    videoOverlayOpen = false;
   }
 
   function setActiveNavTab(name){
@@ -3320,6 +3509,10 @@
         openCallsOverlay();
         return;
       }
+      if (name === 'video'){
+        openVideoOverlay();
+        return;
+      }
       const copy = COMING_SOON_COPY[name];
       if (copy){
         document.getElementById('comingSoonTitle').textContent = copy.title;
@@ -3333,14 +3526,18 @@
   // Closing any of these overlays via their own back/× button should return
   // the nav to "Chats" rather than leaving a non-Chats tab highlighted with
   // nothing open behind it.
-  ['rosterOverlay','settingsOverlay','comingSoonOverlay','callsOverlay'].forEach(id=>{
+  ['rosterOverlay','settingsOverlay','comingSoonOverlay','callsOverlay','videoOverlay'].forEach(id=>{
     const el = document.getElementById(id);
     el.addEventListener('click', (e)=>{
-      if (e.target === el){ setActiveNavTab('chats'); if (id === 'callsOverlay') callsOverlayOpen = false; } // backdrop click
+      if (e.target === el){
+        setActiveNavTab('chats');
+        if (id === 'callsOverlay') callsOverlayOpen = false;
+        if (id === 'videoOverlay') videoOverlayOpen = false;
+      } // backdrop click
     });
   });
-  document.querySelectorAll(`#rosterOverlay .admin-console-head .icon-btn, #settingsOverlay .admin-console-head .icon-btn, #comingSoonOverlay .admin-console-head .icon-btn, #callsOverlay .admin-console-head .icon-btn`).forEach(btn=>{
-    btn.addEventListener('click', ()=>{ setActiveNavTab('chats'); callsOverlayOpen = false; });
+  document.querySelectorAll(`#rosterOverlay .admin-console-head .icon-btn, #settingsOverlay .admin-console-head .icon-btn, #comingSoonOverlay .admin-console-head .icon-btn, #callsOverlay .admin-console-head .icon-btn, #videoOverlay .admin-console-head .icon-btn`).forEach(btn=>{
+    btn.addEventListener('click', ()=>{ setActiveNavTab('chats'); callsOverlayOpen = false; videoOverlayOpen = false; });
   });
 
   const settingsAlwaysBannerInput = document.getElementById('settingsAlwaysBannerInput');

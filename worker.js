@@ -650,6 +650,7 @@ export class Registry {
         direction: entry.direction === 'incoming' ? 'incoming' : 'outgoing',
         outcome: ['answered', 'missed', 'declined', 'busy'].includes(entry.outcome) ? entry.outcome : 'answered',
         durationSec: Math.max(0, Math.round(Number(entry.durationSec) || 0)),
+        isVideo: !!entry.isVideo,
         ts: Date.now(),
       });
       const capped = log.slice(0, 50);
