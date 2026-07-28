@@ -625,6 +625,38 @@ export class Registry {
       return json({ ok: true, userId: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, isAdmin: admins.includes(user.id) });
     }
 
+    // Per-user call history — each client writes its own side of a call
+    // independently once it ends (see /api/calls/log), so no cross-user name
+    // lookup is needed here: the caller already knows who they dialed, and
+    // the callee already got the caller's name/avatar in the incoming offer.
+    if (request.method === 'GET' && url.pathname === '/call-log') {
+      const userId = url.searchParams.get('userId');
+      if (!userId) return json({ error: 'missing_user_id' }, 400);
+      const log = (await this.state.storage.get(`callLog:${userId}`)) || [];
+      return json({ log });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/call-log') {
+      const { userId, entry } = await request.json();
+      if (!userId || !entry || !entry.withUserId || !entry.direction || !entry.outcome) {
+        return json({ error: 'invalid' }, 400);
+      }
+      const log = (await this.state.storage.get(`callLog:${userId}`)) || [];
+      log.unshift({
+        id: crypto.randomUUID(),
+        withUserId: entry.withUserId,
+        withName: entry.withName || 'Someone',
+        withAvatarUrl: entry.withAvatarUrl || null,
+        direction: entry.direction === 'incoming' ? 'incoming' : 'outgoing',
+        outcome: ['answered', 'missed', 'declined', 'busy'].includes(entry.outcome) ? entry.outcome : 'answered',
+        durationSec: Math.max(0, Math.round(Number(entry.durationSec) || 0)),
+        ts: Date.now(),
+      });
+      const capped = log.slice(0, 50);
+      await this.state.storage.put(`callLog:${userId}`, capped);
+      return json({ ok: true, log: capped });
+    }
+
     // ---- Admin roster: lightweight stand-in for "HR-linked onboarding" ----
     // No real HR system exists to source this from, so an admin pre-adds a
     // person by name/department, gets a freshly generated PIN back exactly
@@ -1110,6 +1142,55 @@ export class UserChannel {
       }
 
       return json({ ok: true, delivered: this.sessions.size, hadNoLiveSession: this.sessions.size === 0 });
+    }
+
+    // Call signaling relay — this DO is keyed by the *recipient's* userId, so
+    // whichever side (caller or callee) wants to reach the other posts here
+    // via /api/calls/signal and it fans out over the same always-open notify
+    // socket already used for message pings. No new connection, no new
+    // Durable Object type: the WebRTC offer/answer/ICE candidates and the
+    // ringing/hangup/decline/busy signals all ride this one pipe.
+    if (request.method === 'POST' && url.pathname === '/call-signal') {
+      const payload = await request.text();
+      let data = null;
+      try { data = JSON.parse(payload); } catch (e) {}
+      for (const ws of this.sessions.keys()) {
+        try {
+          ws.send(payload);
+        } catch (e) {
+          this.sessions.delete(ws);
+        }
+      }
+      const delivered = this.sessions.size;
+
+      // Nobody's tab/device is open to hear the phone "ring" in-app — this is
+      // the one case where a call is genuinely silent without a real OS push,
+      // unlike a chat message which can just wait for next-open. Always pushes
+      // for an incoming call regardless of chat-notify-prefs (calls aren't a
+      // chat channel, so mute-a-chat doesn't apply), same retry/cleanup logic
+      // /notify already uses for pushSubs.
+      if (data && data.type === 'call-signal' && data.signal && data.signal.kind === 'offer' && delivered === 0) {
+        const subs = (await this.state.storage.get('pushSubs')) || [];
+        if (subs.length) {
+          const pushPayload = {
+            title: 'PArA PIN',
+            body: `Incoming call from ${data.signal.fromName || 'Someone'}`,
+            chatId: null,
+          };
+          const stillValid = [];
+          for (const sub of subs) {
+            try {
+              const result = await sendWebPushWithRetry(sub, pushPayload, this.env);
+              if (result.status !== 404 && result.status !== 410) stillValid.push(sub);
+            } catch (e) {
+              stillValid.push(sub);
+            }
+          }
+          if (stillValid.length !== subs.length) await this.state.storage.put('pushSubs', stillValid);
+        }
+      }
+
+      return json({ ok: true, delivered });
     }
 
     if (request.method === 'GET' && url.pathname === '/presence') {
@@ -1803,6 +1884,104 @@ export default {
         const channelStub = env.USER_CHANNEL.get(env.USER_CHANNEL.idFromName(userId));
         const res = await channelStub.fetch('https://internal/presence');
         return res;
+      }
+
+      // 1:1 voice calling — relays a WebRTC offer/answer/ice-candidate/end
+      // signal from the caller to the callee (or back), over the target's
+      // UserChannel notify socket. The Worker never sees any audio — this is
+      // purely signaling, same trust boundary as everything else here.
+      if (request.method === 'POST' && url.pathname === '/api/calls/signal') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const { toUserId, signal } = await request.json().catch(() => ({}));
+        if (!toUserId || !signal || !signal.kind) return json({ error: 'invalid' }, 400);
+        if (toUserId === who.userId) return json({ error: 'cannot_call_self' }, 400);
+        const channelStub = env.USER_CHANNEL.get(env.USER_CHANNEL.idFromName(toUserId));
+        const res = await channelStub.fetch('https://internal/call-signal', {
+          method: 'POST',
+          body: JSON.stringify({
+            type: 'call-signal',
+            signal: {
+              ...signal,
+              fromUserId: who.userId,
+              fromName: who.displayName,
+              fromAvatarUrl: who.avatarUrl || null,
+            },
+          }),
+        });
+        return res;
+      }
+
+      // Self-scoped call history — each side of a call writes its own log
+      // entry once the call ends, so this never needs to look up the other
+      // party's name/avatar server-side (the caller already knows who they
+      // dialed; the callee already got the caller's name in the offer).
+      if (request.method === 'GET' && url.pathname === '/api/calls/log') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const res = await registryStub.fetch(`https://internal/call-log?userId=${encodeURIComponent(who.userId)}`);
+        return res;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/calls/log') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const entry = await request.json().catch(() => ({}));
+        const res = await registryStub.fetch('https://internal/call-log', {
+          method: 'POST',
+          body: JSON.stringify({ userId: who.userId, entry }),
+        });
+        return res;
+      }
+
+      // ICE server list for the WebRTC call. STUN alone (Google's public
+      // servers) gets two peers connected directly whenever their NATs allow
+      // it, which covers most home/office networks. Symmetric NAT or a
+      // locked-down corporate firewall needs a TURN relay to work at all —
+      // Cloudflare Realtime's TURN service is the intended fit here (same
+      // Cloudflare account, pay-per-GB, short-lived credentials), wired up as
+      // soon as CF_TURN_KEY_ID + CF_TURN_API_TOKEN secrets exist. Until then
+      // this just serves STUN, so calls work everywhere except the small
+      // slice of networks that genuinely require a relay.
+      if (request.method === 'GET' && url.pathname === '/api/calls/ice-servers') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const iceServers = [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+        ];
+        if (env.CF_TURN_KEY_ID && env.CF_TURN_API_TOKEN) {
+          try {
+            const turnRes = await fetch(
+              `https://rtc.live.cloudflare.com/v1/turn/keys/${env.CF_TURN_KEY_ID}/credentials/generate`,
+              {
+                method: 'POST',
+                headers: {
+                  authorization: `Bearer ${env.CF_TURN_API_TOKEN}`,
+                  'content-type': 'application/json',
+                },
+                body: JSON.stringify({ ttl: 86400 }),
+              }
+            );
+            if (turnRes.ok) {
+              const turnData = await turnRes.json();
+              if (turnData && turnData.iceServers) iceServers.push(turnData.iceServers);
+            }
+          } catch (e) {}
+        }
+        return json({ iceServers });
       }
 
       if (request.method === 'GET' && url.pathname === '/api/push/vapid-public-key') {

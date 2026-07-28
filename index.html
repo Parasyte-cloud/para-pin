@@ -165,6 +165,36 @@
     border-radius:10px; background:linear-gradient(135deg, var(--ice), var(--fire)); color:#0a0d12;
     font-size:9.5px; font-weight:700; display:flex; align-items:center; justify-content:center;
   }
+  /* ================= ACTIVE CALL BAR ================= */
+  #activeCallBar{
+    flex-shrink:0; display:flex; align-items:center; gap:12px; padding:10px 16px;
+    background:linear-gradient(135deg, rgba(0,212,255,0.16), rgba(255,106,0,0.1));
+    border-top:1px solid var(--glass-brd-hi);
+  }
+  #activeCallBar .avatar{ width:36px; height:36px; font-size:13px; flex-shrink:0; }
+  .active-call-bar-info{ flex:1; min-width:0; }
+  .active-call-bar-name{ font-size:13.5px; font-weight:700; color:var(--text-hi); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .active-call-bar-status{ font-size:11.5px; color:var(--text-mid); }
+  .active-call-end-btn{ background:#ff4d4d; color:#fff; transform:rotate(135deg); }
+  .active-call-end-btn:hover{ background:#ff2d2d; }
+  #activeCallMuteBtn.active{ background:rgba(255,255,255,0.18); color:var(--text-hi); }
+
+  /* ================= INCOMING CALL ================= */
+  #incomingCallOverlay{ z-index:60; background:rgba(4,5,8,0.92); backdrop-filter:blur(6px); }
+  .incoming-call-card{ display:flex; flex-direction:column; align-items:center; gap:6px; width:320px; max-width:90vw; text-align:center; }
+  .incoming-call-card .avatar{ width:96px; height:96px; font-size:34px; margin-bottom:14px; }
+  .incoming-call-name{ font-size:22px; font-weight:700; color:var(--text-hi); }
+  .incoming-call-sub{ font-size:13px; color:var(--text-mid); margin-bottom:36px; }
+  .incoming-call-actions{ display:flex; gap:46px; }
+  .incoming-call-btn{
+    width:60px; height:60px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+    font-size:24px; cursor:pointer; border:none; color:#fff;
+  }
+  .incoming-call-decline{ background:#ff4d4d; transform:rotate(135deg); }
+  .incoming-call-decline:hover{ background:#ff2d2d; }
+  .incoming-call-accept{ background:#2ecf7a; }
+  .incoming-call-accept:hover{ background:#22b566; }
+
   @media (min-width: 761px){
     #bottomNav{ max-width:760px; margin:0 auto; border-radius:20px 20px 0 0; border-left:1px solid var(--glass-brd); border-right:1px solid var(--glass-brd); }
   }
@@ -634,6 +664,7 @@
             <div class="conv-sub" id="convSub"></div>
           </div>
           <div style="margin-left:auto; display:flex; align-items:center; gap:6px;">
+            <div class="icon-btn" id="chatCallBtn" title="Voice call" style="display:none;">📞</div>
             <div class="icon-btn" id="msgSearchBtn" title="Search this chat">🔍</div>
             <div class="notify-pref-wrap" style="position:relative;">
               <div class="icon-btn" id="notifyPrefBtn" title="Notifications">🔔</div>
@@ -684,6 +715,17 @@
         </div>
       </div>
     </div>
+  </div>
+
+  <!-- ============ ACTIVE CALL BAR (voice call in progress / ringing out) ============ -->
+  <div id="activeCallBar" style="display:none;">
+    <div class="avatar" id="activeCallBarAvatar"></div>
+    <div class="active-call-bar-info">
+      <div class="active-call-bar-name" id="activeCallBarName"></div>
+      <div class="active-call-bar-status" id="activeCallBarStatus"></div>
+    </div>
+    <div class="icon-btn" id="activeCallMuteBtn" title="Mute">🎙️</div>
+    <div class="icon-btn active-call-end-btn" id="activeCallEndBtn" title="End call">📞</div>
   </div>
 
   <!-- ============ GLOBAL BOTTOM NAV ============ -->
@@ -1010,6 +1052,40 @@
         <div class="hint">PArA PIN — PIN-gated team chat.</div>
         <a class="brand-footer" href="https://www.parasyte.cloud" target="_blank" rel="noopener noreferrer" style="justify-content:flex-start;"><span>Powered by parasyte.cloud</span></a>
       </section>
+    </div>
+  </div>
+</div>
+
+<!-- ============ CALLS ============ -->
+<div class="overlay admin-console-overlay" id="callsOverlay">
+  <div class="modal lg admin-console">
+    <div class="admin-console-head">
+      <div class="icon-btn" onclick="closeModal('callsOverlay')" title="Close">←</div>
+      <h2>Calls</h2>
+      <div style="width:34px;"></div>
+    </div>
+    <div class="admin-console-body" style="max-width:640px;">
+      <section class="admin-console-section">
+        <h3>Recent</h3>
+        <div id="callsRecentList"></div>
+      </section>
+      <section class="admin-console-section">
+        <h3>Contacts</h3>
+        <div id="callsContactList"></div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<!-- ============ INCOMING CALL ============ -->
+<div class="overlay" id="incomingCallOverlay">
+  <div class="incoming-call-card">
+    <div class="avatar" id="incomingCallAvatar"></div>
+    <div class="incoming-call-name" id="incomingCallName"></div>
+    <div class="incoming-call-sub">Incoming call…</div>
+    <div class="incoming-call-actions">
+      <button class="incoming-call-btn incoming-call-decline" id="incomingCallDeclineBtn" title="Decline">📞</button>
+      <button class="incoming-call-btn incoming-call-accept" id="incomingCallAcceptBtn" title="Accept">📞</button>
     </div>
   </div>
 </div>
@@ -2027,6 +2103,7 @@
     if (!forceStayOnList) appEl.classList.add('show-chat');
     renderAvatar(convAvatar, name, chat.type==='group', chatAvatarUrl(chat));
     convTitle.textContent = name;
+    document.getElementById('chatCallBtn').style.display = chat.type === 'dm' ? 'flex' : 'none';
 
     const typing = typingUsers[chat.id];
     const typingNames = typing ? Object.values(typing) : [];
@@ -2484,6 +2561,385 @@
   // action in a chat is hidden entirely rather than prompting every time.
   let locationSharingEnabled = localStorage.getItem('parapin_location_sharing') === '1';
 
+  // ================= 1:1 VOICE CALLING =================
+  // Signaling rides the same always-open notify WebSocket every client
+  // already keeps connected for chat pings (see connectNotifySocket) —
+  // offer/answer/ICE candidates and ring/hangup/decline/busy all travel as
+  // {type:'call-signal', signal:{...}} messages relayed through the other
+  // person's UserChannel Durable Object via POST /api/calls/signal. No new
+  // socket, no new server object type. Audio itself is peer-to-peer WebRTC
+  // (or via TURN once configured — see /api/calls/ice-servers) and never
+  // touches the Worker at all.
+  let callState = 'idle'; // idle | ringing-out | ringing-in | connected
+  let activeCallId = null;
+  let activeCallPeerId = null;
+  let activeCallPeerName = null;
+  let activeCallPeerAvatar = null;
+  let activeCallDirection = null; // 'outgoing' | 'incoming'
+  let rtcPeerConn = null;
+  let localAudioStream = null;
+  let remoteAudioEl = null;
+  let callStartedAt = null;
+  let callTimerInterval = null;
+  let ringTimeoutTimer = null;
+  let ringToneInterval = null;
+  let iceServersCache = null;
+  let pendingRemoteOfferSdp = null;
+  let pendingIceCandidates = [];
+  let callMuted = false;
+  let callsOverlayOpen = false;
+  let unseenMissedCalls = 0;
+
+  async function getIceServers(){
+    if (iceServersCache) return iceServersCache;
+    const r = await apiFetch('/calls/ice-servers');
+    iceServersCache = (r.ok && r.body.iceServers && r.body.iceServers.length)
+      ? r.body.iceServers
+      : [{ urls: 'stun:stun.l.google.com:19302' }];
+    return iceServersCache;
+  }
+
+  function sendCallSignal(toUserId, signal){
+    return apiFetch('/calls/signal', { method: 'POST', body: JSON.stringify({ toUserId, signal }) }).catch(()=>{});
+  }
+
+  function logCallEntry(entry){
+    return apiFetch('/calls/log', { method: 'POST', body: JSON.stringify(entry) }).catch(()=>{});
+  }
+
+  function bumpMissedCallBadge(){
+    unseenMissedCalls++;
+    const badge = document.getElementById('navCallsBadge');
+    badge.textContent = String(unseenMissedCalls);
+    badge.style.display = 'flex';
+  }
+
+  // Two distinct synthesized tones (same oscillator technique as playDing,
+  // no audio file to host) — a low steady "ringback" burr for the caller
+  // waiting on an answer, and a brighter two-note "ring ring" for the
+  // callee being called. Only one of the two is ever active per call.
+  function startRingback(){
+    stopRingTone();
+    ringToneInterval = setInterval(()=>{
+      try {
+        ensureAudioCtx();
+        if (!audioCtx || audioCtx.state !== 'running') return;
+        const now = audioCtx.currentTime;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine'; osc.frequency.value = 440;
+        gain.gain.setValueAtTime(0, now);
+        gain.gain.linearRampToValueAtTime(0.1, now + 0.02);
+        gain.gain.setValueAtTime(0.1, now + 0.9);
+        gain.gain.linearRampToValueAtTime(0, now + 1.0);
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        osc.start(now); osc.stop(now + 1.0);
+      } catch(e){}
+    }, 1500);
+  }
+  function startRingtone(){
+    stopRingTone();
+    ringToneInterval = setInterval(()=>{
+      try {
+        ensureAudioCtx();
+        if (!audioCtx || audioCtx.state !== 'running') return;
+        const now = audioCtx.currentTime;
+        [[740, now], [880, now + 0.18]].forEach(([freq, start])=>{
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.type = 'sine'; osc.frequency.value = freq;
+          gain.gain.setValueAtTime(0, start);
+          gain.gain.linearRampToValueAtTime(0.18, start + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.3);
+          osc.connect(gain); gain.connect(audioCtx.destination);
+          osc.start(start); osc.stop(start + 0.32);
+        });
+      } catch(e){}
+    }, 1600);
+  }
+  function stopRingTone(){
+    if (ringToneInterval){ clearInterval(ringToneInterval); ringToneInterval = null; }
+  }
+
+  async function createPeerConnection(peerId){
+    const iceServers = await getIceServers();
+    const pc = new RTCPeerConnection({ iceServers });
+    pc.addEventListener('icecandidate', (ev)=>{
+      if (ev.candidate) sendCallSignal(peerId, { kind: 'ice-candidate', callId: activeCallId, candidate: ev.candidate.toJSON() });
+    });
+    pc.addEventListener('track', (ev)=>{
+      if (!remoteAudioEl){ remoteAudioEl = new Audio(); remoteAudioEl.autoplay = true; }
+      remoteAudioEl.srcObject = ev.streams[0];
+      remoteAudioEl.play().catch(()=>{});
+    });
+    pc.addEventListener('connectionstatechange', ()=>{
+      if (pc.connectionState === 'connected' && callState !== 'connected' && callState !== 'idle') onCallConnected();
+      if ((pc.connectionState === 'failed' || pc.connectionState === 'closed') && callState !== 'idle') endCall('hangup');
+    });
+    return pc;
+  }
+
+  function flushPendingIceCandidates(){
+    if (!rtcPeerConn) return;
+    pendingIceCandidates.forEach(c=>rtcPeerConn.addIceCandidate(c).catch(()=>{}));
+    pendingIceCandidates = [];
+  }
+
+  async function startOutgoingCall(peerId, peerName, peerAvatar){
+    if (callState !== 'idle'){ return; }
+    if (!peerId){ return; }
+    try {
+      localAudioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch(e){
+      alert('Microphone access is needed to make a call.');
+      return;
+    }
+    activeCallId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
+    activeCallPeerId = peerId;
+    activeCallPeerName = peerName || 'PArA PIN user';
+    activeCallPeerAvatar = peerAvatar || null;
+    activeCallDirection = 'outgoing';
+    callState = 'ringing-out';
+    callStartedAt = null;
+    renderCallUi();
+    rtcPeerConn = await createPeerConnection(peerId);
+    localAudioStream.getTracks().forEach(t=>rtcPeerConn.addTrack(t, localAudioStream));
+    const offer = await rtcPeerConn.createOffer();
+    await rtcPeerConn.setLocalDescription(offer);
+    await sendCallSignal(peerId, { kind: 'offer', callId: activeCallId, sdp: offer.sdp });
+    startRingback();
+    ringTimeoutTimer = setTimeout(()=>{ if (callState === 'ringing-out') endCall('no-answer'); }, 30000);
+  }
+
+  function handleCallSignal(signal){
+    if (!signal || !signal.kind) return;
+    const kind = signal.kind;
+    if (kind === 'offer'){
+      if (callState !== 'idle'){
+        sendCallSignal(signal.fromUserId, { kind: 'end', callId: signal.callId, reason: 'busy' });
+        return;
+      }
+      activeCallId = signal.callId;
+      activeCallPeerId = signal.fromUserId;
+      activeCallPeerName = signal.fromName || 'Someone';
+      activeCallPeerAvatar = signal.fromAvatarUrl || null;
+      activeCallDirection = 'incoming';
+      callState = 'ringing-in';
+      pendingRemoteOfferSdp = signal.sdp;
+      renderCallUi();
+      startRingtone();
+      ringTimeoutTimer = setTimeout(()=>{ if (callState === 'ringing-in') declineCall('no-answer'); }, 30000);
+      return;
+    }
+    if (signal.callId !== activeCallId) return; // stale or unrelated call
+    if (kind === 'answer'){
+      if (rtcPeerConn && callState === 'ringing-out'){
+        rtcPeerConn.setRemoteDescription({ type: 'answer', sdp: signal.sdp }).then(flushPendingIceCandidates).catch(()=>{});
+        stopRingTone();
+        if (ringTimeoutTimer){ clearTimeout(ringTimeoutTimer); ringTimeoutTimer = null; }
+      }
+      return;
+    }
+    if (kind === 'ice-candidate'){
+      if (rtcPeerConn && signal.candidate){
+        if (rtcPeerConn.remoteDescription) rtcPeerConn.addIceCandidate(signal.candidate).catch(()=>{});
+        else pendingIceCandidates.push(signal.candidate);
+      }
+      return;
+    }
+    if (kind === 'end'){
+      finishCall(signal.reason || 'hangup', false);
+      return;
+    }
+  }
+
+  async function acceptCall(){
+    if (callState !== 'ringing-in') return;
+    stopRingTone();
+    if (ringTimeoutTimer){ clearTimeout(ringTimeoutTimer); ringTimeoutTimer = null; }
+    try {
+      localAudioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch(e){
+      alert('Microphone access is needed to answer a call.');
+      declineCall('declined');
+      return;
+    }
+    rtcPeerConn = await createPeerConnection(activeCallPeerId);
+    localAudioStream.getTracks().forEach(t=>rtcPeerConn.addTrack(t, localAudioStream));
+    await rtcPeerConn.setRemoteDescription({ type: 'offer', sdp: pendingRemoteOfferSdp });
+    flushPendingIceCandidates();
+    const answer = await rtcPeerConn.createAnswer();
+    await rtcPeerConn.setLocalDescription(answer);
+    await sendCallSignal(activeCallPeerId, { kind: 'answer', callId: activeCallId, sdp: answer.sdp });
+    renderCallUi();
+  }
+
+  function declineCall(reason){
+    if (callState !== 'ringing-in') return;
+    stopRingTone();
+    if (ringTimeoutTimer){ clearTimeout(ringTimeoutTimer); ringTimeoutTimer = null; }
+    sendCallSignal(activeCallPeerId, { kind: 'end', callId: activeCallId, reason: reason || 'declined' });
+    logCallEntry({ withUserId: activeCallPeerId, withName: activeCallPeerName, withAvatarUrl: activeCallPeerAvatar, direction: 'incoming', outcome: reason === 'no-answer' ? 'missed' : 'declined', durationSec: 0 });
+    if (reason === 'no-answer') bumpMissedCallBadge();
+    finishCall(reason || 'declined', true);
+  }
+
+  function onCallConnected(){
+    callState = 'connected';
+    callStartedAt = Date.now();
+    stopRingTone();
+    if (ringTimeoutTimer){ clearTimeout(ringTimeoutTimer); ringTimeoutTimer = null; }
+    renderCallUi();
+    callTimerInterval = setInterval(updateCallTimerUi, 1000);
+  }
+
+  function endCall(reason){
+    if (callState === 'idle') return;
+    const wasConnected = callState === 'connected';
+    const durationSec = callStartedAt ? Math.round((Date.now() - callStartedAt) / 1000) : 0;
+    if (activeCallPeerId){
+      sendCallSignal(activeCallPeerId, { kind: 'end', callId: activeCallId, reason: reason || (wasConnected ? 'hangup' : 'no-answer'), durationSec });
+    }
+    const outcome = wasConnected ? 'answered' : 'missed';
+    logCallEntry({ withUserId: activeCallPeerId, withName: activeCallPeerName, withAvatarUrl: activeCallPeerAvatar, direction: activeCallDirection === 'incoming' ? 'incoming' : 'outgoing', outcome, durationSec });
+    finishCall(reason, true);
+  }
+
+  // Shared teardown for both "I ended it" and "the other side ended it" —
+  // `alreadyLogged` skips the duplicate call-log write when the caller above
+  // us already did it.
+  function finishCall(reason, alreadyLogged){
+    stopRingTone();
+    if (ringTimeoutTimer){ clearTimeout(ringTimeoutTimer); ringTimeoutTimer = null; }
+    if (callTimerInterval){ clearInterval(callTimerInterval); callTimerInterval = null; }
+    if (!alreadyLogged && activeCallPeerId){
+      const wasConnected = callState === 'connected';
+      const durationSec = callStartedAt ? Math.round((Date.now() - callStartedAt) / 1000) : 0;
+      const outcome = wasConnected ? 'answered' : (reason === 'busy' ? 'busy' : 'missed');
+      logCallEntry({ withUserId: activeCallPeerId, withName: activeCallPeerName, withAvatarUrl: activeCallPeerAvatar, direction: activeCallDirection === 'incoming' ? 'incoming' : 'outgoing', outcome, durationSec });
+      if (!wasConnected && activeCallDirection === 'incoming') bumpMissedCallBadge();
+    }
+    if (rtcPeerConn){ try { rtcPeerConn.close(); } catch(e){} rtcPeerConn = null; }
+    if (localAudioStream){ localAudioStream.getTracks().forEach(t=>t.stop()); localAudioStream = null; }
+    if (remoteAudioEl){ remoteAudioEl.srcObject = null; }
+    callState = 'idle';
+    activeCallId = null; activeCallPeerId = null; activeCallPeerName = null; activeCallPeerAvatar = null;
+    activeCallDirection = null; callStartedAt = null; pendingRemoteOfferSdp = null; pendingIceCandidates = [];
+    callMuted = false;
+    renderCallUi();
+    if (callsOverlayOpen) loadCallLog();
+  }
+
+  function renderCallUi(){
+    const incoming = document.getElementById('incomingCallOverlay');
+    const bar = document.getElementById('activeCallBar');
+    if (callState === 'ringing-in'){
+      renderAvatar(document.getElementById('incomingCallAvatar'), activeCallPeerName, false, activeCallPeerAvatar);
+      document.getElementById('incomingCallName').textContent = activeCallPeerName;
+      incoming.classList.add('show');
+    } else {
+      incoming.classList.remove('show');
+    }
+    if (callState === 'ringing-out' || callState === 'connected'){
+      renderAvatar(document.getElementById('activeCallBarAvatar'), activeCallPeerName, false, activeCallPeerAvatar);
+      document.getElementById('activeCallBarName').textContent = activeCallPeerName;
+      document.getElementById('activeCallBarStatus').textContent = callState === 'connected' ? '0:00' : 'Ringing…';
+      bar.style.display = 'flex';
+      const muteBtn = document.getElementById('activeCallMuteBtn');
+      muteBtn.classList.toggle('active', callMuted);
+      muteBtn.textContent = callMuted ? '🔇' : '🎙️';
+    } else {
+      bar.style.display = 'none';
+    }
+  }
+
+  function updateCallTimerUi(){
+    if (callState !== 'connected' || !callStartedAt) return;
+    const sec = Math.floor((Date.now() - callStartedAt) / 1000);
+    document.getElementById('activeCallBarStatus').textContent = fmtDuration(sec);
+  }
+
+  function toggleCallMute(){
+    if (!localAudioStream) return;
+    callMuted = !callMuted;
+    localAudioStream.getAudioTracks().forEach(t=>{ t.enabled = !callMuted; });
+    const muteBtn = document.getElementById('activeCallMuteBtn');
+    muteBtn.classList.toggle('active', callMuted);
+    muteBtn.textContent = callMuted ? '🔇' : '🎙️';
+  }
+
+  document.getElementById('incomingCallAcceptBtn').addEventListener('click', acceptCall);
+  document.getElementById('incomingCallDeclineBtn').addEventListener('click', ()=>declineCall('declined'));
+  document.getElementById('activeCallEndBtn').addEventListener('click', ()=>endCall());
+  document.getElementById('activeCallMuteBtn').addEventListener('click', toggleCallMute);
+  document.getElementById('chatCallBtn').addEventListener('click', ()=>{
+    const chat = getChat(activeChatId);
+    if (!chat || chat.type !== 'dm') return;
+    const otherId = otherMemberId(chat);
+    if (!otherId) return;
+    startOutgoingCall(otherId, userNameCache[otherId] || chatDisplayName(chat), userAvatarCache[otherId]);
+  });
+
+  async function openCallsOverlay(){
+    callsOverlayOpen = true;
+    unseenMissedCalls = 0;
+    document.getElementById('navCallsBadge').style.display = 'none';
+    openModal('callsOverlay');
+    await ensureNamesLoaded();
+    renderCallsContactList();
+    await loadCallLog();
+  }
+
+  function renderCallsContactList(){
+    const list = document.getElementById('callsContactList');
+    list.innerHTML = '';
+    const dmChats = sessionChats.filter(c => c.type === 'dm');
+    if (dmChats.length === 0){
+      list.innerHTML = '<div class="hint">No contacts yet — start a DM first.</div>';
+      return;
+    }
+    dmChats.forEach(c=>{
+      const otherId = otherMemberId(c);
+      if (!otherId) return;
+      const name = userNameCache[otherId] || 'PArA PIN user';
+      const row = document.createElement('div');
+      row.className = 'settings-row settings-row-action';
+      row.innerHTML = `<span style="display:flex;align-items:center;gap:10px;min-width:0;"><span class="avatar" style="width:32px;height:32px;font-size:12px;flex-shrink:0;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(name)}</span></span><span>📞</span>`;
+      renderAvatar(row.querySelector('.avatar'), name, false, userAvatarCache[otherId]);
+      row.addEventListener('click', ()=>{
+        closeModal('callsOverlay');
+        callsOverlayOpen = false;
+        setActiveNavTab('chats');
+        startOutgoingCall(otherId, name, userAvatarCache[otherId]);
+      });
+      list.appendChild(row);
+    });
+  }
+
+  async function loadCallLog(){
+    const listEl = document.getElementById('callsRecentList');
+    const r = await apiFetch('/calls/log');
+    if (!r.ok || !r.body || !r.body.log){ listEl.innerHTML = '<div class="hint">No recent calls yet.</div>'; return; }
+    if (r.body.log.length === 0){ listEl.innerHTML = '<div class="hint">No recent calls yet.</div>'; return; }
+    listEl.innerHTML = '';
+    r.body.log.forEach(entry=>{
+      const row = document.createElement('div');
+      row.className = 'settings-row settings-row-action';
+      const dirIcon = entry.direction === 'outgoing' ? '↗' : '↙';
+      const outcomeLabel = entry.outcome === 'missed' ? 'Missed' : entry.outcome === 'declined' ? 'Declined' : entry.outcome === 'busy' ? 'Busy' : fmtDuration(entry.durationSec);
+      const color = (entry.outcome === 'missed' || entry.outcome === 'declined') ? 'color:#ff6a6a;' : 'color:var(--text-low);';
+      row.innerHTML = `<span style="display:flex;align-items:center;gap:10px;min-width:0;"><span class="avatar" style="width:32px;height:32px;font-size:12px;flex-shrink:0;"></span><span style="overflow:hidden;"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(entry.withName)}</div><div class="hint" style="margin:0;${color}">${dirIcon} ${outcomeLabel} · ${fmtDay(entry.ts)}</div></span></span><span>📞</span>`;
+      renderAvatar(row.querySelector('.avatar'), entry.withName, false, entry.withAvatarUrl);
+      row.addEventListener('click', ()=>{
+        closeModal('callsOverlay');
+        callsOverlayOpen = false;
+        setActiveNavTab('chats');
+        startOutgoingCall(entry.withUserId, entry.withName, entry.withAvatarUrl);
+      });
+      listEl.appendChild(row);
+    });
+  }
+
   function renderProfilePhotoPreview(url){
     if (url){
       profilePhotoPreview.style.background = `center/cover no-repeat url("${url}")`;
@@ -2710,13 +3166,13 @@
   // different copy, since none of the three exist yet (see the scoping
   // plan) but the nav real estate should already reflect where they'll live.
   const COMING_SOON_COPY = {
-    calls: { icon: '📞', title: 'Calls', body: "Voice calling is being scoped next — it'll use Cloudflare's WebRTC/TURN infrastructure over the same per-chat connection PArA PIN already has, so it can reuse your existing contacts and E2EE keys." },
-    video: { icon: '🎥', title: 'Video', body: "Video calling rides on the same plan as Calls above — once 1:1 calling is in, video is the same signaling path with a camera track added." },
+    video: { icon: '🎥', title: 'Video', body: "Video calling rides on the same plan as Calls — now that 1:1 voice calling is in, video is the same signaling path with a camera track added." },
     meetingroom: { icon: '🗓️', title: 'Meeting Room', body: "Group meeting rooms (Zoom/Meet-style, more than 2 people) need a proper SFU rather than peer-to-peer — planned on Cloudflare Realtime SFU, as its own phase after 1:1 calls are working." },
   };
 
   function closeAllNavOverlays(){
-    ['rosterOverlay','settingsOverlay','comingSoonOverlay','profileOverlay'].forEach(closeModal);
+    ['rosterOverlay','settingsOverlay','comingSoonOverlay','profileOverlay','callsOverlay'].forEach(closeModal);
+    callsOverlayOpen = false;
   }
 
   function setActiveNavTab(name){
@@ -2740,6 +3196,10 @@
         openSettingsOverlay();
         return;
       }
+      if (name === 'calls'){
+        openCallsOverlay();
+        return;
+      }
       const copy = COMING_SOON_COPY[name];
       if (copy){
         document.getElementById('comingSoonTitle').textContent = copy.title;
@@ -2753,14 +3213,14 @@
   // Closing any of these overlays via their own back/× button should return
   // the nav to "Chats" rather than leaving a non-Chats tab highlighted with
   // nothing open behind it.
-  ['rosterOverlay','settingsOverlay','comingSoonOverlay'].forEach(id=>{
+  ['rosterOverlay','settingsOverlay','comingSoonOverlay','callsOverlay'].forEach(id=>{
     const el = document.getElementById(id);
     el.addEventListener('click', (e)=>{
-      if (e.target === el) setActiveNavTab('chats'); // backdrop click
+      if (e.target === el){ setActiveNavTab('chats'); if (id === 'callsOverlay') callsOverlayOpen = false; } // backdrop click
     });
   });
-  document.querySelectorAll(`#rosterOverlay .admin-console-head .icon-btn, #settingsOverlay .admin-console-head .icon-btn, #comingSoonOverlay .admin-console-head .icon-btn`).forEach(btn=>{
-    btn.addEventListener('click', ()=> setActiveNavTab('chats'));
+  document.querySelectorAll(`#rosterOverlay .admin-console-head .icon-btn, #settingsOverlay .admin-console-head .icon-btn, #comingSoonOverlay .admin-console-head .icon-btn, #callsOverlay .admin-console-head .icon-btn`).forEach(btn=>{
+    btn.addEventListener('click', ()=>{ setActiveNavTab('chats'); callsOverlayOpen = false; });
   });
 
   const settingsAlwaysBannerInput = document.getElementById('settingsAlwaysBannerInput');
@@ -3199,6 +3659,7 @@
       intentionalNotifyClose = true;
       try { notifySocket.close(); } catch(e){}
     }
+    if (callState !== 'idle') endCall('hangup');
   });
 
   // ---------------- notifications: sound + badge + browser notification ----------------
@@ -3903,6 +4364,7 @@
       let data;
       try { data = JSON.parse(ev.data); } catch(e){ return; }
       if (data.type === 'notify') handleNotify(data);
+      if (data.type === 'call-signal') handleCallSignal(data.signal);
     });
     ws.addEventListener('close', ()=>{
       if (notifyHeartbeatTimer){ clearInterval(notifyHeartbeatTimer); notifyHeartbeatTimer = null; }
