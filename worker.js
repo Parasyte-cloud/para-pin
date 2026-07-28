@@ -1164,13 +1164,17 @@ export class UserChannel {
       }
       const delivered = this.sessions.size;
 
-      // Nobody's tab/device is open to hear the phone "ring" in-app — this is
-      // the one case where a call is genuinely silent without a real OS push,
-      // unlike a chat message which can just wait for next-open. Always pushes
-      // for an incoming call regardless of chat-notify-prefs (calls aren't a
-      // chat channel, so mute-a-chat doesn't apply), same retry/cleanup logic
-      // /notify already uses for pushSubs.
-      if (data && data.type === 'call-signal' && data.signal && data.signal.kind === 'offer' && delivered === 0) {
+      // Always push for an incoming call, even when a WebSocket session is
+      // technically still open — "delivered > 0" only means some tab has a
+      // live socket, not that it's actually foregrounded. A backgrounded or
+      // unfocused tab gets its JS timers/AudioContext throttled by the
+      // browser, so the in-page ringtone can die silently while the socket
+      // stays connected; a real OS push is the only thing that reliably
+      // still rings in that case. Unlike a chat message (which can just wait
+      // for next-open), a call is time-sensitive enough to accept the
+      // occasional double-alert on a device that has the app open and
+      // focused too. Same retry/cleanup logic /notify already uses for pushSubs.
+      if (data && data.type === 'call-signal' && data.signal && data.signal.kind === 'offer') {
         const subs = (await this.state.storage.get('pushSubs')) || [];
         if (subs.length) {
           const pushPayload = {

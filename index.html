@@ -2795,6 +2795,14 @@
   let callHasVideo = false;
   let cameraOff = false;
   let currentFacingMode = 'user';
+  // Answer has gone out/come in and both sides are now doing ICE negotiation
+  // — "Ringing…" no longer describes what's happening, and if this never
+  // resolves to onCallConnected() within CONNECT_TIMEOUT_MS it's almost
+  // always because the two networks need a TURN relay neither side has
+  // (see /api/calls/ice-servers) rather than anything actually "ringing."
+  let awaitingConnection = false;
+  let connectTimeoutTimer = null;
+  const CONNECT_TIMEOUT_MS = 15000;
 
   async function getIceServers(){
     if (iceServersCache) return iceServersCache;
@@ -2960,6 +2968,26 @@
       pendingRemoteOfferSdp = signal.sdp;
       renderCallUi();
       startRingtone();
+      // The synthesized ringtone above is just a Web Audio oscillator on a
+      // setInterval — the moment this tab is backgrounded or loses focus,
+      // browsers throttle both of those, so it can go silent even though
+      // the socket that received this offer is still connected. A real OS
+      // notification isn't subject to that throttling (it's drawn by the
+      // OS, not this page), so fire one immediately as a backup whenever
+      // the page isn't the visible, focused one — same permission grant as
+      // regular message notifications, no extra ask needed.
+      if ((document.visibilityState !== 'visible' || !document.hasFocus()) && notifyPermissionOk()){
+        try {
+          const n = new Notification(callHasVideo ? 'Incoming video call' : 'Incoming call', {
+            body: `${activeCallPeerName} is calling…`,
+            tag: 'parapin-call-' + activeCallId,
+            icon: '/icon-192.png',
+            requireInteraction: true,
+            vibrate: [300, 150, 300, 150, 300],
+          });
+          n.onclick = () => { window.focus(); n.close(); };
+        } catch(e) {}
+      }
       ringTimeoutTimer = setTimeout(()=>{ if (callState === 'ringing-in') declineCall('no-answer'); }, 30000);
       return;
     }
@@ -2969,6 +2997,7 @@
         rtcPeerConn.setRemoteDescription({ type: 'answer', sdp: signal.sdp }).then(flushPendingIceCandidates).catch(()=>{});
         stopRingTone();
         if (ringTimeoutTimer){ clearTimeout(ringTimeoutTimer); ringTimeoutTimer = null; }
+        startAwaitingConnection();
       }
       return;
     }
@@ -3008,7 +3037,25 @@
     const answer = await rtcPeerConn.createAnswer();
     await rtcPeerConn.setLocalDescription(answer);
     await sendCallSignal(activeCallPeerId, { kind: 'answer', callId: activeCallId, sdp: answer.sdp });
+    startAwaitingConnection();
     renderCallUi();
+  }
+
+  // Both sides now start ICE negotiation. Give it CONNECT_TIMEOUT_MS to
+  // actually connect — if it never does, that's almost always the two
+  // networks needing a TURN relay neither side has (see startOutgoingCall's
+  // getIceServers() comment), not a real "still ringing" situation, so say
+  // so explicitly instead of leaving the screen stuck forever.
+  function startAwaitingConnection(){
+    awaitingConnection = true;
+    renderCallUi();
+    if (connectTimeoutTimer) clearTimeout(connectTimeoutTimer);
+    connectTimeoutTimer = setTimeout(()=>{
+      if (callState !== 'idle' && callState !== 'connected'){
+        alert("Couldn't connect this call. This usually means the two networks involved need a relay (TURN) that isn't set up yet — ask your admin to configure Cloudflare Realtime TURN in Settings.");
+        endCall('connect-timeout');
+      }
+    }, CONNECT_TIMEOUT_MS);
   }
 
   function declineCall(reason){
@@ -3025,7 +3072,9 @@
     callState = 'connected';
     callStartedAt = Date.now();
     stopRingTone();
+    awaitingConnection = false;
     if (ringTimeoutTimer){ clearTimeout(ringTimeoutTimer); ringTimeoutTimer = null; }
+    if (connectTimeoutTimer){ clearTimeout(connectTimeoutTimer); connectTimeoutTimer = null; }
     renderCallUi();
     callTimerInterval = setInterval(updateCallTimerUi, 1000);
   }
@@ -3047,7 +3096,9 @@
   // us already did it.
   function finishCall(reason, alreadyLogged){
     stopRingTone();
+    awaitingConnection = false;
     if (ringTimeoutTimer){ clearTimeout(ringTimeoutTimer); ringTimeoutTimer = null; }
+    if (connectTimeoutTimer){ clearTimeout(connectTimeoutTimer); connectTimeoutTimer = null; }
     if (callTimerInterval){ clearInterval(callTimerInterval); callTimerInterval = null; }
     if (!alreadyLogged && activeCallPeerId){
       const wasConnected = callState === 'connected';
@@ -3085,11 +3136,12 @@
       incoming.classList.remove('show');
     }
     const ringingOrConnected = callState === 'ringing-out' || callState === 'connected';
+    const statusText = callState === 'connected' ? '0:00' : (awaitingConnection ? 'Connecting…' : 'Ringing…');
     if (ringingOrConnected && callHasVideo){
       bar.style.display = 'none';
       videoScreen.classList.add('show');
       document.getElementById('videoCallPeerName').textContent = activeCallPeerName;
-      document.getElementById('videoCallStatus').textContent = callState === 'connected' ? '0:00' : 'Ringing…';
+      document.getElementById('videoCallStatus').textContent = statusText;
       const muteBtn = document.getElementById('videoCallMuteBtn');
       muteBtn.classList.toggle('active', callMuted);
       muteBtn.textContent = callMuted ? '🔇' : '🎙️';
@@ -3100,7 +3152,7 @@
       videoScreen.classList.remove('show');
       renderAvatar(document.getElementById('activeCallBarAvatar'), activeCallPeerName, false, activeCallPeerAvatar);
       document.getElementById('activeCallBarName').textContent = activeCallPeerName;
-      document.getElementById('activeCallBarStatus').textContent = callState === 'connected' ? '0:00' : 'Ringing…';
+      document.getElementById('activeCallBarStatus').textContent = statusText;
       bar.style.display = 'flex';
       const muteBtn = document.getElementById('activeCallMuteBtn');
       muteBtn.classList.toggle('active', callMuted);
