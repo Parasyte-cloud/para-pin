@@ -372,6 +372,7 @@ export class Registry {
         visibleChats.push(c);
       }
       if (hiddenChanged) await this.state.storage.put(`hiddenChats:${user.id}`, hidden);
+      const pinnedChatIds = (await this.state.storage.get(`pinnedChats:${user.id}`)) || [];
 
       const admins = (await this.state.storage.get('admins')) || [];
       return json({
@@ -389,6 +390,7 @@ export class Registry {
         trustedDeviceCount: user.deviceIds.length,
         chats: visibleChats,
         summaries,
+        pinnedChatIds,
       });
     }
 
@@ -475,11 +477,26 @@ export class Registry {
         }
       }
 
+      // Not in *my* list, but "Delete chat" only ever removes a DM from the
+      // deleter's own userChats — the other side (and the underlying
+      // ChatRoom/message history) is untouched. So before minting a brand
+      // new chat (and a brand new, empty history) for this pair, check
+      // whether the *other* person still has one — if so, just re-join that
+      // same chat instead. Skipping this check is exactly how the earlier
+      // "duplicate account/chat" bug happened.
+      const otherChatIds = (await this.state.storage.get(`userChats:${other.id}`)) || [];
+      for (const cid of otherChatIds) {
+        const c = await this.state.storage.get(`chat:${cid}`);
+        if (c && c.type === 'dm' && c.memberIds.includes(me.id)) {
+          await this.state.storage.put(`userChats:${me.id}`, [...myChatIds, cid]);
+          return json({ chat: c, existing: true });
+        }
+      }
+
       const chatId = crypto.randomUUID();
       const chat = { id: chatId, type: 'dm', name: null, memberIds: [me.id, other.id], createdAt: Date.now() };
       await this.state.storage.put(`chat:${chatId}`, chat);
       await this.state.storage.put(`userChats:${me.id}`, [...myChatIds, chatId]);
-      const otherChatIds = (await this.state.storage.get(`userChats:${other.id}`)) || [];
       await this.state.storage.put(`userChats:${other.id}`, [...otherChatIds, chatId]);
       const allChatIds = (await this.state.storage.get('allChatIds')) || [];
       await this.state.storage.put('allChatIds', [...allChatIds, chatId]);
@@ -564,12 +581,48 @@ export class Registry {
       return json({ ok: true });
     }
 
+    // Permanently removes a DM from just this user's own chat list — unlike
+    // /hide-chat, it does NOT come back on a new message. Still only ever
+    // touches the caller's own userChats: the other person's list, the
+    // shared chat record, and the message history are all untouched, and
+    // /contact's own-list-first-then-other's-list check (above) means
+    // re-adding this same person later reuses the same chat instead of
+    // quietly starting a second, empty one.
+    if (request.method === 'POST' && url.pathname === '/delete-chat') {
+      const { pinHash, chatId } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ ok: false, error: 'not_registered' }, 401);
+      const myChatIds = (await this.state.storage.get(`userChats:${user.id}`)) || [];
+      if (!myChatIds.includes(chatId)) return json({ ok: false, error: 'not_found' }, 404);
+      await this.state.storage.put(`userChats:${user.id}`, myChatIds.filter((id) => id !== chatId));
+      const hidden = (await this.state.storage.get(`hiddenChats:${user.id}`)) || {};
+      if (hidden[chatId]) { delete hidden[chatId]; await this.state.storage.put(`hiddenChats:${user.id}`, hidden); }
+      const pinned = (await this.state.storage.get(`pinnedChats:${user.id}`)) || [];
+      if (pinned.includes(chatId)) await this.state.storage.put(`pinnedChats:${user.id}`, pinned.filter((id) => id !== chatId));
+      return json({ ok: true });
+    }
+
+    // A purely per-user display preference (sorted to the top client-side) —
+    // doesn't affect the other person's view of the same chat at all.
+    if (request.method === 'POST' && url.pathname === '/pin-chat') {
+      const { pinHash, chatId, pinned: shouldPin } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ ok: false, error: 'not_registered' }, 401);
+      const myChatIds = (await this.state.storage.get(`userChats:${user.id}`)) || [];
+      if (!myChatIds.includes(chatId)) return json({ ok: false, error: 'not_found' }, 404);
+      let pinned = (await this.state.storage.get(`pinnedChats:${user.id}`)) || [];
+      pinned = pinned.filter((id) => id !== chatId);
+      if (shouldPin) pinned.push(chatId);
+      await this.state.storage.put(`pinnedChats:${user.id}`, pinned);
+      return json({ ok: true, pinnedChatIds: pinned });
+    }
+
     if (request.method === 'GET' && url.pathname === '/whoami') {
       const pinHash = url.searchParams.get('pinHash');
       const user = await this.state.storage.get(`user:${pinHash}`);
       if (!user) return json({ ok: false });
       const admins = (await this.state.storage.get('admins')) || [];
-      return json({ ok: true, userId: user.id, displayName: user.displayName, isAdmin: admins.includes(user.id) });
+      return json({ ok: true, userId: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, isAdmin: admins.includes(user.id) });
     }
 
     // ---- Admin roster: lightweight stand-in for "HR-linked onboarding" ----
@@ -933,11 +986,38 @@ export class Registry {
 // socket they're connected to. Used purely to push "you have a message"
 // notifications so a message in a chat you're not currently looking at
 // still dings / badges / shows a browser notification.
+// A mobile connection dying without ever firing 'close' or 'error' is the
+// one case the old Set-of-sockets model couldn't handle: the client
+// eventually notices (its own 40s dead-socket check) and reconnects, but the
+// *old* dead socket was never removed server-side, so `sessions.size > 0`
+// kept reporting "online" for someone who'd been gone for minutes — exactly
+// what "sometimes it says online when they're not" looks like. Tracking a
+// last-ping timestamp per socket and sweeping anything stale before every
+// presence check (and periodically via alarm, so a socket that nobody ever
+// asks about doesn't linger forever either) closes that gap without
+// depending on the close/error events actually firing.
+const PRESENCE_STALE_MS = 50000; // > 2x the client's 20s ping interval, with margin
+
 export class UserChannel {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.sessions = new Set();
+    this.sessions = new Map(); // WebSocket -> last-ping-received timestamp
+  }
+
+  // Closes and forgets any socket that hasn't pinged in a while. Returns
+  // true if the set went from non-empty to empty as a result, so the caller
+  // can record `lastSeen` at the moment presence actually flips to offline.
+  sweepStaleSessions() {
+    const now = Date.now();
+    const hadSessions = this.sessions.size > 0;
+    for (const [ws, lastPing] of this.sessions) {
+      if (now - lastPing > PRESENCE_STALE_MS) {
+        try { ws.close(); } catch (e) {}
+        this.sessions.delete(ws);
+      }
+    }
+    return hadSessions && this.sessions.size === 0;
   }
 
   async fetch(request) {
@@ -947,7 +1027,7 @@ export class UserChannel {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
       server.accept();
-      this.sessions.add(server);
+      this.sessions.set(server, Date.now());
       const cleanup = async () => {
         this.sessions.delete(server);
         // Only the *last* tab/device closing counts as "going offline" —
@@ -961,11 +1041,14 @@ export class UserChannel {
       // Heartbeat only — this socket is otherwise server-to-client-only
       // (it exists purely to push "you have a message" pings). The client
       // uses the pong to detect a mobile connection that's silently died
-      // while still reporting itself as open.
+      // while still reporting itself as open; the timestamp recorded here
+      // is what lets the *server* detect the same thing independently (see
+      // sweepStaleSessions above), instead of trusting close/error to fire.
       server.addEventListener('message', (ev) => {
         let data;
         try { data = JSON.parse(ev.data); } catch (e) { return; }
         if (data.type === 'ping') {
+          this.sessions.set(server, Date.now());
           try { server.send(JSON.stringify({ type: 'pong' })); } catch (e) {}
         }
       });
@@ -974,7 +1057,7 @@ export class UserChannel {
 
     if (request.method === 'POST' && url.pathname === '/notify') {
       const payload = await request.text();
-      for (const ws of this.sessions) {
+      for (const ws of this.sessions.keys()) {
         try {
           ws.send(payload);
         } catch (e) {
@@ -1030,6 +1113,9 @@ export class UserChannel {
     }
 
     if (request.method === 'GET' && url.pathname === '/presence') {
+      if (this.sweepStaleSessions()) {
+        await this.state.storage.put('lastSeen', Date.now());
+      }
       const online = this.sessions.size > 0;
       const lastSeen = (await this.state.storage.get('lastSeen')) || 0;
       return json({ online, lastSeen });
@@ -1964,6 +2050,31 @@ export default {
         return registryStub.fetch('https://internal/hide-chat', {
           method: 'POST',
           body: JSON.stringify({ pinHash, chatId }),
+        });
+      }
+
+      // /api/chats/:id/delete — permanent (for this user only), unlike /hide.
+      const deleteMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/delete$/);
+      if (deleteMatch && request.method === 'POST') {
+        const [, chatId] = deleteMatch;
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        return registryStub.fetch('https://internal/delete-chat', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, chatId }),
+        });
+      }
+
+      // /api/chats/:id/pin — per-user pin-to-top preference.
+      const pinMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/pin$/);
+      if (pinMatch && request.method === 'POST') {
+        const [, chatId] = pinMatch;
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/pin-chat', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, chatId, pinned: !!body.pinned }),
         });
       }
 

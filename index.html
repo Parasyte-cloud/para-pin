@@ -137,10 +137,37 @@
   #lockReset:hover{ color:var(--text-mid); }
 
   /* ================= APP SHELL ================= */
-  #app{ position:fixed; inset:0; z-index:2; display:none; }
+  #app{ position:fixed; inset:0; z-index:2; display:none; flex-direction:column; }
   #app.show{ display:flex; }
 
-  .shell{ display:flex; width:100%; height:100%; padding:18px; gap:18px; }
+  .shell{ display:flex; width:100%; flex:1; min-height:0; padding:18px; gap:18px; }
+
+  /* ================= GLOBAL BOTTOM NAV ================= */
+  #bottomNav{
+    flex-shrink:0; display:flex; align-items:stretch; justify-content:space-around;
+    background:rgba(8,10,14,0.7); backdrop-filter:blur(16px); border-top:1px solid var(--glass-brd);
+    padding:8px 6px calc(8px + env(safe-area-inset-bottom, 0px));
+  }
+  .nav-tab{
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px;
+    flex:1; min-width:0; padding:6px 4px; border-radius:16px; cursor:pointer; position:relative;
+    color:var(--text-mid); transition:background .15s ease, color .15s ease;
+  }
+  .nav-tab:hover{ background:rgba(255,255,255,0.04); }
+  .nav-tab.active{ background:rgba(255,255,255,0.08); color:var(--text-hi); }
+  .nav-tab-icon{ font-size:19px; line-height:1; }
+  .nav-tab span{ font-size:9.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
+  #bottomNav .nav-tab-avatar{
+    width:22px; height:22px; border-radius:50%; font-size:9px; margin:0;
+  }
+  .nav-tab-badge{
+    position:absolute; top:2px; right:calc(50% - 24px); min-width:16px; height:16px; padding:0 4px;
+    border-radius:10px; background:linear-gradient(135deg, var(--ice), var(--fire)); color:#0a0d12;
+    font-size:9.5px; font-weight:700; display:flex; align-items:center; justify-content:center;
+  }
+  @media (min-width: 761px){
+    #bottomNav{ max-width:760px; margin:0 auto; border-radius:20px 20px 0 0; border-left:1px solid var(--glass-brd); border-right:1px solid var(--glass-brd); }
+  }
 
   .sidebar{ width:340px; min-width:280px; display:flex; flex-direction:column; border-radius:20px; overflow:hidden; }
   .sidebar-head{ padding:18px 18px 12px; display:flex; align-items:center; gap:10px; border-bottom:1px solid var(--glass-brd); }
@@ -150,7 +177,7 @@
   .sidebar-head .sub{ font-size:10px; color:var(--text-low); letter-spacing:.12em; }
   .head-actions{ margin-left:auto; display:flex; gap:6px; }
   .icon-btn{
-    width:32px; height:32px; border-radius:10px; display:flex; align-items:center; justify-content:center;
+    width:32px; height:32px; border-radius:50%; display:flex; align-items:center; justify-content:center;
     background:rgba(255,255,255,0.04); border:1px solid var(--glass-brd); cursor:pointer; color:var(--text-mid);
     transition:all .15s ease; font-size:16px;
   }
@@ -158,7 +185,7 @@
 
   .search{ margin:12px 16px; }
   .search input{
-    width:100%; padding:10px 14px; border-radius:12px; border:1px solid var(--glass-brd); background:rgba(255,255,255,0.03);
+    width:100%; padding:10px 16px; border-radius:999px; border:1px solid var(--glass-brd); background:rgba(255,255,255,0.03);
     color:var(--text-hi); font-size:13px; outline:none;
   }
   .search input:focus{ border-color:rgba(0,212,255,0.4); }
@@ -172,7 +199,7 @@
   .chat-item:hover{ background:rgba(255,255,255,0.04); }
   .chat-item.active{ background:rgba(255,255,255,0.07); border-color:var(--glass-brd-hi); }
   .avatar{
-    width:42px; height:42px; border-radius:14px; display:flex; align-items:center; justify-content:center;
+    width:42px; height:42px; border-radius:50%; display:flex; align-items:center; justify-content:center;
     font-weight:700; font-size:15px; color:#0a0d12; flex-shrink:0; position:relative;
   }
   .avatar.group::after{
@@ -190,15 +217,6 @@
     font-size:10.5px; font-weight:700; display:flex; align-items:center; justify-content:center;
     align-self:center;
   }
-  .chat-item-remove-btn{
-    flex-shrink:0; width:22px; height:22px; border-radius:50%; display:flex; align-items:center;
-    justify-content:center; color:var(--text-low); font-size:16px; line-height:1; opacity:0;
-    transition:opacity .15s ease, background .15s ease, color .15s ease;
-  }
-  .chat-item:hover .chat-item-remove-btn{ opacity:1; }
-  .chat-item-remove-btn:hover{ background:rgba(255,90,90,0.18); color:#ff6a6a; }
-  @media (hover:none){ .chat-item-remove-btn{ opacity:1; } }
-
   .sidebar-foot{
     padding:8px 14px 6px; border-top:1px solid var(--glass-brd); display:flex; flex-direction:column; gap:5px;
     background:rgba(5,6,8,0.32);
@@ -222,7 +240,7 @@
   /* ---------- conversation ---------- */
   .conv{ flex:1; display:flex; flex-direction:column; border-radius:20px; overflow:hidden; }
   .conv-head{ padding:16px 20px; display:flex; align-items:center; gap:12px; border-bottom:1px solid var(--glass-brd); }
-  .conv-head .avatar{ width:38px; height:38px; border-radius:12px; font-size:13px; }
+  .conv-head .avatar{ width:38px; height:38px; border-radius:50%; font-size:13px; }
   .conv-title{ font-size:15px; font-weight:700; }
   .conv-sub{ font-size:11px; color:var(--text-low); cursor:default; }
   .conv-sub.typing{ color:var(--ice); }
@@ -248,6 +266,8 @@
   .bubble .ts{ font-size:9.5px; color:var(--text-low); margin-top:4px; display:flex; align-items:center; justify-content:flex-end; gap:4px; }
   .bubble .tick{ font-size:10px; color:var(--text-low); letter-spacing:-1px; }
   .bubble .tick.read{ color:var(--ice); }
+  .bubble .tick.pending{ font-size:9px; opacity:.7; }
+  .bubble.pending{ opacity:.72; }
   .bubble .edited-label{ font-style:italic; opacity:.8; }
   .deleted-label{ color:var(--text-low); }
 
@@ -460,7 +480,7 @@
   .modal h3{ margin:0 0 4px; font-size:19px; }
   .modal .hint{ font-size:12px; color:var(--text-mid); margin-bottom:16px; }
   .modal input[type=text]{
-    width:100%; padding:11px 14px; border-radius:12px; border:1px solid var(--glass-brd); background:rgba(255,255,255,0.03);
+    width:100%; padding:11px 16px; border-radius:999px; border:1px solid var(--glass-brd); background:rgba(255,255,255,0.03);
     color:var(--text-hi); font-size:13.5px; outline:none; margin-bottom:12px;
   }
   .modal input[type=text]:focus{ border-color:rgba(0,212,255,0.4); }
@@ -468,7 +488,7 @@
   .pick-row{ display:flex; align-items:center; gap:10px; padding:8px; border-radius:10px; cursor:pointer; }
   .pick-row:hover{ background:rgba(255,255,255,0.04); }
   .pick-row input{ accent-color:var(--ice); width:16px; height:16px; }
-  .pick-row .avatar{ width:30px; height:30px; border-radius:9px; font-size:11px; }
+  .pick-row .avatar{ width:30px; height:30px; border-radius:50%; font-size:11px; }
   .pick-row .pname{ font-size:13px; }
   .modal-actions{ display:flex; justify-content:flex-end; gap:10px; }
 
@@ -492,10 +512,39 @@
   .admin-console-tab.active{ color:var(--text-hi); background:rgba(255,255,255,0.05); border-color:var(--glass-brd); }
   .admin-console-body{ flex:1; overflow-y:auto; padding:20px 18px 40px; max-width:640px; width:100%; margin:0 auto; }
   .admin-console-section h3{ margin-top:0; }
+  .settings-row{
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
+    padding:12px 16px; border-radius:999px; background:rgba(255,255,255,0.03);
+    border:1px solid var(--glass-brd); margin-bottom:8px; font-size:13px; cursor:default;
+  }
+  .settings-row-action{ cursor:pointer; transition:background .15s ease; }
+  .settings-row-action:hover{ background:rgba(255,255,255,0.07); }
+  .settings-row input[type="checkbox"]{ width:auto; flex-shrink:0; }
+
+  /* ---------- chat row context menu (long-press / right-click) ---------- */
+  .context-sheet{ padding:10px; }
+  .context-sheet-head{ display:flex; align-items:center; gap:12px; padding:10px 10px 16px; }
+  .context-sheet-head .avatar{ width:44px; height:44px; flex-shrink:0; }
+  .context-sheet-name{ font-size:15px; font-weight:700; }
+  .context-menu-item{
+    display:flex; align-items:center; gap:12px; padding:13px 14px; border-radius:999px;
+    cursor:pointer; font-size:14px; transition:background .15s ease; margin-bottom:2px;
+  }
+  .context-menu-item span:first-child{ width:22px; text-align:center; flex-shrink:0; }
+  .context-menu-item:hover{ background:rgba(255,255,255,0.07); }
+  .context-menu-item.danger{ color:#ff6a6a; }
+
   @media (max-width: 640px){
     .admin-console-tab{ flex:1; text-align:center; padding:8px 6px; }
+    /* Name, status badge, and up to two action buttons all fit fine on a
+       desktop-width row, but crammed onto a phone they either overflow or
+       squeeze unreadably small. Letting the row wrap — name+meta on their
+       own line, badge/buttons flowing onto a second line — keeps everything
+       full-size and tappable instead of shrinking to fit. */
+    .roster-entry{ flex-wrap:wrap; row-gap:8px; padding:10px 4px; }
+    .roster-entry-info{ flex:1 1 100%; }
   }
-  .btn{ padding:9px 18px; border-radius:12px; font-size:13px; font-weight:600; cursor:pointer; border:1px solid var(--glass-brd); background:rgba(255,255,255,0.04); color:var(--text-hi); }
+  .btn{ padding:9px 18px; border-radius:999px; font-size:13px; font-weight:600; cursor:pointer; border:1px solid var(--glass-brd); background:rgba(255,255,255,0.04); color:var(--text-hi); }
   .btn:hover{ background:rgba(255,255,255,0.09); }
   .btn.primary{ background:linear-gradient(135deg, var(--ice), var(--fire)); border:none; color:#0a0d12; }
   .btn.primary:hover{ filter:brightness(1.08); }
@@ -554,15 +603,14 @@
       <div class="search"><input type="text" id="searchInput" placeholder="Search chats..."></div>
       <div class="chat-list" id="chatList"></div>
       <div class="sidebar-foot">
-        <div class="sidebar-foot-main">
-          <div class="me-avatar" id="meAvatar" title="Edit your profile">ME</div>
-          <div id="myProfileInfo" title="Edit your profile">
-            <div class="me-name" id="meName">You</div>
-            <div class="me-pin mono" id="mePinLabel">PArA PIN active</div>
-          </div>
-          <div class="icon-btn" id="adminRosterBtn" title="Admin settings (roster, retention, devices)" style="display:none;">👥</div>
-          <div class="icon-btn" id="shareBtn" title="Share my PIN">▦</div>
-          <div class="icon-btn" id="lockBtn" title="Lock">🔒</div>
+        <!-- Identity bits still referenced by JS (name/PIN label, click-to-
+             edit) but no longer shown here — Profile is now its own tab in
+             the global bottom nav (see #bottomNav), whose icon IS this same
+             #meAvatar element, moved down there. Keeping a hidden mirror
+             avoids having to touch every call site that reads/writes these. -->
+        <div id="myProfileInfo" style="display:none;">
+          <div class="me-name" id="meName">You</div>
+          <div class="me-pin mono" id="mePinLabel">PArA PIN active</div>
         </div>
         <a class="brand-footer" href="https://www.parasyte.cloud" target="_blank" rel="noopener noreferrer">
           <span>Powered by</span>
@@ -629,12 +677,69 @@
           <div id="mentionMenu" class="mention-menu" style="display:none;"></div>
           <input type="file" id="attachInput" style="display:none;">
           <div class="icon-btn attach-btn" id="attachBtn" title="Attach file">📎</div>
+          <div class="icon-btn" id="shareLocationBtn" title="Share my location" style="display:none;">📍</div>
           <div class="icon-btn record-btn" id="recordBtn" title="Record voice note">🎤</div>
           <textarea id="msgInput" rows="1" placeholder="Message..."></textarea>
           <button class="send-btn" id="sendBtn">➤</button>
         </div>
       </div>
     </div>
+  </div>
+
+  <!-- ============ GLOBAL BOTTOM NAV ============ -->
+  <div id="bottomNav">
+    <div class="nav-tab" data-nav-tab="profile">
+      <div class="me-avatar nav-tab-avatar" id="meAvatar" title="Profile">ME</div>
+      <span>Profile</span>
+    </div>
+    <div class="nav-tab" data-nav-tab="calls">
+      <div class="nav-tab-icon">📞</div>
+      <span>Calls</span>
+      <div class="nav-tab-badge" id="navCallsBadge" style="display:none;"></div>
+    </div>
+    <div class="nav-tab" data-nav-tab="video">
+      <div class="nav-tab-icon">🎥</div>
+      <span>Video</span>
+    </div>
+    <div class="nav-tab active" data-nav-tab="chats">
+      <div class="nav-tab-icon">💬</div>
+      <span>Chats</span>
+      <div class="nav-tab-badge" id="navChatsBadge" style="display:none;"></div>
+    </div>
+    <div class="nav-tab" data-nav-tab="meetingroom">
+      <div class="nav-tab-icon">🗓️</div>
+      <span>Meeting Room</span>
+    </div>
+    <div class="nav-tab" data-nav-tab="settings">
+      <div class="nav-tab-icon">⚙️</div>
+      <span>Settings</span>
+      <div class="nav-tab-badge" id="navSettingsBadge" style="display:none;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ CHAT ROW CONTEXT MENU (long-press / right-click) ============ -->
+<div class="overlay" id="chatContextOverlay">
+  <div class="modal lg context-sheet">
+    <div class="context-sheet-head">
+      <div class="avatar" id="contextChatAvatar"></div>
+      <div class="context-sheet-name" id="contextChatName"></div>
+    </div>
+    <div class="context-menu-item" id="contextProfileBtn"><span>👤</span> Profile</div>
+    <div class="context-menu-item" id="contextPinBtn"><span>📌</span> Pin chat</div>
+    <div class="context-menu-item" id="contextArchiveBtn"><span>🗄️</span> Archive chat</div>
+    <div class="context-menu-item danger" id="contextDeleteBtn"><span>🗑️</span> Delete chat</div>
+    <div class="context-menu-item" onclick="closeModal('chatContextOverlay')"><span></span> Cancel</div>
+  </div>
+</div>
+
+<!-- ============ CONTACT INFO (read-only) ============ -->
+<div class="overlay" id="contactInfoOverlay">
+  <div class="modal lg" style="text-align:center;">
+    <div class="avatar" id="contactInfoAvatar" style="width:72px; height:72px; font-size:26px; margin:0 auto 14px; border-radius:22px;"></div>
+    <h3 id="contactInfoName"></h3>
+    <div class="hint" id="contactInfoMeta"></div>
+    <div class="modal-actions"><div class="btn" onclick="closeModal('contactInfoOverlay')">Close</div></div>
   </div>
 </div>
 
@@ -743,10 +848,6 @@
     </div>
     <input type="text" id="profileNameInput" placeholder="Your name" maxlength="40" style="margin-top:14px;">
     <input type="text" id="profileDeptInput" placeholder="Department / role (optional)" maxlength="60">
-    <label style="display:flex; align-items:center; gap:8px; text-align:left; margin-top:14px; font-size:13px; color:var(--text-mid); cursor:pointer;">
-      <input type="checkbox" id="profileAlwaysBannerInput" style="width:auto;">
-      Always show a notification banner, even while I'm using the app
-    </label>
     <div class="hint" id="profileDeviceStatus" style="margin-top:14px; margin-bottom:0; color:#7ee08a;"></div>
     <div class="btn" id="approveDeviceOpenBtn" style="margin-top:10px;">Approve a new device</div>
     <div class="hint" style="margin-top:8px; margin-bottom:0;">A newly-approved device gets its own encryption key and can read new messages right away. Any chat history from before it was added stays unreadable on that device only — same as most encrypted chat apps.</div>
@@ -864,6 +965,70 @@
   </div>
 </div>
 
+<!-- ============ SETTINGS (full screen) ============ -->
+<div class="overlay admin-console-overlay" id="settingsOverlay">
+  <div class="modal lg admin-console">
+    <div class="admin-console-head">
+      <div class="icon-btn" onclick="closeModal('settingsOverlay')" title="Close">←</div>
+      <h2>Settings</h2>
+      <div style="width:34px;"></div>
+    </div>
+    <div class="admin-console-body" style="max-width:640px;">
+      <section class="admin-console-section">
+        <h3>Notifications</h3>
+        <label class="settings-row">
+          <span>Always show a notification banner, even while I'm using the app</span>
+          <input type="checkbox" id="settingsAlwaysBannerInput">
+        </label>
+      </section>
+      <section class="admin-console-section">
+        <h3>Privacy</h3>
+        <label class="settings-row">
+          <span>Read receipts (blue ✓✓ ticks)</span>
+          <input type="checkbox" id="settingsReadReceiptsInput">
+        </label>
+        <div class="hint">Off means both directions — you'll stop sending read confirmations, and you'll stop seeing other people's.</div>
+        <label class="settings-row" style="margin-top:10px;">
+          <span>Location detection</span>
+          <input type="checkbox" id="settingsLocationInput">
+        </label>
+        <div class="hint">Lets you share your current location in a chat, linked to Google Maps. Off hides that option everywhere.</div>
+        <div class="settings-row" style="margin-top:10px;">
+          <span>Mesh (offline device-to-device messaging)</span>
+          <span class="roster-status pending">not available</span>
+        </div>
+        <div class="hint">This would need a native app with direct Bluetooth/WiFi-Direct radio access — a web app fundamentally can't relay messages phone-to-phone without internet, so this isn't something we can turn on here.</div>
+      </section>
+      <section class="admin-console-section">
+        <h3>Account</h3>
+        <div class="settings-row settings-row-action" id="settingsShareBtn"><span>Share my PIN</span><span>▦</span></div>
+        <div class="settings-row settings-row-action" id="settingsLockBtn"><span>Lock app now</span><span>🔒</span></div>
+        <div class="settings-row settings-row-action" id="settingsAdminBtn" style="display:none;"><span>Admin console</span><span>👥</span></div>
+      </section>
+      <section class="admin-console-section">
+        <h3>About</h3>
+        <div class="hint">PArA PIN — PIN-gated team chat.</div>
+        <a class="brand-footer" href="https://www.parasyte.cloud" target="_blank" rel="noopener noreferrer" style="justify-content:flex-start;"><span>Powered by parasyte.cloud</span></a>
+      </section>
+    </div>
+  </div>
+</div>
+
+<!-- ============ COMING SOON (Calls / Video / Meeting Room placeholders) ============ -->
+<div class="overlay admin-console-overlay" id="comingSoonOverlay">
+  <div class="modal lg admin-console">
+    <div class="admin-console-head">
+      <div class="icon-btn" onclick="closeModal('comingSoonOverlay')" title="Close">←</div>
+      <h2 id="comingSoonTitle">Coming soon</h2>
+      <div style="width:34px;"></div>
+    </div>
+    <div class="admin-console-body" style="max-width:640px; text-align:center; padding-top:60px;">
+      <div style="font-size:48px; margin-bottom:16px;" id="comingSoonIcon">🚧</div>
+      <div class="hint" id="comingSoonBody" style="font-size:14px;"></div>
+    </div>
+  </div>
+</div>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js"></script>
 <script>
@@ -928,6 +1093,9 @@
   // people outside the chat.
   function renderTextWithMentions(text, chat){
     let html = escapeHtml(text).replace(/\n/g,'<br>');
+    // Plain-text auto-link — mainly for the "Share location" Google Maps
+    // link, but works for any URL someone pastes into a message.
+    html = html.replace(/(https?:\/\/[^\s<]+)/g, (m) => `<a href="${m}" target="_blank" rel="noopener noreferrer">${m}</a>`);
     if (!chat || chat.type !== 'group') return html;
     const rawNames = (chat.memberIds || [])
       .map(id => id === myUserId ? (myDisplayName || 'You') : (userNameCache[id] || null))
@@ -988,6 +1156,7 @@
   let socketHeartbeatTimer = null;
   let socketLastActivityAt = 0;
   let sessionChats = [];
+  let pinnedChatIds = [];
   let activeChatId = null;
   // True right after the user taps Back to the mobile chat list.
   // `activeChatId` deliberately stays set (still needed for read state etc.)
@@ -1114,6 +1283,7 @@
     iAmAdmin = !!r.body.isAdmin;
     myTrustedDeviceCount = r.body.trustedDeviceCount || 1;
     sessionChats = r.body.chats || [];
+    pinnedChatIds = r.body.pinnedChatIds || [];
     activeChatId = null;
     messagesByChat = {};
     userNameCache = {};
@@ -1121,7 +1291,7 @@
 
     document.getElementById('meName').textContent = myDisplayName || 'You';
     renderMyAvatar();
-    document.getElementById('adminRosterBtn').style.display = iAmAdmin ? 'flex' : 'none';
+    document.getElementById('settingsAdminBtn').style.display = iAmAdmin ? 'flex' : 'none';
 
     // One-time admin recovery: opening the app with ?admin-key=... in the
     // URL tries to claim admin access with it (see /api/admin/bootstrap —
@@ -1135,8 +1305,8 @@
       apiFetch('/admin/bootstrap', { method: 'POST', body: JSON.stringify({ key: adminKey }) }).then((br)=>{
         if (br.ok){
           iAmAdmin = true;
-          document.getElementById('adminRosterBtn').style.display = 'flex';
-          alert("You're now an admin — tap the 👥 icon next to your profile to open the console.");
+          document.getElementById('settingsAdminBtn').style.display = 'flex';
+          alert("You're now an admin — open Settings → Admin console.");
         } else {
           alert("That admin key didn't work.");
         }
@@ -1328,7 +1498,7 @@
     btn.disabled = false;
     if (r.ok){
       iAmAdmin = true;
-      document.getElementById('adminRosterBtn').style.display = 'flex';
+      document.getElementById('settingsAdminBtn').style.display = 'flex';
       msgEl.style.color = '#7ee08a';
       msgEl.textContent = "You're now an admin — the 👥 icon should appear next to your profile.";
       msgEl.style.display = 'block';
@@ -1668,10 +1838,118 @@
     return otherId ? (userAvatarCache[otherId] || null) : null;
   }
 
+  // ---------- chat row context menu (long-press / right-click) ----------
+  // Replaces the old always-visible × "remove chat" button with a proper
+  // menu: Profile, Pin, Archive, Delete — reached the same way most chat
+  // apps do it (long-press on touch, right-click with a mouse), so the row
+  // itself stays clean until someone actually wants one of these actions.
+  let activeContextChat = null;
+
+  function openChatContextMenu(chat, name){
+    activeContextChat = chat;
+    const isPinned = pinnedChatIds.includes(chat.id);
+    renderAvatar(document.getElementById('contextChatAvatar'), name, chat.type === 'group', chatAvatarUrl(chat));
+    document.getElementById('contextChatName').textContent = name;
+    document.getElementById('contextProfileBtn').style.display = chat.type === 'dm' ? 'flex' : 'none';
+    document.getElementById('contextDeleteBtn').style.display = chat.type === 'dm' ? 'flex' : 'none';
+    document.getElementById('contextPinBtn').innerHTML = isPinned ? '<span>📌</span> Unpin chat' : '<span>📌</span> Pin chat';
+    openModal('chatContextOverlay');
+  }
+
+  function wireChatRowContextMenu(row, chat, name){
+    row.addEventListener('contextmenu', (e)=>{
+      e.preventDefault();
+      openChatContextMenu(chat, name);
+    });
+    let pressTimer = null;
+    let longPressed = false;
+    const start = ()=>{
+      longPressed = false;
+      pressTimer = setTimeout(()=>{
+        longPressed = true;
+        if (navigator.vibrate) navigator.vibrate(12);
+        openChatContextMenu(chat, name);
+      }, 480);
+    };
+    const cancel = ()=>{ if (pressTimer){ clearTimeout(pressTimer); pressTimer = null; } };
+    row.addEventListener('touchstart', start, { passive:true });
+    row.addEventListener('touchend', cancel);
+    row.addEventListener('touchmove', cancel);
+    row.addEventListener('touchcancel', cancel);
+    // A long-press that opened the menu shouldn't also fire the row's own
+    // click-to-open-chat handler once the finger lifts.
+    row.addEventListener('click', (e)=>{ if (longPressed){ e.stopImmediatePropagation(); longPressed = false; } }, true);
+  }
+
+  document.getElementById('contextProfileBtn').addEventListener('click', ()=>{
+    const chat = activeContextChat;
+    closeModal('chatContextOverlay');
+    if (!chat || chat.type !== 'dm') return;
+    const otherId = chat.memberIds.find(id => id !== myUserId);
+    const otherName = userNameCache[otherId] || 'PArA PIN user';
+    renderAvatar(document.getElementById('contactInfoAvatar'), otherName, false, userAvatarCache[otherId]);
+    document.getElementById('contactInfoName').textContent = otherName;
+    document.getElementById('contactInfoMeta').textContent = "That's everything visible about this contact from here — full profiles aren't shared between accounts.";
+    openModal('contactInfoOverlay');
+  });
+
+  document.getElementById('contextPinBtn').addEventListener('click', async ()=>{
+    const chat = activeContextChat;
+    closeModal('chatContextOverlay');
+    if (!chat) return;
+    const nowPinned = !pinnedChatIds.includes(chat.id);
+    const r = await apiFetch(`/chats/${chat.id}/pin`, { method:'POST', body: JSON.stringify({ pinned: nowPinned }) });
+    if (r.ok){
+      pinnedChatIds = r.body.pinnedChatIds || pinnedChatIds;
+      renderChatList();
+    }
+  });
+
+  document.getElementById('contextArchiveBtn').addEventListener('click', async ()=>{
+    const chat = activeContextChat;
+    const name = chatDisplayName(chat);
+    closeModal('chatContextOverlay');
+    if (!chat) return;
+    if (!confirm(`Archive "${name}"? It moves out of your list and comes back automatically if there's new activity.`)) return;
+    const r = await apiFetch(`/chats/${chat.id}/hide`, { method: 'POST' });
+    if (r.ok){
+      sessionChats = sessionChats.filter(c => c.id !== chat.id);
+      if (activeChatId === chat.id){
+        activeChatId = null;
+        if (activeSocket) { activeSocket.close(); activeSocket = null; }
+        renderConv();
+      }
+      renderChatList();
+    }
+  });
+
+  document.getElementById('contextDeleteBtn').addEventListener('click', async ()=>{
+    const chat = activeContextChat;
+    const name = chatDisplayName(chat);
+    closeModal('chatContextOverlay');
+    if (!chat || chat.type !== 'dm') return;
+    if (!confirm(`Delete "${name}" from your chat list? This is permanent on your side — it won't come back on its own, but starting a new chat with them again will pick up right where the old one left off.`)) return;
+    const r = await apiFetch(`/chats/${chat.id}/delete`, { method: 'POST' });
+    if (r.ok){
+      sessionChats = sessionChats.filter(c => c.id !== chat.id);
+      pinnedChatIds = pinnedChatIds.filter(id => id !== chat.id);
+      if (activeChatId === chat.id){
+        activeChatId = null;
+        if (activeSocket) { activeSocket.close(); activeSocket = null; }
+        renderConv();
+      }
+      renderChatList();
+    } else {
+      showSessionBanner("Couldn't delete that chat — try again.");
+    }
+  });
+
   function renderChatList(){
     const q = searchInput.value.trim().toLowerCase();
     chatListEl.innerHTML = '';
     const sorted = [...sessionChats].sort((a,b)=>{
+      const aPinned = pinnedChatIds.includes(a.id), bPinned = pinnedChatIds.includes(b.id);
+      if (aPinned !== bPinned) return aPinned ? -1 : 1;
       const la = lastMsg(a), lb = lastMsg(b);
       return (lb ? lb.ts : b.createdAt||0) - (la ? la.ts : a.createdAt||0);
     });
@@ -1695,10 +1973,12 @@
       const lm = lastMsg(chat);
       const unread = unreadCounts[chat.id] || 0;
       const pref = notifyPrefs[chat.id] || 'all';
+      const isPinned = pinnedChatIds.includes(chat.id);
       const muteBadge = pref === 'mute' ? '<span class="chat-item-muted-badge">🔕</span>' : pref === 'mentions' ? '<span class="chat-item-muted-badge">@</span>' : '';
+      const pinBadge = isPinned ? '<span class="chat-item-muted-badge" title="Pinned">📌</span>' : '';
       body.innerHTML = `
         <div class="ci-top">
-          <div class="ci-name">${escapeHtml(name)}${muteBadge}</div>
+          <div class="ci-name">${escapeHtml(name)}${pinBadge}${muteBadge}</div>
           <div class="ci-time">${lm ? fmtTime(lm.ts) : ''}</div>
         </div>
         <div class="ci-last">${lm ? escapeHtml(previewText(lm)) : 'Tap to open'}</div>
@@ -1711,30 +1991,10 @@
         badge.textContent = unread > 9 ? '9+' : String(unread);
         row.appendChild(badge);
       }
-      // Removing a chat only makes sense for DMs — groups already have
-      // "Leave group" inside the chat itself, which is the right action
-      // there since it also tells the other members you left.
-      if (chat.type === 'dm'){
-        const removeBtn = document.createElement('div');
-        removeBtn.className = 'chat-item-remove-btn';
-        removeBtn.title = 'Remove chat';
-        removeBtn.textContent = '×';
-        removeBtn.onclick = async (e)=>{
-          e.stopPropagation();
-          if (!confirm(`Remove "${name}" from your chat list? It'll come back automatically if they message you again.`)) return;
-          const r = await apiFetch(`/chats/${chat.id}/hide`, { method: 'POST' });
-          if (r.ok){
-            sessionChats = sessionChats.filter(c => c.id !== chat.id);
-            if (activeChatId === chat.id){
-              activeChatId = null;
-              if (activeSocket) { activeSocket.close(); activeSocket = null; }
-              renderConv();
-            }
-            renderChatList();
-          }
-        };
-        row.appendChild(removeBtn);
-      }
+      // Long-press (touch) or right-click (mouse) opens Profile/Pin/
+      // Archive/Delete — replaces the old always-visible × button, which
+      // only ever offered one of those four actions.
+      wireChatRowContextMenu(row, chat, name);
       row.onclick = async ()=>{
         activeChatId = chat.id;
         unreadCounts[chat.id] = 0;
@@ -1862,12 +2122,17 @@
         }
         if (m.text) inner += highlightSearchMatches(renderTextWithMentions(m.text, chat), m.id);
       }
-      inner += `<span class="ts">${m.edited && !m.deleted ? '<span class="edited-label">edited</span> ' : ''}${fmtTime(m.ts)}`;
-      if (isMe && !m.deleted && chat.type === 'dm'){
-        inner += `<span class="tick ${otherReadTs >= m.ts ? 'read' : ''}">${otherReadTs >= m.ts ? '✓✓' : '✓'}</span>`;
+      inner += `<span class="ts">${m.edited && !m.deleted ? '<span class="edited-label">edited</span> ' : ''}${m._pending ? '' : fmtTime(m.ts)}`;
+      if (isMe && !m.deleted){
+        if (m._pending){
+          inner += `<span class="tick pending">🕓</span>`;
+        } else if (chat.type === 'dm' && readReceiptsEnabled){
+          inner += `<span class="tick ${otherReadTs >= m.ts ? 'read' : ''}">${otherReadTs >= m.ts ? '✓✓' : '✓'}</span>`;
+        }
       }
       inner += `</span>`;
       bubble.innerHTML = inner;
+      if (m._pending) bubble.classList.add('pending');
 
       if (!m.deleted){
         const actions = document.createElement('div');
@@ -2116,10 +2381,59 @@
     stayOnMobileChatList = true;
   });
 
-  document.getElementById('lockBtn').addEventListener('click', lockApp);
+  // ---- Swipe between chats ----
+  // Same order the chat list itself uses (pinned first, then most-recent),
+  // so "next"/"previous" always matches what's visually above/below the
+  // currently-open chat in the list — swipe left moves down that list
+  // (the next chat), swipe right moves up it (the previous one).
+  function currentSortedChatIds(){
+    return [...sessionChats].sort((a,b)=>{
+      const aPinned = pinnedChatIds.includes(a.id), bPinned = pinnedChatIds.includes(b.id);
+      if (aPinned !== bPinned) return aPinned ? -1 : 1;
+      const la = lastMsg(a), lb = lastMsg(b);
+      return (lb ? lb.ts : b.createdAt||0) - (la ? la.ts : a.createdAt||0);
+    }).map(c => c.id);
+  }
+  function navigateAdjacentChat(dir){
+    const ids = currentSortedChatIds();
+    const idx = ids.indexOf(activeChatId);
+    if (idx === -1) return;
+    const nextIdx = idx + dir;
+    if (nextIdx < 0 || nextIdx >= ids.length) return;
+    activeChatId = ids[nextIdx];
+    unreadCounts[activeChatId] = 0;
+    updateTitleBadge();
+    renderChatList();
+    openChat(activeChatId);
+  }
+  (function(){
+    const convEl = document.getElementById('convPanel');
+    let sx = 0, sy = 0, tracking = false;
+    convEl.addEventListener('touchstart', (e)=>{
+      if (e.touches.length !== 1) return;
+      sx = e.touches[0].clientX; sy = e.touches[0].clientY; tracking = true;
+    }, { passive:true });
+    convEl.addEventListener('touchend', (e)=>{
+      if (!tracking) return;
+      tracking = false;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - sx, dy = t.clientY - sy;
+      // Require a clearly-horizontal swipe of real distance — otherwise this
+      // would hijack normal vertical scrolling of the message list.
+      if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.8){
+        navigateAdjacentChat(dx < 0 ? 1 : -1);
+      }
+    }, { passive:true });
+  })();
 
-  document.getElementById('shareBtn').addEventListener('click', async ()=>{
+  document.getElementById('settingsLockBtn').addEventListener('click', ()=>{
+    closeModal('settingsOverlay');
+    lockApp();
+  });
+
+  document.getElementById('settingsShareBtn').addEventListener('click', async ()=>{
     if (!myRawPin) return;
+    closeModal('settingsOverlay');
     document.getElementById('sharePinDigits').textContent = myRawPin.split('').join(' \u2022 ');
     const qrEl = document.getElementById('qrCanvas');
     qrEl.innerHTML = '';
@@ -2152,18 +2466,23 @@
   const profileNameInput = document.getElementById('profileNameInput');
   const profileDeptInput = document.getElementById('profileDeptInput');
   const profileSaveBtn = document.getElementById('profileSaveBtn');
-  const profileAlwaysBannerInput = document.getElementById('profileAlwaysBannerInput');
   let pendingProfilePhoto = null; // { blob, url } staged until Save; url is an object URL for local preview only
 
   // Purely a local display preference — applies immediately, no server round
   // trip needed. By default a notification banner only shows while the app
   // is backgrounded/hidden (the ding alone covers the foreground case); this
-  // lets someone opt into always getting a banner too.
+  // lets someone opt into always getting a banner too. The checkbox for this
+  // lives in Settings now (settingsAlwaysBannerInput, wired further down).
   let alwaysShowBanner = localStorage.getItem('parapin_always_banner') === '1';
-  profileAlwaysBannerInput.addEventListener('change', ()=>{
-    alwaysShowBanner = profileAlwaysBannerInput.checked;
-    localStorage.setItem('parapin_always_banner', alwaysShowBanner ? '1' : '0');
-  });
+
+  // Read receipts — reciprocal, like WhatsApp: off means we stop sending our
+  // own read markers (see markChatRead) AND stop rendering the "read" tick
+  // state for messages we sent (see renderConv). Defaults on.
+  let readReceiptsEnabled = localStorage.getItem('parapin_read_receipts') !== '0';
+  // Location sharing — purely a local permission gate on top of the
+  // browser's own geolocation permission; off means the "Share location"
+  // action in a chat is hidden entirely rather than prompting every time.
+  let locationSharingEnabled = localStorage.getItem('parapin_location_sharing') === '1';
 
   function renderProfilePhotoPreview(url){
     if (url){
@@ -2181,7 +2500,6 @@
     if (pendingProfilePhoto && pendingProfilePhoto.url) URL.revokeObjectURL(pendingProfilePhoto.url);
     pendingProfilePhoto = null;
     renderProfilePhotoPreview(myAvatarUrl);
-    profileAlwaysBannerInput.checked = alwaysShowBanner;
     const n = myTrustedDeviceCount;
     document.getElementById('profileDeviceStatus').textContent = `✓ This device is trusted. ${n} device${n === 1 ? '' : 's'} trusted on this account.`;
     openModal('profileOverlay');
@@ -2338,12 +2656,16 @@
     });
   }
 
-  document.querySelectorAll('.admin-console-tab').forEach(tab=>{
+  // Scoped to #rosterOverlay specifically — #settingsOverlay reuses the same
+  // `.admin-console-tab` class purely for visual consistency but has no
+  // sub-tabs of its own here, so an unscoped selector would still be safe,
+  // but scoping stays cheap insurance against future additions.
+  document.querySelectorAll('#rosterOverlay .admin-console-tab').forEach(tab=>{
     tab.addEventListener('click', ()=>{
-      document.querySelectorAll('.admin-console-tab').forEach(t=>t.classList.remove('active'));
+      document.querySelectorAll('#rosterOverlay .admin-console-tab').forEach(t=>t.classList.remove('active'));
       tab.classList.add('active');
       const target = tab.dataset.tab;
-      document.querySelectorAll('.admin-console-section').forEach(sec=>{
+      document.querySelectorAll('#rosterOverlay .admin-console-section').forEach(sec=>{
         sec.style.display = sec.dataset.section === target ? 'block' : 'none';
       });
     });
@@ -2363,7 +2685,8 @@
     }
   });
 
-  document.getElementById('adminRosterBtn').addEventListener('click', async ()=>{
+  document.getElementById('settingsAdminBtn').addEventListener('click', async ()=>{
+    closeModal('settingsOverlay');
     rosterNameInput.value = '';
     rosterDeptInput.value = '';
     rosterEmailInput.value = '';
@@ -2377,6 +2700,94 @@
       retentionSelect.value = String(r.body.retentionDays || 0);
       retentionSelect.dataset.saved = retentionSelect.value;
     }
+  });
+
+  // ================= GLOBAL BOTTOM NAV =================
+  // "Chats" is the base view (the existing two-pane sidebar+conversation
+  // UI) and has no overlay of its own — switching to it just means closing
+  // whatever else was open. The other tabs each own one overlay; Calls,
+  // Video, and Meeting Room share a single "coming soon" overlay with
+  // different copy, since none of the three exist yet (see the scoping
+  // plan) but the nav real estate should already reflect where they'll live.
+  const COMING_SOON_COPY = {
+    calls: { icon: '📞', title: 'Calls', body: "Voice calling is being scoped next — it'll use Cloudflare's WebRTC/TURN infrastructure over the same per-chat connection PArA PIN already has, so it can reuse your existing contacts and E2EE keys." },
+    video: { icon: '🎥', title: 'Video', body: "Video calling rides on the same plan as Calls above — once 1:1 calling is in, video is the same signaling path with a camera track added." },
+    meetingroom: { icon: '🗓️', title: 'Meeting Room', body: "Group meeting rooms (Zoom/Meet-style, more than 2 people) need a proper SFU rather than peer-to-peer — planned on Cloudflare Realtime SFU, as its own phase after 1:1 calls are working." },
+  };
+
+  function closeAllNavOverlays(){
+    ['rosterOverlay','settingsOverlay','comingSoonOverlay','profileOverlay'].forEach(closeModal);
+  }
+
+  function setActiveNavTab(name){
+    document.querySelectorAll('#bottomNav .nav-tab').forEach(t=>t.classList.toggle('active', t.dataset.navTab === name));
+  }
+
+  document.querySelectorAll('#bottomNav .nav-tab').forEach(tab=>{
+    tab.addEventListener('click', ()=>{
+      const name = tab.dataset.navTab;
+      setActiveNavTab(name);
+      closeAllNavOverlays();
+      if (name === 'chats'){
+        // Base view — nothing else to do, everything else already closed above.
+        return;
+      }
+      if (name === 'profile'){
+        openProfileModal();
+        return;
+      }
+      if (name === 'settings'){
+        openSettingsOverlay();
+        return;
+      }
+      const copy = COMING_SOON_COPY[name];
+      if (copy){
+        document.getElementById('comingSoonTitle').textContent = copy.title;
+        document.getElementById('comingSoonIcon').textContent = copy.icon;
+        document.getElementById('comingSoonBody').textContent = copy.body;
+        openModal('comingSoonOverlay');
+      }
+    });
+  });
+
+  // Closing any of these overlays via their own back/× button should return
+  // the nav to "Chats" rather than leaving a non-Chats tab highlighted with
+  // nothing open behind it.
+  ['rosterOverlay','settingsOverlay','comingSoonOverlay'].forEach(id=>{
+    const el = document.getElementById(id);
+    el.addEventListener('click', (e)=>{
+      if (e.target === el) setActiveNavTab('chats'); // backdrop click
+    });
+  });
+  document.querySelectorAll(`#rosterOverlay .admin-console-head .icon-btn, #settingsOverlay .admin-console-head .icon-btn, #comingSoonOverlay .admin-console-head .icon-btn`).forEach(btn=>{
+    btn.addEventListener('click', ()=> setActiveNavTab('chats'));
+  });
+
+  const settingsAlwaysBannerInput = document.getElementById('settingsAlwaysBannerInput');
+  const settingsReadReceiptsInput = document.getElementById('settingsReadReceiptsInput');
+  const settingsLocationInput = document.getElementById('settingsLocationInput');
+
+  function openSettingsOverlay(){
+    settingsAlwaysBannerInput.checked = alwaysShowBanner;
+    settingsReadReceiptsInput.checked = readReceiptsEnabled;
+    settingsLocationInput.checked = locationSharingEnabled;
+    document.getElementById('settingsAdminBtn').style.display = iAmAdmin ? 'flex' : 'none';
+    openModal('settingsOverlay');
+  }
+
+  settingsAlwaysBannerInput.addEventListener('change', ()=>{
+    alwaysShowBanner = settingsAlwaysBannerInput.checked;
+    localStorage.setItem('parapin_always_banner', alwaysShowBanner ? '1' : '0');
+  });
+  settingsReadReceiptsInput.addEventListener('change', ()=>{
+    readReceiptsEnabled = settingsReadReceiptsInput.checked;
+    localStorage.setItem('parapin_read_receipts', readReceiptsEnabled ? '1' : '0');
+    renderConv();
+  });
+  settingsLocationInput.addEventListener('change', ()=>{
+    locationSharingEnabled = settingsLocationInput.checked;
+    localStorage.setItem('parapin_location_sharing', locationSharingEnabled ? '1' : '0');
+    updateLocationBtnVisibility();
   });
 
   document.getElementById('rosterAddBtn').addEventListener('click', async function(){
@@ -2557,6 +2968,12 @@
   async function markChatRead(chatId){
     const msgs = messagesByChat[chatId];
     if (!msgs || !msgs.length || !myUserId) return;
+    // Read receipts are reciprocal (same trade-off WhatsApp makes): turning
+    // them off in Settings means we stop telling other people when we've
+    // read their messages — so it'd be unfair to still expect to see their
+    // blue ticks in return (that half is handled at render time, in
+    // renderConv, by simply not rendering the "read" tick state at all).
+    if (!readReceiptsEnabled) return;
     const upToTs = msgs[msgs.length - 1].ts;
     readState[chatId] = readState[chatId] || {};
     readState[chatId][myUserId] = Math.max(readState[chatId][myUserId] || 0, upToTs);
@@ -3437,6 +3854,27 @@
     renderChatList();
   }
 
+  async function resyncChatsAndUnread(){
+    if (!myPinHash) return;
+    const r = await apiFetch('/session', { method: 'POST', body: JSON.stringify({ displayName: myDisplayName, deviceId: myDeviceId }) });
+    if (!r.ok) return;
+    sessionChats = r.body.chats || sessionChats;
+    pinnedChatIds = r.body.pinnedChatIds || pinnedChatIds;
+    const summaries = r.body.summaries || {};
+    for (const chatId of Object.keys(summaries)){
+      const s = summaries[chatId];
+      // Leave the currently-open, currently-visible chat alone — its unread
+      // count is already being kept accurate locally in real time.
+      if (chatId === activeChatId && document.visibilityState === 'visible') continue;
+      if (s.unreadCount != null) unreadCounts[chatId] = s.unreadCount;
+      if (s.lastMessage && (!messagesByChat[chatId] || !messagesByChat[chatId].length)){
+        messagesByChat[chatId] = [s.lastMessage];
+      }
+    }
+    updateTitleBadge();
+    renderChatList();
+  }
+
   function connectNotifySocket(){
     if (notifyReconnectTimer){ clearTimeout(notifyReconnectTimer); notifyReconnectTimer = null; }
     if (notifyHeartbeatTimer){ clearInterval(notifyHeartbeatTimer); notifyHeartbeatTimer = null; }
@@ -3448,7 +3886,18 @@
       ws = new WebSocket(`${proto}://${location.host}/api/notify/ws?pinHash=${encodeURIComponent(myPinHash)}`);
     } catch(e) { scheduleNotifyReconnect(); return; }
     notifySocketLastActivityAt = Date.now();
-    ws.addEventListener('open', ()=>{ notifyReconnectAttempts = 0; notifySocketLastActivityAt = Date.now(); });
+    ws.addEventListener('open', ()=>{
+      // A real drop-and-reconnect (not the very first connect) means some
+      // window of time just passed where a message could have arrived over
+      // /notify with nothing here to receive it — the broadcast socket was
+      // dead, so no ding, no badge bump, nothing. Pulling a fresh summary
+      // right away is what keeps that from surfacing as "sometimes it just
+      // doesn't tell me" — the unread count and preview catch up immediately
+      // instead of waiting for the next full reload.
+      if (notifyReconnectAttempts > 0) resyncChatsAndUnread();
+      notifyReconnectAttempts = 0;
+      notifySocketLastActivityAt = Date.now();
+    });
     ws.addEventListener('message', (ev)=>{
       notifySocketLastActivityAt = Date.now();
       let data;
@@ -3608,6 +4057,37 @@
   const attachPreviewIcon = document.getElementById('attachPreviewIcon');
   const attachPreviewName = document.getElementById('attachPreviewName');
   const attachCancelBtn = document.getElementById('attachCancelBtn');
+
+  // ---- Location sharing ----
+  // Gated by the Settings toggle (locationSharingEnabled) on top of the
+  // browser's own geolocation permission — off just hides the button
+  // everywhere rather than prompting. Sends as a normal E2EE text message
+  // with a Google Maps link (auto-linked by renderTextWithMentions), so it
+  // rides the exact same send/decrypt/history path as everything else.
+  const shareLocationBtn = document.getElementById('shareLocationBtn');
+  function updateLocationBtnVisibility(){
+    shareLocationBtn.style.display = (locationSharingEnabled && navigator.geolocation) ? 'flex' : 'none';
+  }
+  updateLocationBtnVisibility();
+  shareLocationBtn.addEventListener('click', ()=>{
+    if (!activeChatId || !navigator.geolocation) return;
+    if (!confirm('Share your current location in this chat? A Google Maps link will be sent as a message.')) return;
+    shareLocationBtn.style.pointerEvents = 'none';
+    navigator.geolocation.getCurrentPosition(
+      (pos)=>{
+        shareLocationBtn.style.pointerEvents = '';
+        const { latitude, longitude } = pos.coords;
+        const url = `https://www.google.com/maps?q=${latitude.toFixed(6)},${longitude.toFixed(6)}`;
+        msgInput.value = `📍 My location: ${url}`;
+        sendMessage();
+      },
+      ()=>{
+        shareLocationBtn.style.pointerEvents = '';
+        showSessionBanner("Couldn't get your location — check that this site is allowed to use it.");
+      },
+      { enableHighAccuracy:true, timeout:10000 }
+    );
+  });
 
   // Content-Type-capable-of-executing-as-a-page types are rejected client-side too,
   // so the user gets an instant, friendly message instead of a server round-trip.
@@ -3898,10 +4378,46 @@
     msgInput.value = '';
     msgInput.style.height = 'auto';
     closeMentionMenu();
+    const attachmentPreviewUrl = attachment ? attachment.url : null;
     clearAttachment();
     const replyToPayload = replyingTo;
     cancelReply();
     sendBtn.disabled = true;
+
+    // Optimistic bubble: the encrypt+upload+POST round trip below can easily
+    // take a second or more on a slow connection, and the compose box has
+    // already cleared by this point — without something appearing right
+    // away that reads as the message vanishing into nothing until the
+    // network catches up ("messages are slow to drop"). This renders
+    // immediately with a pending clock glyph, then gets swapped for the
+    // real message (or removed) once the request actually resolves.
+    const tempId = 'pending-' + crypto.randomUUID();
+    const pendingMsg = {
+      id: tempId,
+      fromUserId: myUserId,
+      fromName: myDisplayName,
+      ts: Date.now(),
+      text: text || '',
+      _pending: true,
+      _e2eeDone: true,
+      replyTo: replyToPayload ? { id: replyToPayload.id, fromName: replyToPayload.fromName, text: replyToPayload.text } : null,
+    };
+    if (attachment){
+      pendingMsg.attachment = {
+        kind: attachment.kind,
+        width: attachment.width,
+        height: attachment.height,
+        duration: attachment.duration || null,
+        size: attachment.blob.size,
+        mime: attachment.blob.type || '',
+        name: attachment.name || 'file',
+        fileIv: 'pending', // any truthy value — only used to pick the "encrypted attachment" render branch
+        _decryptedUrl: attachmentPreviewUrl,
+      };
+    }
+    (messagesByChat[chatId] || (messagesByChat[chatId] = [])).push(pendingMsg);
+    if (activeChatId === chatId) renderConv();
+    renderChatList();
 
     let attachmentPayload = null;
     if (attachment){
@@ -3930,8 +4446,14 @@
           fileIv: encBytes.iv,
         };
       } else {
+        removePendingMessage(chatId, tempId);
         sendBtn.disabled = false;
         showSessionBanner(`Couldn't upload the ${attachment.kind === 'image' ? 'image' : 'file'} — try again.`);
+        if (activeChatId === chatId){
+          renderConv();
+          if (!msgInput.value && text) msgInput.value = text;
+        }
+        renderChatList();
         return;
       }
     }
@@ -3961,10 +4483,12 @@
           r.body.message.attachment._decryptedUrl = URL.createObjectURL(attachment.blob);
         }
       }
+      removePendingMessage(chatId, tempId);
       await mergeMessages(chatId, [r.body.message]);
       if (activeChatId === chatId) renderConv();
       renderChatList();
     } else {
+      removePendingMessage(chatId, tempId);
       showSessionBanner("Message didn't send — check your connection and try again.");
       // Don't lose what they typed — put it back if they're still on the same chat (text only; a
       // failed image upload above already bailed out before we got here).
@@ -3978,7 +4502,16 @@
         replyPreviewText.textContent = replyingTo.text;
         replyPreviewBar.style.display = 'flex';
       }
+      if (activeChatId === chatId) renderConv();
+      renderChatList();
     }
+  }
+
+  function removePendingMessage(chatId, tempId){
+    const arr = messagesByChat[chatId];
+    if (!arr) return;
+    const idx = arr.findIndex(m => m.id === tempId);
+    if (idx !== -1) arr.splice(idx, 1);
   }
   sendBtn.addEventListener('click', sendMessage);
   msgInput.addEventListener('keydown', (e)=>{
