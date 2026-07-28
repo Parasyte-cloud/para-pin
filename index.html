@@ -34,13 +34,38 @@
     --fire:#ff6a00;
     --bg-0:#050608;
     --bg-1:#0a0d12;
-    --glass:rgba(255,255,255,0.055);
-    --glass-brd:rgba(255,255,255,0.09);
-    --glass-brd-hi:rgba(255,255,255,0.18);
+    --glass:rgba(var(--tint-rgb),0.055);
+    --glass-brd:rgba(var(--tint-rgb),0.09);
+    --glass-brd-hi:rgba(var(--tint-rgb),0.18);
     --text-hi:#f2f5f7;
     --text-mid:#9aa5ad;
     --text-low:#5f6a72;
+    /* Every translucent "surface tint" in the app (row hover/active states,
+       button backgrounds, message bubbles, etc.) is written as
+       rgba(var(--tint-rgb), X) rather than a literal white — dark mode tints
+       toward white, light mode below tints toward near-black, and every one
+       of those ~50 spots flips automatically with a single variable instead
+       of needing its own light-mode override. */
+    --tint-rgb:255,255,255;
   }
+  [data-theme="light"]{
+    --bg-0:#eef1f4;
+    --bg-1:#ffffff;
+    --glass:rgba(10,13,18,0.04);
+    --glass-brd:rgba(10,13,18,0.10);
+    --glass-brd-hi:rgba(10,13,18,0.18);
+    --text-hi:#12161b;
+    --text-mid:#5b6670;
+    --text-low:#8b949c;
+    --tint-rgb:10,13,18;
+  }
+  [data-theme="light"] #bgfx{
+    background:
+      radial-gradient(circle at 12% 8%, #dcecf5 0%, transparent 45%),
+      radial-gradient(circle at 90% 92%, #fbe6d8 0%, transparent 45%),
+      var(--bg-0);
+  }
+  [data-theme="light"] #bgfx::before, [data-theme="light"] #bgfx::after{ opacity:.14; }
   *{box-sizing:border-box;}
   html,body{height:100%;}
   body{
@@ -82,22 +107,22 @@
     border:1px solid var(--glass-brd);
     backdrop-filter:blur(22px) saturate(140%);
     -webkit-backdrop-filter:blur(22px) saturate(140%);
-    box-shadow:0 1px 0 rgba(255,255,255,0.06) inset, 0 8px 32px rgba(0,0,0,0.35);
+    box-shadow:0 1px 0 rgba(var(--tint-rgb),0.06) inset, 0 8px 32px rgba(0,0,0,0.35);
     position:relative;
   }
   .lg::before{
     content:''; position:absolute; inset:0; border-radius:inherit; pointer-events:none;
-    background:linear-gradient(135deg, rgba(255,255,255,0.10) 0%, rgba(255,255,255,0) 30%);
+    background:linear-gradient(135deg, rgba(var(--tint-rgb),0.10) 0%, rgba(var(--tint-rgb),0) 30%);
   }
   .lg-hover{ transition:border-color .25s ease, box-shadow .25s ease, transform .15s ease; }
   .lg-hover:hover{
     border-color:var(--glass-brd-hi);
-    box-shadow:0 1px 0 rgba(255,255,255,0.08) inset, 0 0 0 1px rgba(0,212,255,0.12), 0 0 24px rgba(0,212,255,0.10), 0 12px 36px rgba(0,0,0,0.4);
+    box-shadow:0 1px 0 rgba(var(--tint-rgb),0.08) inset, 0 0 0 1px rgba(0,212,255,0.12), 0 0 24px rgba(0,212,255,0.10), 0 12px 36px rgba(0,0,0,0.4);
   }
 
   .app-icon{
     width:1em; height:1em; border-radius:22%; display:inline-block; vertical-align:middle;
-    box-shadow:0 0 0 1px rgba(255,255,255,0.15), 0 4px 14px rgba(0,0,0,0.5);
+    box-shadow:0 0 0 1px rgba(var(--tint-rgb),0.15), 0 4px 14px rgba(0,0,0,0.5);
   }
 
   /* ================= LOCK SCREEN ================= */
@@ -122,13 +147,13 @@
   .key{
     width:64px; height:64px; border-radius:50%; display:flex; align-items:center; justify-content:center;
     font-size:22px; font-weight:600; color:var(--text-hi); cursor:pointer; user-select:none;
-    background:rgba(255,255,255,0.04); border:1px solid var(--glass-brd);
+    background:rgba(var(--tint-rgb),0.04); border:1px solid var(--glass-brd);
     transition:background .12s ease, transform .08s ease;
   }
-  .key:hover{ background:rgba(255,255,255,0.09); }
+  .key:hover{ background:rgba(var(--tint-rgb),0.09); }
   .key:active{ transform:scale(0.92); }
   .key.ghost{ background:transparent; border:none; box-shadow:none; cursor:pointer; }
-  .key.ghost:hover{ background:rgba(255,255,255,0.04); }
+  .key.ghost:hover{ background:rgba(var(--tint-rgb),0.04); }
 
   #lockMsg{ font-size:12px; color:var(--text-mid); min-height:16px; letter-spacing:.03em; }
   #lockMsg.err{ color:#ff6a6a; }
@@ -153,8 +178,8 @@
     flex:1; min-width:0; padding:6px 4px; border-radius:16px; cursor:pointer; position:relative;
     color:var(--text-mid); transition:background .15s ease, color .15s ease;
   }
-  .nav-tab:hover{ background:rgba(255,255,255,0.04); }
-  .nav-tab.active{ background:rgba(255,255,255,0.08); color:var(--text-hi); }
+  .nav-tab:hover{ background:rgba(var(--tint-rgb),0.04); }
+  .nav-tab.active{ background:rgba(var(--tint-rgb),0.08); color:var(--text-hi); }
   .nav-tab-icon{ font-size:19px; line-height:1; }
   .nav-tab span{ font-size:9.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
   #bottomNav .nav-tab-avatar{
@@ -177,7 +202,7 @@
   .active-call-bar-status{ font-size:11.5px; color:var(--text-mid); }
   .active-call-end-btn{ background:#ff4d4d; color:#fff; transform:rotate(135deg); }
   .active-call-end-btn:hover{ background:#ff2d2d; }
-  #activeCallMuteBtn.active{ background:rgba(255,255,255,0.18); color:var(--text-hi); }
+  #activeCallMuteBtn.active{ background:rgba(var(--tint-rgb),0.18); color:var(--text-hi); }
 
   /* ================= INCOMING CALL ================= */
   #incomingCallOverlay{ z-index:60; background:rgba(4,5,8,0.92); backdrop-filter:blur(6px); }
@@ -208,14 +233,14 @@
   .head-actions{ margin-left:auto; display:flex; gap:6px; }
   .icon-btn{
     width:32px; height:32px; border-radius:50%; display:flex; align-items:center; justify-content:center;
-    background:rgba(255,255,255,0.04); border:1px solid var(--glass-brd); cursor:pointer; color:var(--text-mid);
+    background:rgba(var(--tint-rgb),0.04); border:1px solid var(--glass-brd); cursor:pointer; color:var(--text-mid);
     transition:all .15s ease; font-size:16px;
   }
-  .icon-btn:hover{ color:var(--text-hi); border-color:var(--glass-brd-hi); background:rgba(255,255,255,0.08); }
+  .icon-btn:hover{ color:var(--text-hi); border-color:var(--glass-brd-hi); background:rgba(var(--tint-rgb),0.08); }
 
   .search{ margin:12px 16px; }
   .search input{
-    width:100%; padding:10px 16px; border-radius:999px; border:1px solid var(--glass-brd); background:rgba(255,255,255,0.03);
+    width:100%; padding:10px 16px; border-radius:999px; border:1px solid var(--glass-brd); background:rgba(var(--tint-rgb),0.03);
     color:var(--text-hi); font-size:13px; outline:none;
   }
   .search input:focus{ border-color:rgba(0,212,255,0.4); }
@@ -224,11 +249,11 @@
   .chat-list{ flex:1; overflow-y:auto; padding:4px 8px 12px; }
   .chat-item{
     display:flex; align-items:center; gap:12px; padding:12px 14px; border-radius:22px; cursor:pointer;
-    margin-bottom:8px; border:1px solid transparent; background:rgba(255,255,255,0.035);
+    margin-bottom:8px; border:1px solid transparent; background:rgba(var(--tint-rgb),0.035);
     transition:background .15s ease, border-color .15s ease;
   }
-  .chat-item:hover{ background:rgba(255,255,255,0.07); }
-  .chat-item.active{ background:rgba(255,255,255,0.1); border-color:var(--glass-brd-hi); }
+  .chat-item:hover{ background:rgba(var(--tint-rgb),0.07); }
+  .chat-item.active{ background:rgba(var(--tint-rgb),0.1); border-color:var(--glass-brd-hi); }
   .avatar{
     width:42px; height:42px; border-radius:50%; display:flex; align-items:center; justify-content:center;
     font-weight:700; font-size:15px; color:#0a0d12; flex-shrink:0; position:relative;
@@ -257,8 +282,8 @@
   #myProfileInfo{ cursor:pointer; }
   .me-name{ font-size:11px; font-weight:600; color:var(--text-hi); }
   .me-pin{ font-size:8.5px; color:var(--text-mid); }
-  .sidebar-foot-main .icon-btn{ width:26px; height:26px; font-size:12.5px; border-radius:8px; background:rgba(255,255,255,0.08); border-color:var(--glass-brd-hi); }
-  .sidebar-foot-main .icon-btn:hover{ background:rgba(255,255,255,0.14); }
+  .sidebar-foot-main .icon-btn{ width:26px; height:26px; font-size:12.5px; border-radius:8px; background:rgba(var(--tint-rgb),0.08); border-color:var(--glass-brd-hi); }
+  .sidebar-foot-main .icon-btn:hover{ background:rgba(var(--tint-rgb),0.14); }
   #lockBtn{ margin-left:auto; }
 
   .brand-footer{
@@ -278,7 +303,7 @@
   .conv-sub.typing{ color:var(--ice); }
 
   .messages{ flex:1; overflow-y:auto; overflow-x:hidden; padding:22px 26px; display:flex; flex-direction:column; gap:10px; }
-  .day-sep{ align-self:center; font-size:10.5px; color:var(--text-low); background:rgba(255,255,255,0.04); padding:3px 12px; border-radius:20px; margin:10px 0; letter-spacing:.05em; }
+  .day-sep{ align-self:center; font-size:10.5px; color:var(--text-low); background:rgba(var(--tint-rgb),0.04); padding:3px 12px; border-radius:20px; margin:10px 0; letter-spacing:.05em; }
   /* min-width:0 matters here: without it, a flex item's default min-width is
      "auto" (its content's un-wrapped width), which wins over max-width and
      lets a long message render as one un-wrapped line that bleeds off the
@@ -291,7 +316,7 @@
     overflow-wrap:anywhere; word-wrap:break-word; min-width:0;
     border:1px solid var(--glass-brd);
   }
-  .bubble-row:not(.me) .bubble{ background:rgba(255,255,255,0.05); border-top-left-radius:4px; }
+  .bubble-row:not(.me) .bubble{ background:rgba(var(--tint-rgb),0.05); border-top-left-radius:4px; }
   .bubble-row.me .bubble{ background:linear-gradient(135deg, rgba(0,212,255,0.22), rgba(255,106,0,0.16)); border-top-right-radius:4px; border-color:rgba(0,212,255,0.25); padding-right:46px; }
   .bubble.deleted{ font-style:italic; opacity:.6; padding-right:14px; }
   .bubble .from{ font-size:10.5px; font-weight:700; color:var(--ice); margin-bottom:2px; display:block; }
@@ -308,14 +333,14 @@
     width:17px; height:17px; border-radius:50%; display:flex; align-items:center; justify-content:center;
     font-size:11px; line-height:1; color:var(--text-low); cursor:pointer; opacity:.6;
   }
-  .msg-action-btn:hover{ opacity:1; background:rgba(255,255,255,0.1); }
+  .msg-action-btn:hover{ opacity:1; background:rgba(var(--tint-rgb),0.1); }
   .msg-delete:hover{ color:#ff6a6a; }
   .msg-edit:hover{ color:var(--ice); }
 
   .msg-react-btn{
     align-self:flex-end; width:22px; height:22px; border-radius:50%; flex-shrink:0; margin-bottom:2px;
     display:flex; align-items:center; justify-content:center; font-size:13px; color:var(--text-low);
-    background:rgba(255,255,255,0.04); border:1px solid var(--glass-brd); cursor:pointer; opacity:.6;
+    background:rgba(var(--tint-rgb),0.04); border:1px solid var(--glass-brd); cursor:pointer; opacity:.6;
   }
   .msg-react-btn:hover, .msg-react-btn:active{ opacity:1; color:var(--ice); border-color:var(--glass-brd-hi); }
 
@@ -329,7 +354,7 @@
   .reaction-row{ display:flex; flex-wrap:wrap; gap:4px; margin:-4px 0 2px; padding-left:4px; }
   .reaction-row.me{ justify-content:flex-end; padding-left:0; padding-right:4px; }
   .reaction-pill{
-    font-size:11px; background:rgba(255,255,255,0.06); border:1px solid var(--glass-brd); border-radius:10px;
+    font-size:11px; background:rgba(var(--tint-rgb),0.06); border:1px solid var(--glass-brd); border-radius:10px;
     padding:2px 7px; cursor:pointer; color:var(--text-mid);
   }
   .reaction-pill.mine{ border-color:rgba(0,212,255,0.5); background:rgba(0,212,255,0.12); color:var(--text-hi); }
@@ -350,12 +375,12 @@
     box-shadow:0 -6px 24px rgba(0,0,0,0.4); backdrop-filter:blur(12px); z-index:5;
   }
   .mention-option{ display:flex; align-items:center; gap:8px; padding:8px 10px; border-radius:8px; cursor:pointer; font-size:13px; }
-  .mention-option:hover, .mention-option.active{ background:rgba(255,255,255,0.08); }
+  .mention-option:hover, .mention-option.active{ background:rgba(var(--tint-rgb),0.08); }
   .mention-option .avatar{ width:22px; height:22px; font-size:9px; flex-shrink:0; }
   .mention{ color:var(--ice); font-weight:600; }
   .composer textarea{
     flex:1; resize:none; max-height:120px; padding:11px 16px; border-radius:16px; border:1px solid var(--glass-brd);
-    background:rgba(255,255,255,0.03); color:var(--text-hi); font-family:inherit; font-size:13.5px; outline:none; line-height:1.4;
+    background:rgba(var(--tint-rgb),0.03); color:var(--text-hi); font-family:inherit; font-size:13.5px; outline:none; line-height:1.4;
   }
   .composer textarea:focus{ border-color:rgba(0,212,255,0.4); }
   .send-btn{
@@ -369,10 +394,10 @@
 
   .attach-preview{
     display:flex; align-items:center; gap:10px; padding:8px 18px; border-top:1px solid var(--glass-brd);
-    background:rgba(255,255,255,0.03);
+    background:rgba(var(--tint-rgb),0.03);
   }
-  .msg-search-bar{ display:flex; align-items:center; gap:8px; padding:8px 16px; border-bottom:1px solid var(--glass-brd); background:rgba(255,255,255,0.02); }
-  .msg-search-bar input{ flex:1; background:rgba(255,255,255,0.04); border:1px solid var(--glass-brd); border-radius:10px; padding:7px 12px; color:var(--text-hi); font-size:13px; outline:none; font-family:inherit; }
+  .msg-search-bar{ display:flex; align-items:center; gap:8px; padding:8px 16px; border-bottom:1px solid var(--glass-brd); background:rgba(var(--tint-rgb),0.02); }
+  .msg-search-bar input{ flex:1; background:rgba(var(--tint-rgb),0.04); border:1px solid var(--glass-brd); border-radius:10px; padding:7px 12px; color:var(--text-hi); font-size:13px; outline:none; font-family:inherit; }
   .msg-search-bar input:focus{ border-color:rgba(0,212,255,0.4); }
   .msg-search-count{ font-size:11px; color:var(--text-mid); white-space:nowrap; min-width:36px; text-align:center; }
   mark.search-hit{ background:rgba(255,210,63,0.4); color:inherit; border-radius:3px; padding:0 1px; }
@@ -414,7 +439,7 @@
 
   .reply-preview{
     display:flex; align-items:stretch; gap:10px; padding:8px 18px; border-top:1px solid var(--glass-brd);
-    background:rgba(255,255,255,0.03);
+    background:rgba(var(--tint-rgb),0.03);
   }
   .reply-preview-accent{ width:3px; border-radius:2px; background:var(--ice); flex-shrink:0; }
   .reply-preview-body{ flex:1; min-width:0; display:flex; flex-direction:column; justify-content:center; }
@@ -423,7 +448,7 @@
 
   .reply-quote{
     display:flex; flex-direction:column; gap:1px; padding:5px 8px; margin-bottom:5px; border-radius:8px;
-    background:rgba(255,255,255,0.08); border-left:3px solid var(--ice); cursor:pointer; max-width:100%;
+    background:rgba(var(--tint-rgb),0.08); border-left:3px solid var(--ice); cursor:pointer; max-width:100%;
   }
   .reply-quote-name{ font-size:11px; font-weight:600; color:var(--ice); }
   .reply-quote-text{ font-size:12px; color:var(--text-mid); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:block; }
@@ -438,19 +463,19 @@
   .msg-reply-btn:hover{ color:var(--ice); }
 
   .attach-preview img{ width:40px; height:40px; object-fit:cover; border-radius:8px; }
-  .attach-preview-icon{ width:40px; height:40px; border-radius:8px; background:rgba(255,255,255,0.08); display:flex; align-items:center; justify-content:center; font-size:20px; flex-shrink:0; }
+  .attach-preview-icon{ width:40px; height:40px; border-radius:8px; background:rgba(var(--tint-rgb),0.08); display:flex; align-items:center; justify-content:center; font-size:20px; flex-shrink:0; }
   .attach-preview-name{ flex:1; font-size:12px; color:var(--text-mid); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
   .msg-image{ display:block; max-width:220px; max-height:280px; border-radius:12px; cursor:pointer; object-fit:cover; }
   .bubble:has(.msg-image){ padding:6px; }
   .bubble:has(.msg-image) .ts{ padding:4px 6px 0; }
 
-  .file-card{ display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:10px; background:rgba(255,255,255,0.07); text-decoration:none; color:inherit; min-width:180px; max-width:240px; }
+  .file-card{ display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:10px; background:rgba(var(--tint-rgb),0.07); text-decoration:none; color:inherit; min-width:180px; max-width:240px; }
   .file-card-icon{ font-size:22px; flex-shrink:0; }
   .file-card-info{ min-width:0; flex:1; }
   .file-card-name{ font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-hi, inherit); }
   .file-card-size{ font-size:11px; color:var(--text-mid); }
-  .att-decrypting{ padding:8px 10px; border-radius:10px; background:rgba(255,255,255,0.07); font-size:12px; color:var(--text-mid); min-width:140px; }
+  .att-decrypting{ padding:8px 10px; border-radius:10px; background:rgba(var(--tint-rgb),0.07); font-size:12px; color:var(--text-mid); min-width:140px; }
 
   #notifyPrefBtn.is-muted{ opacity:.55; }
   .notify-pref-menu{
@@ -459,14 +484,14 @@
     padding:5px; box-shadow:0 10px 30px rgba(0,0,0,0.4); backdrop-filter:blur(12px);
   }
   .notify-pref-opt{ padding:9px 12px; font-size:13px; border-radius:8px; cursor:pointer; white-space:nowrap; }
-  .notify-pref-opt:hover{ background:rgba(255,255,255,0.08); }
+  .notify-pref-opt:hover{ background:rgba(var(--tint-rgb),0.08); }
   .notify-pref-opt.active{ color:var(--ice); font-weight:600; }
   .chat-item-muted-badge{ font-size:11px; opacity:.6; margin-left:4px; }
 
   .voice-note{ display:flex; align-items:center; gap:8px; min-width:170px; padding:2px 4px; }
-  .voice-note-play{ width:32px; height:32px; border-radius:50%; background:rgba(255,255,255,0.12); border:none; display:flex; align-items:center; justify-content:center; font-size:13px; cursor:pointer; flex-shrink:0; color:inherit; }
-  .voice-note-play:hover{ background:rgba(255,255,255,0.2); }
-  .voice-note-bar{ flex:1; height:3px; border-radius:2px; background:rgba(255,255,255,0.18); position:relative; overflow:hidden; }
+  .voice-note-play{ width:32px; height:32px; border-radius:50%; background:rgba(var(--tint-rgb),0.12); border:none; display:flex; align-items:center; justify-content:center; font-size:13px; cursor:pointer; flex-shrink:0; color:inherit; }
+  .voice-note-play:hover{ background:rgba(var(--tint-rgb),0.2); }
+  .voice-note-bar{ flex:1; height:3px; border-radius:2px; background:rgba(var(--tint-rgb),0.18); position:relative; overflow:hidden; }
   .voice-note-bar-fill{ position:absolute; left:0; top:0; bottom:0; width:0%; background:var(--ice); }
   .voice-note-dur{ font-size:11px; color:var(--text-mid); flex-shrink:0; min-width:32px; text-align:right; }
   .record-btn.recording{ color:var(--fire); animation: recordPulse 1s ease-in-out infinite; }
@@ -512,13 +537,13 @@
   .modal h3{ margin:0 0 4px; font-size:19px; }
   .modal .hint{ font-size:12px; color:var(--text-mid); margin-bottom:16px; }
   .modal input[type=text]{
-    width:100%; padding:11px 16px; border-radius:999px; border:1px solid var(--glass-brd); background:rgba(255,255,255,0.03);
+    width:100%; padding:11px 16px; border-radius:999px; border:1px solid var(--glass-brd); background:rgba(var(--tint-rgb),0.03);
     color:var(--text-hi); font-size:13.5px; outline:none; margin-bottom:12px;
   }
   .modal input[type=text]:focus{ border-color:rgba(0,212,255,0.4); }
   .contact-pick{ max-height:220px; overflow-y:auto; display:flex; flex-direction:column; gap:4px; margin-bottom:16px; }
   .pick-row{ display:flex; align-items:center; gap:10px; padding:8px; border-radius:10px; cursor:pointer; }
-  .pick-row:hover{ background:rgba(255,255,255,0.04); }
+  .pick-row:hover{ background:rgba(var(--tint-rgb),0.04); }
   .pick-row input{ accent-color:var(--ice); width:16px; height:16px; }
   .pick-row .avatar{ width:30px; height:30px; border-radius:50%; font-size:11px; }
   .pick-row .pname{ font-size:13px; }
@@ -541,16 +566,16 @@
     color:var(--text-mid); cursor:pointer; border:1px solid transparent; border-bottom:none;
   }
   .admin-console-tab:hover{ color:var(--text-hi); }
-  .admin-console-tab.active{ color:var(--text-hi); background:rgba(255,255,255,0.05); border-color:var(--glass-brd); }
+  .admin-console-tab.active{ color:var(--text-hi); background:rgba(var(--tint-rgb),0.05); border-color:var(--glass-brd); }
   .admin-console-body{ flex:1; overflow-y:auto; padding:20px 18px 40px; max-width:640px; width:100%; margin:0 auto; }
   .admin-console-section h3{ margin-top:0; }
   .settings-row{
     display:flex; align-items:center; justify-content:space-between; gap:12px;
-    padding:12px 16px; border-radius:999px; background:rgba(255,255,255,0.03);
+    padding:12px 16px; border-radius:999px; background:rgba(var(--tint-rgb),0.03);
     border:1px solid var(--glass-brd); margin-bottom:8px; font-size:13px; cursor:default;
   }
   .settings-row-action{ cursor:pointer; transition:background .15s ease; }
-  .settings-row-action:hover{ background:rgba(255,255,255,0.07); }
+  .settings-row-action:hover{ background:rgba(var(--tint-rgb),0.07); }
   .settings-row input[type="checkbox"]{ width:auto; flex-shrink:0; }
 
   /* ---------- chat row context menu (long-press / right-click) ---------- */
@@ -563,7 +588,7 @@
     cursor:pointer; font-size:14px; transition:background .15s ease; margin-bottom:2px;
   }
   .context-menu-item span:first-child{ width:22px; text-align:center; flex-shrink:0; }
-  .context-menu-item:hover{ background:rgba(255,255,255,0.07); }
+  .context-menu-item:hover{ background:rgba(var(--tint-rgb),0.07); }
   .context-menu-item.danger{ color:#ff6a6a; }
 
   @media (max-width: 640px){
@@ -576,18 +601,19 @@
     .roster-entry{ flex-wrap:wrap; row-gap:8px; padding:10px 4px; }
     .roster-entry-info{ flex:1 1 100%; }
   }
-  .btn{ padding:9px 18px; border-radius:999px; font-size:13px; font-weight:600; cursor:pointer; border:1px solid var(--glass-brd); background:rgba(255,255,255,0.04); color:var(--text-hi); }
-  .btn:hover{ background:rgba(255,255,255,0.09); }
+  .btn{ padding:9px 18px; border-radius:999px; font-size:13px; font-weight:600; cursor:pointer; border:1px solid var(--glass-brd); background:rgba(var(--tint-rgb),0.04); color:var(--text-hi); }
+  .btn:hover{ background:rgba(var(--tint-rgb),0.09); }
   .btn.primary{ background:linear-gradient(135deg, var(--ice), var(--fire)); border:none; color:#0a0d12; }
   .btn.primary:hover{ filter:brightness(1.08); }
   .btn.primary:disabled{ opacity:.4; cursor:not-allowed; filter:none; }
 
   ::-webkit-scrollbar{ width:8px; }
-  ::-webkit-scrollbar-thumb{ background:rgba(255,255,255,0.12); border-radius:8px; }
-  ::-webkit-scrollbar-thumb:hover{ background:rgba(255,255,255,0.2); }
+  ::-webkit-scrollbar-thumb{ background:rgba(var(--tint-rgb),0.12); border-radius:8px; }
+  ::-webkit-scrollbar-thumb:hover{ background:rgba(var(--tint-rgb),0.2); }
 </style>
 </head>
 <body>
+<script>document.documentElement.dataset.theme = localStorage.getItem('parapin_theme') === 'light' ? 'light' : 'dark';</script>
 
 <div id="bgfx"></div>
 <div class="grain"></div>
@@ -679,6 +705,8 @@
             <div class="notify-pref-wrap" style="position:relative;">
               <div class="icon-btn" id="chatMenuBtn" title="More">⋮</div>
               <div id="chatMenuDropdown" class="notify-pref-menu" style="display:none;">
+                <div class="notify-pref-opt" id="chatWallpaperOpt">🖼️ Set wallpaper for this chat</div>
+                <div class="notify-pref-opt" id="chatWallpaperResetOpt">Use default wallpaper</div>
                 <div class="notify-pref-opt" id="resetEncryptionOpt">🔄 Reset encryption for this chat</div>
               </div>
             </div>
@@ -1011,6 +1039,7 @@
         <div class="contact-pick" id="deviceList" style="max-height:none;"></div>
       </section>
     </div>
+    <a class="brand-footer global-brand-footer" href="https://www.parasyte.cloud" target="_blank" rel="noopener noreferrer"><span>Powered by parasyte.cloud</span></a>
   </div>
 </div>
 
@@ -1023,6 +1052,23 @@
       <div style="width:34px;"></div>
     </div>
     <div class="admin-console-body" style="max-width:640px;">
+      <section class="admin-console-section">
+        <h3>Appearance</h3>
+        <label class="settings-row">
+          <span>Light mode</span>
+          <input type="checkbox" id="settingsLightModeInput">
+        </label>
+        <div class="hint">Off is the default dark theme.</div>
+        <div style="margin-top:12px;">
+          <div class="hint" style="margin-bottom:6px;">Chat wallpaper (this chat / all chats)</div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <div class="btn" id="settingsWallpaperBtn">Choose image</div>
+            <div class="btn" id="settingsWallpaperResetBtn">Reset to default</div>
+          </div>
+          <input type="file" id="settingsWallpaperInput" accept="image/*" style="display:none;">
+          <div class="hint" id="settingsWallpaperStatus" style="margin-top:6px;"></div>
+        </div>
+      </section>
       <section class="admin-console-section">
         <h3>Notifications</h3>
         <label class="settings-row">
@@ -1064,6 +1110,7 @@
         <a class="brand-footer" href="https://www.parasyte.cloud" target="_blank" rel="noopener noreferrer" style="justify-content:flex-start;"><span>Powered by parasyte.cloud</span></a>
       </section>
     </div>
+    <a class="brand-footer global-brand-footer" href="https://www.parasyte.cloud" target="_blank" rel="noopener noreferrer"><span>Powered by parasyte.cloud</span></a>
   </div>
 </div>
 
@@ -1085,6 +1132,7 @@
         <div id="callsContactList"></div>
       </section>
     </div>
+    <a class="brand-footer global-brand-footer" href="https://www.parasyte.cloud" target="_blank" rel="noopener noreferrer"><span>Powered by parasyte.cloud</span></a>
   </div>
 </div>
 
@@ -1113,6 +1161,7 @@
       <div style="font-size:48px; margin-bottom:16px;" id="comingSoonIcon">🚧</div>
       <div class="hint" id="comingSoonBody" style="font-size:14px;"></div>
     </div>
+    <a class="brand-footer global-brand-footer" href="https://www.parasyte.cloud" target="_blank" rel="noopener noreferrer"><span>Powered by parasyte.cloud</span></a>
   </div>
 </div>
 
@@ -1834,6 +1883,72 @@
   });
   document.addEventListener('click', ()=>{ chatMenuDropdown.style.display = 'none'; });
 
+  // ---------------- chat wallpaper (global default + per-chat override) ----------------
+  // Stored client-side only (localStorage holds just the R2 URL, not the
+  // image itself) — the image bytes live wherever /api/upload already puts
+  // every other attachment. A per-chat entry always wins over the global
+  // default; "use default" just removes that one chat's override.
+  function wallpaperUrlFor(chatId){
+    return (chatId && localStorage.getItem('parapin_wallpaper_' + chatId)) || localStorage.getItem('parapin_wallpaper_global') || null;
+  }
+  function applyWallpaper(chatId){
+    const url = wallpaperUrlFor(chatId);
+    if (url){
+      messagesEl.style.backgroundImage = `linear-gradient(rgba(0,0,0,0.28),rgba(0,0,0,0.28)), url("${url}")`;
+      messagesEl.style.backgroundSize = 'cover';
+      messagesEl.style.backgroundPosition = 'center';
+      messagesEl.style.backgroundRepeat = 'no-repeat';
+    } else {
+      messagesEl.style.backgroundImage = '';
+    }
+  }
+  async function uploadWallpaperImage(file){
+    try {
+      const r = await apiFetch('/upload', {
+        method: 'POST',
+        headers: { 'content-type': file.type || 'image/jpeg', 'x-file-name': encodeURIComponent(file.name || 'wallpaper.jpg') },
+        body: file,
+      });
+      if (r.ok && r.body && r.body.url) return r.body.url;
+    } catch(e){}
+    return null;
+  }
+
+  const chatWallpaperOpt = document.getElementById('chatWallpaperOpt');
+  const chatWallpaperResetOpt = document.getElementById('chatWallpaperResetOpt');
+  let chatWallpaperFileInput = null;
+  chatWallpaperOpt.addEventListener('click', ()=>{
+    chatMenuDropdown.style.display = 'none';
+    if (!activeChatId) return;
+    if (!chatWallpaperFileInput){
+      chatWallpaperFileInput = document.createElement('input');
+      chatWallpaperFileInput.type = 'file';
+      chatWallpaperFileInput.accept = 'image/*';
+      chatWallpaperFileInput.style.display = 'none';
+      document.body.appendChild(chatWallpaperFileInput);
+    }
+    const forChatId = activeChatId;
+    chatWallpaperFileInput.onchange = async ()=>{
+      const file = chatWallpaperFileInput.files[0];
+      chatWallpaperFileInput.value = '';
+      if (!file) return;
+      const url = await uploadWallpaperImage(file);
+      if (url){
+        localStorage.setItem('parapin_wallpaper_' + forChatId, url);
+        if (activeChatId === forChatId) applyWallpaper(forChatId);
+      } else {
+        alert("Couldn't upload that image — try again.");
+      }
+    };
+    chatWallpaperFileInput.click();
+  });
+  chatWallpaperResetOpt.addEventListener('click', ()=>{
+    chatMenuDropdown.style.display = 'none';
+    if (!activeChatId) return;
+    localStorage.removeItem('parapin_wallpaper_' + activeChatId);
+    applyWallpaper(activeChatId);
+  });
+
   // Escape hatch for a chat permanently stuck on "waiting for encryption" —
   // clears the server's stored key wraps for this chat (so it can freshly
   // re-establish) and forgets whatever this device had cached for it, then
@@ -2115,6 +2230,7 @@
     renderAvatar(convAvatar, name, chat.type==='group', chatAvatarUrl(chat));
     convTitle.textContent = name;
     document.getElementById('chatCallBtn').style.display = chat.type === 'dm' ? 'flex' : 'none';
+    applyWallpaper(chat.id);
 
     const typing = typingUsers[chat.id];
     const typingNames = typing ? Object.values(typing) : [];
@@ -3235,10 +3351,58 @@
     settingsAlwaysBannerInput.checked = alwaysShowBanner;
     settingsReadReceiptsInput.checked = readReceiptsEnabled;
     settingsLocationInput.checked = locationSharingEnabled;
+    settingsLightModeInput.checked = currentTheme === 'light';
+    refreshWallpaperStatus();
     document.getElementById('settingsAdminBtn').style.display = iAmAdmin ? 'flex' : 'none';
     openModal('settingsOverlay');
     renderNotifStatus();
   }
+
+  // ---------------- theme (dark default, light optional) ----------------
+  // Applied to <html> synchronously at the very top of <body> (see the
+  // inline script right after the opening tag) so there's no flash of the
+  // wrong theme on load — this just keeps the in-app toggle and that early
+  // read in sync from here on.
+  let currentTheme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+  function applyTheme(theme){
+    currentTheme = theme === 'light' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = currentTheme;
+    localStorage.setItem('parapin_theme', currentTheme);
+  }
+  const settingsLightModeInput = document.getElementById('settingsLightModeInput');
+  settingsLightModeInput.addEventListener('change', ()=>{
+    applyTheme(settingsLightModeInput.checked ? 'light' : 'dark');
+  });
+
+  // ---------------- global wallpaper settings row ----------------
+  const settingsWallpaperBtn = document.getElementById('settingsWallpaperBtn');
+  const settingsWallpaperResetBtn = document.getElementById('settingsWallpaperResetBtn');
+  const settingsWallpaperInput = document.getElementById('settingsWallpaperInput');
+  const settingsWallpaperStatus = document.getElementById('settingsWallpaperStatus');
+  function refreshWallpaperStatus(){
+    const url = localStorage.getItem('parapin_wallpaper_global');
+    settingsWallpaperStatus.textContent = url ? 'Custom wallpaper set for all chats (a chat can still override it individually).' : 'Using the default background everywhere.';
+  }
+  settingsWallpaperBtn.addEventListener('click', ()=> settingsWallpaperInput.click());
+  settingsWallpaperInput.addEventListener('change', async ()=>{
+    const file = settingsWallpaperInput.files[0];
+    settingsWallpaperInput.value = '';
+    if (!file) return;
+    settingsWallpaperStatus.textContent = 'Uploading…';
+    const url = await uploadWallpaperImage(file);
+    if (url){
+      localStorage.setItem('parapin_wallpaper_global', url);
+      refreshWallpaperStatus();
+      if (activeChatId) applyWallpaper(activeChatId);
+    } else {
+      settingsWallpaperStatus.textContent = "Couldn't upload that image — try again.";
+    }
+  });
+  settingsWallpaperResetBtn.addEventListener('click', ()=>{
+    localStorage.removeItem('parapin_wallpaper_global');
+    refreshWallpaperStatus();
+    if (activeChatId) applyWallpaper(activeChatId);
+  });
 
   // Surfaces exactly what earlier notification fixes could only guess at —
   // whether the ding is actually unlocked, whether the browser granted
