@@ -167,24 +167,43 @@
 
   .shell{ display:flex; width:100%; flex:1; min-height:0; padding:18px; gap:18px; }
 
-  /* ================= GLOBAL BOTTOM NAV (floating pill) ================= */
+  /* ================= GLOBAL BOTTOM NAV (floating liquid-glass pill) ================= */
   #bottomNavWrap{
     flex-shrink:0; display:flex; justify-content:center;
-    padding:0 14px calc(10px + env(safe-area-inset-bottom, 0px));
+    padding:6px 10px 2px;
   }
   #bottomNav{
-    display:flex; align-items:stretch; justify-content:center; gap:2px;
-    background:rgba(8,10,14,0.7); backdrop-filter:blur(16px); border:1px solid var(--glass-brd);
+    position:relative; display:flex; align-items:stretch; justify-content:center; gap:2px;
+    background:rgba(22,24,30,0.5);
+    -webkit-backdrop-filter:blur(26px) saturate(180%);
+    backdrop-filter:blur(26px) saturate(180%);
+    border:1px solid rgba(var(--tint-rgb),0.14);
     border-radius:999px; padding:7px 10px; width:100%; max-width:520px;
-    box-shadow:0 8px 24px rgba(0,0,0,0.28);
+    box-shadow:0 8px 24px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.16), inset 0 -1px 0 rgba(0,0,0,0.18);
+  }
+  /* The one moving piece that makes this read as "liquid" rather than a
+     static bar — a single glass capsule that slides and resizes itself to
+     whichever tab is active (see moveNavActivePill), instead of every tab
+     carrying its own always-there highlight. */
+  .nav-active-pill{
+    position:absolute; top:5px; bottom:5px; left:10px; width:60px; opacity:0;
+    border-radius:999px; background:rgba(var(--tint-rgb),0.16);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,0.2), 0 2px 10px rgba(0,0,0,0.2);
+    transition:left .32s cubic-bezier(.34,1.45,.4,1), width .32s cubic-bezier(.34,1.45,.4,1), opacity .2s ease;
+    pointer-events:none; z-index:0;
   }
   .nav-tab{
     display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px;
-    flex:1; min-width:0; padding:6px 10px; border-radius:999px; cursor:pointer; position:relative;
-    color:var(--text-mid); transition:background .15s ease, color .15s ease;
+    flex:1; min-width:0; padding:6px 10px; border-radius:999px; cursor:pointer; position:relative; z-index:1;
+    color:var(--text-mid); transition:color .15s ease, transform .12s ease;
   }
-  .nav-tab:hover{ background:rgba(var(--tint-rgb),0.04); }
-  .nav-tab.active{ background:rgba(var(--tint-rgb),0.08); color:var(--text-hi); }
+  .nav-tab:hover{ color:var(--text-hi); }
+  /* Touch feedback needs to fire on the tap itself, not a :hover state that
+     mobile browsers only fake (and often leave stuck) after a touch — a
+     quick scale-down on :active reads as an immediate press regardless of
+     input type. */
+  .nav-tab:active{ transform:scale(0.92); }
+  .nav-tab.active{ color:var(--text-hi); }
   .nav-tab-icon{ font-size:19px; line-height:1; }
   .nav-tab span{ font-size:9.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
   #bottomNav .nav-tab-avatar{
@@ -328,7 +347,7 @@
   }
   .brand-footer:hover{ opacity:.9; }
   .brand-footer img{ height:7px; width:auto; display:block; }
-  .global-brand-footer{ flex-shrink:0; padding:5px 0; background:rgba(5,6,8,0.4); }
+  .global-brand-footer{ flex-shrink:0; padding:3px 0 calc(6px + env(safe-area-inset-bottom, 0px)); background:transparent; }
 
   /* ---------- conversation ---------- */
   .conv{ flex:1; display:flex; flex-direction:column; border-radius:20px; overflow:hidden; }
@@ -797,6 +816,7 @@
   <!-- ============ GLOBAL BOTTOM NAV ============ -->
   <div id="bottomNavWrap">
     <div id="bottomNav">
+      <div class="nav-active-pill" id="navActivePill"></div>
       <div class="nav-tab" data-nav-tab="profile">
         <div class="me-avatar nav-tab-avatar" id="meAvatar" title="Profile">ME</div>
         <span>Profile</span>
@@ -816,7 +836,7 @@
         <div class="nav-tab-badge" id="navChatsBadge" style="display:none;"></div>
       </div>
       <div class="nav-tab" data-nav-tab="meetingroom">
-        <div class="nav-tab-icon">🗓️</div>
+        <div class="nav-tab-icon">👥</div>
         <span>Meeting Room</span>
       </div>
       <div class="nav-tab" data-nav-tab="settings">
@@ -967,7 +987,7 @@
     <div class="hint" id="profileDeviceStatus" style="margin-top:14px; margin-bottom:0; color:#7ee08a;"></div>
     <div class="btn" id="approveDeviceOpenBtn" style="margin-top:10px;">Approve a new device</div>
     <div class="hint" style="margin-top:8px; margin-bottom:0;">A newly-approved device gets its own encryption key and can read new messages right away. Any chat history from before it was added stays unreadable on that device only — same as most encrypted chat apps.</div>
-    <div id="adminRecoveryLink" style="margin-top:14px; font-size:12px; color:var(--text-mid); text-decoration:underline; cursor:pointer;">Don't see the admin console but think you should?</div>
+    <div id="adminRecoveryLink" style="margin:18px 0 20px; padding:4px 0; font-size:12px; color:var(--text-mid); text-decoration:underline; cursor:pointer;">Don't see the admin console but think you should?</div>
     <div class="modal-actions">
       <div class="btn" onclick="closeModal('profileOverlay')">Cancel</div>
       <div class="btn primary" id="profileSaveBtn">Save</div>
@@ -1878,6 +1898,10 @@
     buffer = '';
     myRawPin = pin;
     initSession(pin);
+    // The nav bar goes from display:none to visible right above this —
+    // measuring tab positions before that paint lands would just get zeros,
+    // so this needs to run on the next frame rather than synchronously here.
+    requestAnimationFrame(()=>moveNavActivePill('chats'));
   }
 
   function lockApp(){
@@ -3527,7 +3551,7 @@
   // different copy, since none of the three exist yet (see the scoping
   // plan) but the nav real estate should already reflect where they'll live.
   const COMING_SOON_COPY = {
-    meetingroom: { icon: '🗓️', title: 'Meeting Room', body: "Group meeting rooms (Zoom/Meet-style, more than 2 people) need a proper SFU rather than peer-to-peer — planned on Cloudflare Realtime SFU, as its own phase after 1:1 calls are working." },
+    meetingroom: { icon: '👥', title: 'Meeting Room', body: "Group meeting rooms (Zoom/Meet-style, more than 2 people) need a proper SFU rather than peer-to-peer — planned on Cloudflare Realtime SFU, as its own phase after 1:1 calls are working." },
   };
 
   function closeAllNavOverlays(){
@@ -3538,7 +3562,27 @@
 
   function setActiveNavTab(name){
     document.querySelectorAll('#bottomNav .nav-tab').forEach(t=>t.classList.toggle('active', t.dataset.navTab === name));
+    moveNavActivePill(name);
   }
+
+  // Slides/resizes the one glass highlight capsule to sit behind whichever
+  // tab is active, measured live off the real DOM rather than hard-coded
+  // positions — works the same whether the nav just became visible again
+  // after an overlay closed, after a resize/orientation change, or on first
+  // paint, since it's always driven by the tab's actual current geometry.
+  function moveNavActivePill(name){
+    const nav = document.getElementById('bottomNav');
+    const pill = document.getElementById('navActivePill');
+    const tab = nav.querySelector(`.nav-tab[data-nav-tab="${name}"]`);
+    if (!tab || tab.offsetWidth === 0){ pill.style.opacity = '0'; return; }
+    pill.style.left = tab.offsetLeft + 'px';
+    pill.style.width = tab.offsetWidth + 'px';
+    pill.style.opacity = '1';
+  }
+  window.addEventListener('resize', ()=>{
+    const current = document.querySelector('#bottomNav .nav-tab.active');
+    if (current) moveNavActivePill(current.dataset.navTab);
+  });
 
   document.querySelectorAll('#bottomNav .nav-tab').forEach(tab=>{
     tab.addEventListener('click', ()=>{
