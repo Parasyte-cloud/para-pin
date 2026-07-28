@@ -1,7 +1,7 @@
-// PArA PIN backend, Cloudflare Worker + Durable Objects
+// PArA PIN backend — Cloudflare Worker + Durable Objects
 // Two DO classes:
-//   Registry  (singleton), users, chat membership index
-//   ChatRoom  (one per chat id), messages + realtime WebSocket fan-out
+//   Registry  (singleton) — users, chat membership index
+//   ChatRoom  (one per chat id) — messages + realtime WebSocket fan-out
 
 async function sha256Hex(str) {
   const data = new TextEncoder().encode(str);
@@ -21,7 +21,7 @@ function authHash(request, url) {
 }
 
 // Builds the cached "public view" of a user that other people's clients can
-// look up via GET /users, kept in its own function so every place that
+// look up via GET /users — kept in its own function so every place that
 // writes it (session, profile edits, key uploads, device resets, admin
 // promotion, etc.) stays in sync instead of each hand-rolling the same
 // object and inevitably drifting out of sync with each other (which is
@@ -126,7 +126,7 @@ async function signVapidJWT(privateKeyJwk, audience, subject) {
   const payload = { aud: audience, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: subject };
   const unsigned = `${bufToB64url(new TextEncoder().encode(JSON.stringify(header)))}.${bufToB64url(new TextEncoder().encode(JSON.stringify(payload)))}`;
   const key = await crypto.subtle.importKey('jwk', privateKeyJwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
-  // Web Crypto's ECDSA signature is raw r||s (IEEE P1363), exactly what JWS ES256 wants, no DER conversion needed.
+  // Web Crypto's ECDSA signature is raw r||s (IEEE P1363) — exactly what JWS ES256 wants, no DER conversion needed.
   const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, new TextEncoder().encode(unsigned));
   return `${unsigned}.${bufToB64url(sig)}`;
 }
@@ -148,13 +148,13 @@ async function sendWebPush(subscription, payloadObj, env) {
       'Content-Type': 'application/octet-stream',
       'Content-Encoding': 'aes128gcm',
       'TTL': '86400',
-      // Without an explicit Urgency, push services fall back to "normal",
+      // Without an explicit Urgency, push services fall back to "normal" —
       // and Apple's implementation in particular is known to sit on
       // normal/unspecified-priority pushes and deliver them late (or not at
       // all) once the device is in Low Power Mode or the browser/PWA hasn't
       // been used in a while, which looks exactly like "sometimes it just
       // doesn't come." Marking every message notification "high" is the
-      // documented fix, it tells the OS this is worth waking up for.
+      // documented fix — it tells the OS this is worth waking up for.
       'Urgency': 'high',
       'Authorization': `vapid t=${jwt}, k=${env.VAPID_PUBLIC_KEY}`,
     },
@@ -164,12 +164,12 @@ async function sendWebPush(subscription, payloadObj, env) {
 }
 
 // A single transient failure (a network blip, or a 5xx from the push
-// service itself) previously meant that one notification was just gone,
+// service itself) previously meant that one notification was just gone —
 // nothing anywhere retried it, which is exactly the kind of thing that adds
 // up to "notifications come sometimes, not every time" without ever
 // throwing an error worth noticing. One short retry covers that without
 // meaningfully delaying delivery. 404/410 (subscription gone for good)
-// still isn't retried, that's not a transient failure, retrying can't help.
+// still isn't retried — that's not a transient failure, retrying can't help.
 async function sendWebPushWithRetry(subscription, payloadObj, env) {
   let result = await sendWebPush(subscription, payloadObj, env);
   if (!result.ok && result.status !== 404 && result.status !== 410) {
@@ -183,7 +183,7 @@ async function sendWebPushWithRetry(subscription, payloadObj, env) {
 // Used only by the lightweight HR-linked onboarding roster: emails a newly
 // added person their PIN instead of (or alongside) an admin handing it over
 // directly. Cleanly no-ops if RESEND_API_KEY / RESEND_FROM_EMAIL aren't
-// configured, the roster feature works fine without email, this is optional.
+// configured — the roster feature works fine without email, this is optional.
 async function sendOnboardingEmail(env, { to, name, pin }) {
   if (!env.RESEND_API_KEY) return { sent: false, error: 'resend_not_configured' };
   if (!env.RESEND_FROM_EMAIL) return { sent: false, error: 'resend_from_not_configured' };
@@ -198,7 +198,7 @@ async function sendOnboardingEmail(env, { to, name, pin }) {
         from: env.RESEND_FROM_EMAIL,
         to: [to],
         subject: "You're set up on PArA PIN",
-        text: `Hi ${name || 'there'},\n\nYou've been added to PArA PIN, the team chat app.\n\nYour PIN is: ${pin}\n\nOpen chat.parasyte.cloud and enter this PIN to get in, that's it, no username or password to remember. Keep it to yourself the way you'd keep any PIN.\n\nThe PArA PIN team`,
+        text: `Hi ${name || 'there'},\n\nYou've been added to PArA PIN, the team chat app.\n\nYour PIN is: ${pin}\n\nOpen chat.parasyte.cloud and enter this PIN to get in — that's it, no username or password to remember. Keep it to yourself the way you'd keep any PIN.\n\n— PArA PIN`,
       }),
     });
     if (!res.ok) {
@@ -225,7 +225,7 @@ export class Registry {
       if (!pinHash) return json({ error: 'missing_pin_hash' }, 400);
 
       // A roster entry pre-provisioned by an admin (see /admin/roster) claims
-      // itself the first time its PIN is actually used, the person gets
+      // itself the first time its PIN is actually used — the person gets
       // their name/department pre-filled instead of the free-text "what
       // should we call you" step, and the entry is marked claimed so the
       // admin can see who's actually signed on.
@@ -246,11 +246,11 @@ export class Registry {
           e2eePublicKey: null,
           deviceIds: [],
           // A roster-issued PIN is a shared secret the admin who created it
-          // also knows, if it doubled as the permanent credential, whoever
+          // also knows — if it doubled as the permanent credential, whoever
           // uses it FIRST (which could be that admin, testing it, or anyone
           // they showed it to) would permanently claim the account. Forcing
           // a mandatory PIN change before the account is usable means the
-          // admin-known PIN only ever works for this one bootstrap step,
+          // admin-known PIN only ever works for this one bootstrap step —
           // once changed, only the real person knows the PIN that matters.
           mustChangePin: !!roster,
           pendingDeviceLink: null,
@@ -262,7 +262,7 @@ export class Registry {
         await this.state.storage.put(`userIdToPinHash:${user.id}`, pinHash);
 
         // Bootstrap: nobody is admin yet, so whoever this very first account
-        // turns out to be becomes the admin, there's no HR system to source
+        // turns out to be becomes the admin — there's no HR system to source
         // that decision from, so "first person to ever open this deployment"
         // is the least-surprising stand-in for "whoever set this up."
         const admins = (await this.state.storage.get('admins')) || [];
@@ -285,7 +285,7 @@ export class Registry {
       }
 
       // Device trust: the PIN alone isn't enough to sign in from a device
-      // that isn't already trusted, this is what actually answers "someone
+      // that isn't already trusted — this is what actually answers "someone
       // has my PIN now, so what." `deviceId` is a random id the client
       // generates once and keeps in localStorage; it's a deterrent against
       // casual PIN sharing/leaks, not a cryptographic guarantee (a client
@@ -311,7 +311,7 @@ export class Registry {
         roster.claimedAt = Date.now();
         await this.state.storage.put(`roster:${roster.id}`, roster);
 
-        // Let admins know someone from the roster actually showed up, the
+        // Let admins know someone from the roster actually showed up — the
         // "notifications" half of HR-linked onboarding. Best-effort, never
         // blocks login if a push fails.
         const admins = (await this.state.storage.get('admins')) || [];
@@ -336,7 +336,7 @@ export class Registry {
 
       // Last message + unread count per chat, fetched in one pass so the chat
       // list can show accurate previews and "N unread" the instant the app
-      // opens, otherwise a chat only ever looked unread if the app happened
+      // opens — otherwise a chat only ever looked unread if the app happened
       // to be open (with a live socket) when the message arrived.
       const summaries = {};
       if (this.env.CHAT_ROOM) {
@@ -350,7 +350,7 @@ export class Registry {
       }
 
       // Chats this user removed from their own list ("Remove chat") stay
-      // hidden only until something new happens in them, comparing each
+      // hidden only until something new happens in them — comparing each
       // hidden chat's last-message time against the moment it was hidden
       // means a fresh message from the other person brings it back on its
       // own, without either side needing to do anything.
@@ -384,7 +384,7 @@ export class Registry {
         e2eePublicKey: user.e2eePublicKey || null,
         mustChangePin: !!user.mustChangePin,
         // Reaching this response at all means the current device already
-        // passed the trust check above, the count is just so the person can
+        // passed the trust check above — the count is just so the person can
         // see, e.g., "2 devices" after approving a second one, without
         // needing admin access.
         trustedDeviceCount: user.deviceIds.length,
@@ -407,22 +407,22 @@ export class Registry {
     }
 
     // Uploads THIS device's E2EE public key (ECDH P-256, raw bytes,
-    // base64url) for the account. Safe to call on every login, it just
+    // base64url) for the account. Safe to call on every login — it just
     // keeps the server's copy in sync with whatever's actually in this
     // browser's IndexedDB. The matching private key never leaves the device.
     //
     // Two fields get written here, for backward-compatibility reasons:
-    //  - `devicePublicKeys[deviceId]` is the current, authoritative record,
+    //  - `devicePublicKeys[deviceId]` is the current, authoritative record —
     //    every trusted device gets its own entry, which is what makes
     //    multi-device E2EE (a message wrapped separately for each of a
     //    person's devices) possible at all.
     //  - `e2eePublicKey` (singular) is the OLD pre-multi-device field. DMs
     //    created before multi-device shipped were encrypted with a key
     //    derived directly from this single field, with no wrap stored
-    //    anywhere, so it's the only way old DM history stays decryptable.
+    //    anywhere — so it's the only way old DM history stays decryptable.
     //    It keeps updating for as long as the account only has one trusted
     //    device (the common case, and exactly the situation the old scheme
-    //    assumed), then freezes the moment a second device joins, from
+    //    assumed), then freezes the moment a second device joins — from
     //    that point on it just serves as a fixed fallback key for whichever
     //    device was original, rather than a live "latest device" pointer
     //    that would otherwise silently break DMs every time someone signs
@@ -466,7 +466,7 @@ export class Registry {
         const c = await this.state.storage.get(`chat:${cid}`);
         if (c && c.type === 'dm' && c.memberIds.includes(other.id)) {
           // Re-adding someone whose chat you'd previously removed from your
-          // own list should bring it back, you clearly want to talk to them
+          // own list should bring it back — you clearly want to talk to them
           // again, so there's no reason to leave it hidden.
           const hidden = (await this.state.storage.get(`hiddenChats:${me.id}`)) || {};
           if (hidden[cid]) {
@@ -478,10 +478,10 @@ export class Registry {
       }
 
       // Not in *my* list, but "Delete chat" only ever removes a DM from the
-      // deleter's own userChats, the other side (and the underlying
+      // deleter's own userChats — the other side (and the underlying
       // ChatRoom/message history) is untouched. So before minting a brand
       // new chat (and a brand new, empty history) for this pair, check
-      // whether the *other* person still has one, if so, just re-join that
+      // whether the *other* person still has one — if so, just re-join that
       // same chat instead. Skipping this check is exactly how the earlier
       // "duplicate account/chat" bug happened.
       const otherChatIds = (await this.state.storage.get(`userChats:${other.id}`)) || [];
@@ -562,7 +562,7 @@ export class Registry {
       return json({ ok: true, chat, leaverName: user.displayName });
     }
 
-    // Removes a DM from just this user's own chat list, purely a per-user
+    // Removes a DM from just this user's own chat list — purely a per-user
     // preference (like notify-prefs), never touches the shared chat record
     // or the other person's list, so it's safe for one side of a duplicate
     // conversation to clean up without affecting the other. It automatically
@@ -581,7 +581,7 @@ export class Registry {
       return json({ ok: true });
     }
 
-    // Permanently removes a DM from just this user's own chat list, unlike
+    // Permanently removes a DM from just this user's own chat list — unlike
     // /hide-chat, it does NOT come back on a new message. Still only ever
     // touches the caller's own userChats: the other person's list, the
     // shared chat record, and the message history are all untouched, and
@@ -602,7 +602,7 @@ export class Registry {
       return json({ ok: true });
     }
 
-    // A purely per-user display preference (sorted to the top client-side),
+    // A purely per-user display preference (sorted to the top client-side) —
     // doesn't affect the other person's view of the same chat at all.
     if (request.method === 'POST' && url.pathname === '/pin-chat') {
       const { pinHash, chatId, pinned: shouldPin } = await request.json();
@@ -625,7 +625,7 @@ export class Registry {
       return json({ ok: true, userId: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, isAdmin: admins.includes(user.id) });
     }
 
-    // Per-user call history, each client writes its own side of a call
+    // Per-user call history — each client writes its own side of a call
     // independently once it ends (see /api/calls/log), so no cross-user name
     // lookup is needed here: the caller already knows who they dialed, and
     // the callee already got the caller's name/avatar in the incoming offer.
@@ -661,7 +661,7 @@ export class Registry {
     // ---- Admin roster: lightweight stand-in for "HR-linked onboarding" ----
     // No real HR system exists to source this from, so an admin pre-adds a
     // person by name/department, gets a freshly generated PIN back exactly
-    // once (never stored in plaintext, same as every other PIN in this
+    // once (never stored in plaintext — same as every other PIN in this
     // app), and hands it to them directly. The first time that PIN is
     // actually used, /session claims the entry and pre-fills their profile.
     if (request.method === 'GET' && url.pathname === '/admin/roster') {
@@ -686,12 +686,12 @@ export class Registry {
       if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: 'invalid_email' }, 400);
 
       // Generating a second PIN for a name that's already on the roster
-      // creates a genuinely separate account, not a second way in for the
-      // same person, because everything (chats, keys, message history) is
+      // creates a genuinely separate account — not a second way in for the
+      // same person — because everything (chats, keys, message history) is
       // keyed off whoever claims each PIN. If that PIN reaches the same
       // person again, they end up as two different identities with their
       // history split across both, which looks exactly like "their messages
-      // disappeared." This won't silently do that, it asks first, unless
+      // disappeared." This won't silently do that — it asks first, unless
       // the admin explicitly confirms they mean to (e.g. two people who
       // happen to share a name).
       if (!force) {
@@ -739,7 +739,7 @@ export class Registry {
 
       // Once the PIN has actually been emailed to the person, there's no
       // reason for it to also sit in this API response / the admin's own
-      // screen, the fewer places a shared secret is displayed, the better,
+      // screen — the fewer places a shared secret is displayed, the better,
       // and the person will also be forced to change it on first login
       // anyway (see /session's mustChangePin), so the admin never needs it
       // again after this point. If email delivery failed (or wasn't
@@ -760,7 +760,7 @@ export class Registry {
     }
 
     // ---- Global message retention ----
-    // A single admin-set window applies everywhere, 0/absent means "keep
+    // A single admin-set window applies everywhere — 0/absent means "keep
     // forever" (the default, no behavior change unless an admin opts in).
     // The actual purge happens on a daily Cron Trigger (see the `scheduled`
     // export), which reads this value and asks every ChatRoom to drop
@@ -783,7 +783,7 @@ export class Registry {
     }
 
     // ---- Device lock management ----
-    // Lists everyone who's ever logged in (not just admin-roster invites,
+    // Lists everyone who's ever logged in (not just admin-roster invites —
     // this covers self-created PINs too) with whether their PIN is currently
     // bound to a device, so an admin can find and reset anyone's lock.
     if (request.method === 'GET' && url.pathname === '/admin/users') {
@@ -799,19 +799,19 @@ export class Registry {
     }
 
     // Admin status is account-level (controls access to this Admin Console)
-    // and is completely separate from who created a given group, creating
+    // and is completely separate from who created a given group — creating
     // a group doesn't make you its "admin" in any special sense here; every
     // member of a group has the same abilities (see /leave-group etc.).
     // Anyone already an admin can promote or demote anyone else, including
-    // themselves, EXCEPT the last remaining admin can't demote themselves,
+    // themselves, EXCEPT the last remaining admin can't demote themselves —
     // otherwise the account roster/retention/device panel would become
     // permanently unreachable with no way back in short of editing storage
     // directly.
     // Recovery hatch for "I should be admin but I'm not, and there's no
-    // admin left who can promote me", e.g. testing with a different PIN
+    // admin left who can promote me" — e.g. testing with a different PIN
     // than whichever one happened to be first through the door when this
     // was originally deployed. Gated entirely by ADMIN_BOOTSTRAP_KEY, a
-    // secret only settable via `wrangler secret put`, nobody without
+    // secret only settable via `wrangler secret put` — nobody without
     // Cloudflare access to this project can ever call this successfully,
     // regardless of whether they know this endpoint exists. If the secret
     // was never set, this always fails closed.
@@ -864,7 +864,7 @@ export class Registry {
       if (!pinHash) return json({ error: 'not_found' }, 404);
       const user = await this.state.storage.get(`user:${pinHash}`);
       if (!user) return json({ error: 'not_found' }, 404);
-      // Clears ALL trusted devices, not just one, after this, the very next
+      // Clears ALL trusted devices, not just one — after this, the very next
       // device to log in with the (still-unchanged) PIN is auto-trusted again,
       // same as a brand-new account. That's the intentional "lost every
       // device" escape hatch; if only one of several devices was lost, the
@@ -881,7 +881,7 @@ export class Registry {
     // ---- Mandatory PIN change (closes the "admin already knows the PIN"
     // window for roster-issued accounts) ----
     // Authenticated by knowing the CURRENT pin hash (same trust model as
-    // every other endpoint here), the point isn't stronger auth, it's that
+    // every other endpoint here) — the point isn't stronger auth, it's that
     // completing this step is what finally binds a device and stops the
     // admin-issued PIN from being usable as a permanent credential at all.
     if (request.method === 'POST' && url.pathname === '/change-pin') {
@@ -913,7 +913,7 @@ export class Registry {
     // ---- Multi-device trust: linking a new device ----
     // A device that already knows the correct PIN but isn't yet trusted
     // can't just be let in (that's the whole "I know their PIN" problem the
-    // user asked to mitigate), it has to be vouched for by a device that's
+    // user asked to mitigate) — it has to be vouched for by a device that's
     // already trusted. This endpoint starts that: it generates a short code
     // and pushes an approval prompt to every device already signed in on
     // this account. The new device displays the SAME code on its own screen
@@ -939,7 +939,7 @@ export class Registry {
           await stub.fetch('https://internal/push-direct', { method: 'POST', body: payload });
         } catch (e) {}
       }
-      // The code is returned here so the REQUESTING device can display it,
+      // The code is returned here so the REQUESTING device can display it —
       // it's the one that needs to show it to whoever holds a trusted
       // device, not the other way around. It's already tied to this one
       // pending request/deviceId pair and expires in 10 minutes, so handing
@@ -949,7 +949,7 @@ export class Registry {
     }
 
     if (request.method === 'POST' && url.pathname === '/device-link/approve') {
-      // Called from an ALREADY-trusted device, pinHash here is that
+      // Called from an ALREADY-trusted device — pinHash here is that
       // device's own (current, working) credential, not the new device's.
       const { pinHash, code } = await request.json();
       if (!pinHash || !code) return json({ error: 'missing_fields' }, 400);
@@ -972,7 +972,7 @@ export class Registry {
       await this.state.storage.put(`userById:${user.id}`, userByIdSnapshot(user));
       // Returned so the APPROVING device can immediately re-wrap its chat
       // keys for the newly-trusted device (see rewrapAllChatsForDevice on
-      // the client), without this, the new device would sit there able to
+      // the client) — without this, the new device would sit there able to
       // sign in but unable to decrypt anything until someone happened to
       // send a fresh message in every chat.
       return json({ ok: true, approvedDeviceId });
@@ -998,7 +998,7 @@ export class Registry {
       return json({ status: 'pending' });
     }
 
-    // Internal-only, used by the scheduled retention purge to enumerate
+    // Internal-only — used by the scheduled retention purge to enumerate
     // every chat that's ever been created without needing to scan every
     // user's chat list individually.
     if (request.method === 'GET' && url.pathname === '/internal/all-chat-ids') {
@@ -1014,7 +1014,7 @@ export class Registry {
   }
 }
 
-// One instance per user (keyed by userId), holds a live WebSocket per open
+// One instance per user (keyed by userId) — holds a live WebSocket per open
 // tab/device for that user, independent of which single chat's ChatRoom
 // socket they're connected to. Used purely to push "you have a message"
 // notifications so a message in a chat you're not currently looking at
@@ -1023,7 +1023,7 @@ export class Registry {
 // one case the old Set-of-sockets model couldn't handle: the client
 // eventually notices (its own 40s dead-socket check) and reconnects, but the
 // *old* dead socket was never removed server-side, so `sessions.size > 0`
-// kept reporting "online" for someone who'd been gone for minutes, exactly
+// kept reporting "online" for someone who'd been gone for minutes — exactly
 // what "sometimes it says online when they're not" looks like. Tracking a
 // last-ping timestamp per socket and sweeping anything stale before every
 // presence check (and periodically via alarm, so a socket that nobody ever
@@ -1063,7 +1063,7 @@ export class UserChannel {
       this.sessions.set(server, Date.now());
       const cleanup = async () => {
         this.sessions.delete(server);
-        // Only the *last* tab/device closing counts as "going offline",
+        // Only the *last* tab/device closing counts as "going offline" —
         // someone with two tabs open shouldn't flicker to offline when one closes.
         if (this.sessions.size === 0) {
           await this.state.storage.put('lastSeen', Date.now());
@@ -1071,7 +1071,7 @@ export class UserChannel {
       };
       server.addEventListener('close', cleanup);
       server.addEventListener('error', cleanup);
-      // Heartbeat only, this socket is otherwise server-to-client-only
+      // Heartbeat only — this socket is otherwise server-to-client-only
       // (it exists purely to push "you have a message" pings). The client
       // uses the pong to detect a mobile connection that's silently died
       // while still reporting itself as open; the timestamp recorded here
@@ -1101,7 +1101,7 @@ export class UserChannel {
       // Also fan out a real OS push to every registered device, so a message
       // still surfaces even if the app/tab isn't open anywhere at all. This
       // fires regardless of whether a live WS session also got the in-app
-      // ding, a phone with the app closed and a desktop with it open are
+      // ding — a phone with the app closed and a desktop with it open are
       // both "this user", and we can't tell from here which subscription
       // belongs to which without a lot more bookkeeping, so we accept the
       // occasional double notification on a device that has it open.
@@ -1111,12 +1111,12 @@ export class UserChannel {
         const notifyPrefs = (await this.state.storage.get('notifyPrefs')) || {};
         const pref = notifyPrefs[data.chatId] || 'all';
 
-        // Messages are end-to-end encrypted now, this Durable Object only
+        // Messages are end-to-end encrypted now — this Durable Object only
         // ever sees ciphertext, so it can no longer read message text to
         // build a real preview or test the "mentions only" pref against it.
         // Mute still fully suppresses (that's just a boolean, no content
         // needed); "mentions only" degrades to "all" for a background OS
-        // push specifically, the in-app path (still open, socket connected)
+        // push specifically — the in-app path (still open, socket connected)
         // decrypts client-side and applies the real mention check there.
         const shouldPush = pref !== 'mute';
 
@@ -1130,10 +1130,10 @@ export class UserChannel {
           for (const sub of subs) {
             try {
               const result = await sendWebPushWithRetry(sub, pushPayload, this.env);
-              // 404/410 = the browser/OS has permanently unsubscribed this endpoint, drop it.
+              // 404/410 = the browser/OS has permanently unsubscribed this endpoint — drop it.
               if (result.status !== 404 && result.status !== 410) stillValid.push(sub);
             } catch (e) {
-              stillValid.push(sub); // transient failure (network, etc.), keep it, don't churn subscriptions on a blip
+              stillValid.push(sub); // transient failure (network, etc.) — keep it, don't churn subscriptions on a blip
             }
           }
           if (stillValid.length !== subs.length) {
@@ -1145,7 +1145,7 @@ export class UserChannel {
       return json({ ok: true, delivered: this.sessions.size, hadNoLiveSession: this.sessions.size === 0 });
     }
 
-    // Call signaling relay, this DO is keyed by the *recipient's* userId, so
+    // Call signaling relay — this DO is keyed by the *recipient's* userId, so
     // whichever side (caller or callee) wants to reach the other posts here
     // via /api/calls/signal and it fans out over the same always-open notify
     // socket already used for message pings. No new connection, no new
@@ -1165,7 +1165,7 @@ export class UserChannel {
       const delivered = this.sessions.size;
 
       // Always push for an incoming call, even when a WebSocket session is
-      // technically still open, "delivered > 0" only means some tab has a
+      // technically still open — "delivered > 0" only means some tab has a
       // live socket, not that it's actually foregrounded. A backgrounded or
       // unfocused tab gets its JS timers/AudioContext throttled by the
       // browser, so the in-page ringtone can die silently while the socket
@@ -1231,14 +1231,14 @@ export class UserChannel {
       return json({ notifyPrefs });
     }
 
-    // Direct self-test, sends to every registered subscription regardless
+    // Direct self-test — sends to every registered subscription regardless
     // of notifyPrefs, and reports back per-subscription success/failure
     // instead of swallowing it, so a bad push service response is visible
     // instead of just "nothing arrived."
     if (request.method === 'POST' && url.pathname === '/push-test') {
       const subs = (await this.state.storage.get('pushSubs')) || [];
       if (!subs.length) return json({ delivered: 0, total: 0, error: 'no_subscriptions' });
-      const payload = { title: 'PArA PIN', body: 'Test notification, if you see this, push works.', chatId: null };
+      const payload = { title: 'PArA PIN', body: 'Test notification — if you see this, push works.', chatId: null };
       let delivered = 0;
       const errors = [];
       const stillValid = [];
@@ -1259,7 +1259,7 @@ export class UserChannel {
       return json({ delivered, total: subs.length, errors: errors.length ? errors : undefined });
     }
 
-    // Generic "send this exact push to this user" primitive, used for things
+    // Generic "send this exact push to this user" primitive — used for things
     // that aren't a chat message at all, like alerting admins when someone
     // claims their HR-onboarding roster PIN for the first time.
     if (request.method === 'POST' && url.pathname === '/push-direct') {
@@ -1342,7 +1342,7 @@ export class ChatRoom {
       // The only things a client pushes *to* us over this socket are an
       // ephemeral "I'm typing" ping and a heartbeat ping (the client uses the
       // pong to tell a genuinely dead-but-still-"open" mobile connection
-      // apart from one that's just quiet), everything else (send, delete,
+      // apart from one that's just quiet) — everything else (send, delete,
       // read) goes through HTTP so it's reliable/persisted even if the socket
       // happens to be reconnecting at that moment.
       server.addEventListener('message', (ev) => {
@@ -1363,8 +1363,8 @@ export class ChatRoom {
       return json({ messages: msgs });
     }
 
-    // Lets a caller learn "what would this chat show in a chat list", last
-    // message plus how many are unread for a given user, without pulling the
+    // Lets a caller learn "what would this chat show in a chat list" — last
+    // message plus how many are unread for a given user — without pulling the
     // full history. Used at login to seed every chat's preview/unread count in
     // one shot instead of only ever learning about new messages from a live
     // socket while the app happens to be open.
@@ -1377,7 +1377,7 @@ export class ChatRoom {
         const lastRead = (await this.state.storage.get(`lastRead:${userId}`)) || 0;
         // System messages ("X left the group") have no fromUserId, so
         // `!== userId` would count every one of them as unread from
-        // someone, exclude them explicitly rather than relying on that.
+        // someone — exclude them explicitly rather than relying on that.
         unreadCount = msgs.filter((m) => m.ts > lastRead && m.type !== 'system' && m.fromUserId !== userId).length;
       }
       return json({ lastMessage, unreadCount });
@@ -1396,7 +1396,7 @@ export class ChatRoom {
     // has set a retention window. Drops anything older than the cutoff and
     // hands back the R2 keys of any attachments that went with them, since
     // only the caller (which holds the MEDIA binding context) can delete
-    // those, this Durable Object only manages the message list itself.
+    // those — this Durable Object only manages the message list itself.
     if (request.method === 'POST' && url.pathname === '/purge-old') {
       const { cutoffTs } = await request.json();
       if (!cutoffTs) return json({ error: 'missing_cutoff' }, 400);
@@ -1415,7 +1415,7 @@ export class ChatRoom {
       return json({ removed: toRemove.length, mediaKeys });
     }
 
-    // Messages are end-to-end encrypted client-side, this Durable Object
+    // Messages are end-to-end encrypted client-side — this Durable Object
     // only ever stores/relays opaque ciphertext (+ IV) it cannot read.
     // `alg` is just metadata for the client ('dm' vs 'group', which key to
     // use) and carries no security weight on its own. Messages sent before
@@ -1428,7 +1428,7 @@ export class ChatRoom {
       if (!hasCiphertext && !hasAttachment) return json({ error: 'empty' }, 400);
       // Ciphertext is base64 and ~1.33x the encrypted byte length, and a 4000
       // "character" plaintext cap can be up to ~12KB of UTF-8 bytes once
-      // heavy-Unicode (CJK, emoji, etc.) is accounted for, slicing a base64
+      // heavy-Unicode (CJK, emoji, etc.) is accounted for — slicing a base64
       // string to fit an undersized cap would silently corrupt it (breaks
       // GCM auth, decrypt just fails with no clear reason), so this rejects
       // oversized input outright instead of truncating it.
@@ -1462,7 +1462,7 @@ export class ChatRoom {
           fileIv: attachment.fileIv ? String(attachment.fileIv).slice(0, 50) : null,
         };
       }
-      // Only the id is stored now, the server can no longer read the
+      // Only the id is stored now — the server can no longer read the
       // original message to snapshot a plaintext quote, so the client
       // re-derives the quoted name/text from its own already-decrypted copy.
       if (replyTo && replyTo.id) {
@@ -1480,7 +1480,7 @@ export class ChatRoom {
     // For a group chat, one AES-256 key is generated client-side and wrapped
     // (encrypted) once per member via a fresh ECDH exchange with that
     // member's public key. This Durable Object just stores/serves those
-    // opaque wrapped copies, it never sees the real group key. Any current
+    // opaque wrapped copies — it never sees the real group key. Any current
     // member may contribute wraps for members who don't have one yet (that's
     // how the group key gets bootstrapped the first time everyone's public
     // key is available).
@@ -1495,7 +1495,7 @@ export class ChatRoom {
 
       // `ifEmpty` is set when a client is establishing a chat's key for the
       // very first time (a random key it just generated locally). Two
-      // people can both reach that moment for the same chat at once, a
+      // people can both reach that moment for the same chat at once — a
       // Durable Object processes requests one at a time, so checking
       // "is this chat still keyless RIGHT NOW" here is a genuinely atomic
       // gate, unlike anything a client could coordinate on its own. First
@@ -1511,7 +1511,7 @@ export class ChatRoom {
       for (const [memberId, entry] of Object.entries(incoming)) {
         if (!entry || typeof entry !== 'object') continue;
         if (isWrapObj(entry)) {
-          // Legacy flat shape, kept for compatibility, but current clients
+          // Legacy flat shape — kept for compatibility, but current clients
           // always send the nested per-device shape below.
           wraps[memberId] = sanitizeWrap(entry);
           continue;
@@ -1530,7 +1530,7 @@ export class ChatRoom {
     }
 
     // Escape hatch for a chat that's permanently stuck "waiting for
-    // encryption", usually leftover/partial wrap data from some past
+    // encryption" — usually leftover/partial wrap data from some past
     // failure mode that satisfies `Object.keys(wraps).length > 0` (blocking
     // the `ifEmpty` establish gate above) without actually containing a
     // usable wrap for every member's current device. Wiping it lets the
@@ -1596,7 +1596,7 @@ export class ChatRoom {
       // One reaction per user per message. Figure out what they had *before*
       // touching anything, then remove it from wherever it lives, then only
       // re-add the new emoji if it's different from what they just had
-      // (i.e. tapping your own current reaction again clears it, a toggle).
+      // (i.e. tapping your own current reaction again clears it — a toggle).
       const hadThisEmoji = (msg.reactions[emoji] || []).includes(userId);
       for (const key of Object.keys(msg.reactions)) {
         msg.reactions[key] = msg.reactions[key].filter((id) => id !== userId);
@@ -1658,7 +1658,7 @@ export default {
         return channelStub.fetch(request);
       }
 
-      // Image upload, client sends already-resized/compressed bytes directly
+      // Image upload — client sends already-resized/compressed bytes directly
       // as the request body. Auth required so randoms can't fill your bucket;
       // the resulting key is an unguessable UUID, serving is unauthenticated
       // (same trust model as e.g. a signed CDN link).
@@ -1669,7 +1669,7 @@ export default {
 
         let contentType = request.headers.get('content-type') || 'application/octet-stream';
         // Anything that a browser would treat as *active* content (executes script,
-        // renders as a page in the current origin) gets rejected outright, this is
+        // renders as a page in the current origin) gets rejected outright — this is
         // a shared-file box, not a place to host HTML/SVG that could carry a script.
         const BLOCKED_TYPES = ['text/html', 'application/xhtml+xml', 'image/svg+xml', 'text/javascript', 'application/javascript', 'application/x-javascript'];
         if (BLOCKED_TYPES.some((t) => contentType.toLowerCase().startsWith(t))) {
@@ -1725,7 +1725,7 @@ export default {
         return res;
       }
 
-      // Authenticated by the OLD pin hash, you have to actually know the
+      // Authenticated by the OLD pin hash — you have to actually know the
       // current PIN to change it, same as any other authenticated call here.
       if (request.method === 'POST' && url.pathname === '/api/change-pin') {
         const oldPinHash = authHash(request, url);
@@ -1738,7 +1738,7 @@ export default {
         });
       }
 
-      // The requesting (not-yet-trusted) device's own pinHash, it already
+      // The requesting (not-yet-trusted) device's own pinHash — it already
       // knows the correct PIN, that's not in question; what it doesn't have
       // yet is a trusted device to vouch for it.
       if (request.method === 'POST' && url.pathname === '/api/device-link/request') {
@@ -1840,7 +1840,7 @@ export default {
         });
       }
 
-      // Not gated by an existing admin session on purpose, see the Registry
+      // Not gated by an existing admin session on purpose — see the Registry
       // handler's comment. The pinHash still has to belong to a real,
       // already-registered account; the ADMIN_BOOTSTRAP_KEY check is what
       // actually protects this.
@@ -1891,9 +1891,9 @@ export default {
         return res;
       }
 
-      // 1:1 voice calling, relays a WebRTC offer/answer/ice-candidate/end
+      // 1:1 voice calling — relays a WebRTC offer/answer/ice-candidate/end
       // signal from the caller to the callee (or back), over the target's
-      // UserChannel notify socket. The Worker never sees any audio, this is
+      // UserChannel notify socket. The Worker never sees any audio — this is
       // purely signaling, same trust boundary as everything else here.
       if (request.method === 'POST' && url.pathname === '/api/calls/signal') {
         const pinHash = authHash(request, url);
@@ -1920,7 +1920,7 @@ export default {
         return res;
       }
 
-      // Self-scoped call history, each side of a call writes its own log
+      // Self-scoped call history — each side of a call writes its own log
       // entry once the call ends, so this never needs to look up the other
       // party's name/avatar server-side (the caller already knows who they
       // dialed; the callee already got the caller's name in the offer).
@@ -1951,7 +1951,7 @@ export default {
       // ICE server list for the WebRTC call. STUN alone (Google's public
       // servers) gets two peers connected directly whenever their NATs allow
       // it, which covers most home/office networks. Symmetric NAT or a
-      // locked-down corporate firewall needs a TURN relay to work at all,
+      // locked-down corporate firewall needs a TURN relay to work at all —
       // Cloudflare Realtime's TURN service is the intended fit here (same
       // Cloudflare account, pay-per-GB, short-lived credentials), wired up as
       // soon as CF_TURN_KEY_ID + CF_TURN_API_TOKEN secrets exist. Until then
@@ -2010,7 +2010,7 @@ export default {
       }
 
       // Sends a real push straight to whatever's registered for the caller,
-      // bypassing the whole notify/mute pipeline, a direct way to answer
+      // bypassing the whole notify/mute pipeline — a direct way to answer
       // "did the browser subscribe, and did the push actually arrive" without
       // guessing from a chat message that might be getting muted/filtered.
       if (request.method === 'POST' && url.pathname === '/api/push/test') {
@@ -2041,7 +2041,7 @@ export default {
 
       // Per-chat notification preference ('all' | 'mentions' | 'mute'), stored
       // server-side per user so it applies to real push (app fully closed) as
-      // well as in-app ding/badge, not just a local toggle that a push
+      // well as in-app ding/badge — not just a local toggle that a push
       // notification would ignore.
       if (request.method === 'GET' && url.pathname === '/api/notify-prefs') {
         const pinHash = authHash(request, url);
@@ -2174,7 +2174,7 @@ export default {
           return json(resBody, res.status);
         }
 
-        // PATCH, edit
+        // PATCH — edit
         const { ciphertext, iv } = await request.json();
         const res = await roomStub.fetch('https://internal/edit', {
           method: 'POST',
@@ -2185,7 +2185,7 @@ export default {
       }
 
       // /api/chats/:id/messages, /api/chats/:id/ws, /api/chats/:id/read, /api/chats/:id/read-state
-      // /api/chats/:id/e2ee-wraps, stores/serves the per-member wrapped
+      // /api/chats/:id/e2ee-wraps — stores/serves the per-member wrapped
       // copies of a group's E2EE key. See ChatRoom's own handler for how the
       // wrap/unwrap scheme works; this route just gates it to chat members.
       const e2eeWrapsMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/e2ee-wraps$/);
@@ -2206,7 +2206,7 @@ export default {
         }
       }
 
-      // /api/chats/:id/e2ee-wraps/reset, clears a chat's stored key wraps so
+      // /api/chats/:id/e2ee-wraps/reset — clears a chat's stored key wraps so
       // it can freshly re-establish, for the (thankfully rare) case where a
       // chat is permanently stuck "waiting for encryption" because of
       // partial/stale wrap data. Self-service: any member can trigger it.
@@ -2224,7 +2224,7 @@ export default {
         return roomStub.fetch('https://internal/e2ee-wraps/reset', { method: 'POST' });
       }
 
-      // /api/chats/:id/hide, removes a chat from just this user's own list
+      // /api/chats/:id/hide — removes a chat from just this user's own list
       // (see Registry's /hide-chat for the per-user semantics).
       const hideMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/hide$/);
       if (hideMatch && request.method === 'POST') {
@@ -2237,7 +2237,7 @@ export default {
         });
       }
 
-      // /api/chats/:id/delete, permanent (for this user only), unlike /hide.
+      // /api/chats/:id/delete — permanent (for this user only), unlike /hide.
       const deleteMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/delete$/);
       if (deleteMatch && request.method === 'POST') {
         const [, chatId] = deleteMatch;
@@ -2249,7 +2249,7 @@ export default {
         });
       }
 
-      // /api/chats/:id/pin, per-user pin-to-top preference.
+      // /api/chats/:id/pin — per-user pin-to-top preference.
       const pinMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/pin$/);
       if (pinMatch && request.method === 'POST') {
         const [, chatId] = pinMatch;
@@ -2342,7 +2342,7 @@ export default {
   },
 
   // Runs once a day (see wrangler.jsonc's triggers.crons). A no-op unless an
-  // admin has explicitly set a retention window, the default is "keep
+  // admin has explicitly set a retention window — the default is "keep
   // everything forever," matching how this worked before retention existed.
   async scheduled(event, env, ctx) {
     try {
@@ -2367,7 +2367,7 @@ export default {
             await Promise.all(mediaKeys.map((key) => env.MEDIA.delete(key).catch(() => {})));
           }
         } catch (e) {
-          // One chat failing shouldn't stop the rest of the sweep, it'll be
+          // One chat failing shouldn't stop the rest of the sweep — it'll be
           // retried on tomorrow's run regardless.
         }
       }
