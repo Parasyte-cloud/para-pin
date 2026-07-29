@@ -204,11 +204,26 @@
      input type. */
   .nav-tab:active{ transform:scale(0.92); }
   .nav-tab.active{ color:var(--text-hi); }
-  .nav-tab-icon{ font-size:19px; line-height:1; }
-  .nav-tab span{ font-size:9.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
+  /* Icon/label grow on the active tab (spring, ease-out-back) rather than
+     just changing color, this is what makes the pill read as "morphing"
+     onto the tab instead of a flat highlight swap. Ratios match the
+     24px->28px icon / 11px->12px label spec, scaled down to this nav's
+     smaller base sizes (6 tabs vs 5 in the reference). */
+  .nav-tab-icon{
+    font-size:19px; line-height:1; display:inline-block;
+    transition:transform .3s cubic-bezier(.34,1.56,.64,1);
+  }
+  .nav-tab.active .nav-tab-icon{ transform:scale(1.17); }
+  .nav-tab span{
+    font-size:9.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%;
+    display:inline-block; transition:transform .3s cubic-bezier(.34,1.56,.64,1);
+  }
+  .nav-tab.active span{ transform:scale(1.09); }
   #bottomNav .nav-tab-avatar{
     width:22px; height:22px; border-radius:50%; font-size:9px; margin:0;
+    transition:transform .3s cubic-bezier(.34,1.56,.64,1);
   }
+  .nav-tab.active .nav-tab-avatar{ transform:scale(1.17); }
   .nav-tab-badge{
     position:absolute; top:0px; right:calc(50% - 22px); min-width:16px; height:16px; padding:0 4px;
     border-radius:999px; background:linear-gradient(135deg, var(--ice), var(--fire)); color:#0a0d12;
@@ -287,10 +302,15 @@
   }
   .meeting-tile{
     position:relative; border-radius:14px; overflow:hidden; background:#161616;
-    display:flex; align-items:center; justify-content:center; min-height:100px;
+    min-height:100px;
   }
-  .meeting-tile video{ width:100%; height:100%; object-fit:cover; }
-  .meeting-tile .avatar{ width:56px; height:56px; font-size:20px; }
+  .meeting-tile video{
+    position:absolute; inset:0; width:100%; height:100%; object-fit:cover; z-index:1;
+  }
+  .meeting-tile .avatar{
+    position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+    width:56px; height:56px; font-size:20px; z-index:0;
+  }
   .meeting-tile-name{
     position:absolute; left:8px; bottom:6px; font-size:11.5px; font-weight:600; color:#fff;
     text-shadow:0 1px 4px rgba(0,0,0,0.7); background:rgba(0,0,0,0.35); padding:2px 8px; border-radius:999px;
@@ -441,6 +461,16 @@
     padding:2px 7px; cursor:pointer; color:var(--text-mid);
   }
   .reaction-pill.mine{ border-color:rgba(0,212,255,0.5); background:rgba(0,212,255,0.12); color:var(--text-hi); }
+
+  /* Collapsed stand-in for the reaction row, shown until the bubble above it
+     is long-pressed/right-clicked, see wireMessageReactionReveal. Small and
+     quiet on purpose, a hint that something's there rather than the full
+     breakdown. */
+  .reaction-peek{
+    align-self:flex-start; font-size:10.5px; color:var(--text-low); background:rgba(var(--tint-rgb),0.05);
+    border:1px solid var(--glass-brd); border-radius:10px; padding:1px 6px; margin:-4px 0 2px 4px; cursor:pointer;
+  }
+  .reaction-peek.me{ align-self:flex-end; margin:-4px 4px 2px 0; }
 
   .system-msg{
     align-self:center; font-size:10.5px; color:var(--text-low); font-style:italic;
@@ -618,7 +648,10 @@
        message input. */
     #bottomNavWrap{
       position:absolute; left:0; right:0;
-      bottom:calc(28px + env(safe-area-inset-bottom, 0px));
+      /* Was 28px, which put the pill's bottom edge a couple px BELOW the
+         brand footer's top edge (footer occupies ~30px of real height) —
+         they visually touched/overlapped. Bumped so there's a clear gap. */
+      bottom:calc(40px + env(safe-area-inset-bottom, 0px));
       padding:0 10px; z-index:20; pointer-events:none;
     }
     #bottomNav{ pointer-events:auto; }
@@ -1515,6 +1548,11 @@
   let convSubOverride = null; // transient "X is typing..." swap-in for the active chat
   let editingMessageId = null;
   let openReactPickerFor = null;
+  // Reactions stay hidden under a message until it's long-pressed (or
+  // right-clicked), same idea as iMessage tapbacks, keeps a busy thread from
+  // turning into a wall of pill rows. Membership here is what's currently
+  // revealed, cleared whenever the chat changes.
+  let revealedReactionsFor = new Set();
   const QUICK_REACTIONS = ['👍','❤️','😂','😮','😢','🙏'];
   let presenceByUser = {}; // userId -> { online, lastSeen }
   let presencePollTimer = null;
@@ -1574,6 +1612,15 @@
     });
   }
 
+  // Turns the server's rate_limited retryAfterMs into "2 minutes" / "1 hour"
+  // instead of showing a raw millisecond count to the person waiting it out.
+  function formatRetryAfter(ms){
+    const mins = Math.max(1, Math.ceil((ms || 0) / 60000));
+    if (mins < 60) return mins === 1 ? '1 minute' : `${mins} minutes`;
+    const hours = Math.ceil(mins / 60);
+    return hours === 1 ? '1 hour' : `${hours} hours`;
+  }
+
   let pendingPin = null; // held only in memory long enough to hash + bootstrap the session
 
   async function initSession(pin){
@@ -1590,6 +1637,8 @@
         showSessionBanner('This PIN has been disabled. Contact your admin if that seems wrong.');
       } else if (r.body && r.body.error === 'device_approval_required') {
         openDeviceApprovalFlow();
+      } else if (r.body && r.body.error === 'rate_limited') {
+        showSessionBanner(`Too many sign-in attempts. Try again in ${formatRetryAfter(r.body.retryAfterMs)}.`);
       } else {
         showSessionBanner(r.networkError ? "Can't reach the PArA PIN server. Check your connection." : 'Something went wrong starting your session.');
       }
@@ -2013,7 +2062,7 @@
     unreadCounts = {};
     updateTitleBadge();
     if (editingMessageId) cancelEdit();
-    openReactPickerFor = null; typingUsers = {}; readState = {}; presenceByUser = {};
+    openReactPickerFor = null; revealedReactionsFor = new Set(); typingUsers = {}; readState = {}; presenceByUser = {};
     stopPresencePolling();
     myPinHash = null; myUserId = null; myDisplayName = null; myRawPin = null;
     sessionChats = []; messagesByChat = {}; activeChatId = null;
@@ -2607,19 +2656,31 @@
       row.appendChild(bubble);
       messagesEl.appendChild(row);
 
-      if (m.reactions && Object.keys(m.reactions).length){
-        const pillRow = document.createElement('div');
-        pillRow.className = 'reaction-row' + (isMe ? ' me' : '');
-        Object.entries(m.reactions).forEach(([emoji, userIds])=>{
-          if (!userIds.length) return;
-          const pill = document.createElement('div');
-          pill.className = 'reaction-pill' + (userIds.includes(myUserId) ? ' mine' : '');
-          pill.dataset.id = m.id;
-          pill.dataset.emoji = emoji;
-          pill.textContent = emoji + ' ' + userIds.length;
-          pillRow.appendChild(pill);
-        });
-        messagesEl.appendChild(pillRow);
+      const reactionEntries = m.reactions ? Object.entries(m.reactions).filter(([, ids]) => ids.length) : [];
+      if (reactionEntries.length){
+        if (revealedReactionsFor.has(m.id)){
+          const pillRow = document.createElement('div');
+          pillRow.className = 'reaction-row' + (isMe ? ' me' : '');
+          reactionEntries.forEach(([emoji, userIds])=>{
+            const pill = document.createElement('div');
+            pill.className = 'reaction-pill' + (userIds.includes(myUserId) ? ' mine' : '');
+            pill.dataset.id = m.id;
+            pill.dataset.emoji = emoji;
+            pill.textContent = emoji + ' ' + userIds.length;
+            pillRow.appendChild(pill);
+          });
+          messagesEl.appendChild(pillRow);
+        } else {
+          // Hidden by default (long-press/right-click the bubble to reveal
+          // the full breakdown), just a small always-visible peek so a
+          // reacted-to message doesn't look completely unremarkable.
+          const peek = document.createElement('div');
+          peek.className = 'reaction-peek' + (isMe ? ' me' : '');
+          peek.dataset.msgId = m.id;
+          const total = reactionEntries.reduce((sum, [, ids]) => sum + ids.length, 0);
+          peek.textContent = reactionEntries[0][0] + (total > 1 ? ` ${total}` : '');
+          messagesEl.appendChild(peek);
+        }
       }
     });
     messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -2637,6 +2698,54 @@
       if (activeChatId === chatId) renderConv();
     }
   }
+
+  function toggleReactionsRevealed(messageId){
+    if (!messageId) return;
+    if (revealedReactionsFor.has(messageId)) revealedReactionsFor.delete(messageId);
+    else revealedReactionsFor.add(messageId);
+    renderConv();
+  }
+
+  // ---------- reactions: reveal on long-press / right-click ----------
+  // Same affordance as the chat-row context menu (wireChatRowContextMenu
+  // above), reused here instead of introducing a second interaction model.
+  // A tap that was actually a peek badge click also reveals, no need to
+  // wait out a long-press when the collapsed indicator is right there.
+  (function wireMessageReactionReveal(){
+    const isOtherInteractive = (target) => target.closest(
+      '.msg-image, .voice-note, .reply-quote, .msg-action-btn, .msg-react-btn, .react-option, .reaction-pill, .file-card, .msg-video'
+    );
+    let pressTimer = null;
+    let longPressed = false;
+    const cancel = ()=>{ if (pressTimer){ clearTimeout(pressTimer); pressTimer = null; } };
+    messagesEl.addEventListener('touchstart', (e)=>{
+      const row = e.target.closest('.bubble-row');
+      if (!row || isOtherInteractive(e.target)) return;
+      longPressed = false;
+      pressTimer = setTimeout(()=>{
+        longPressed = true;
+        if (navigator.vibrate) navigator.vibrate(12);
+        toggleReactionsRevealed(row.dataset.msgId);
+      }, 480);
+    }, { passive:true });
+    messagesEl.addEventListener('touchend', cancel);
+    messagesEl.addEventListener('touchmove', cancel);
+    messagesEl.addEventListener('touchcancel', cancel);
+    messagesEl.addEventListener('contextmenu', (e)=>{
+      const row = e.target.closest('.bubble-row');
+      if (!row || isOtherInteractive(e.target)) return;
+      e.preventDefault();
+      toggleReactionsRevealed(row.dataset.msgId);
+    });
+    // A long-press that just toggled the reveal shouldn't also fire
+    // whatever the tap handler below would do for that same element
+    // (lightbox, reply-jump, react picker, etc.).
+    messagesEl.addEventListener('click', (e)=>{
+      if (longPressed){ e.stopImmediatePropagation(); longPressed = false; return; }
+      const peek = e.target.closest('.reaction-peek');
+      if (peek){ toggleReactionsRevealed(peek.dataset.msgId); }
+    }, true);
+  })();
 
   messagesEl.addEventListener('click', async (e)=>{
     const img = e.target.closest('.msg-image');
@@ -4257,9 +4366,18 @@
     if (current) moveNavActivePill(current.dataset.navTab);
   });
 
+  // Most Android browsers support the Vibration API; iOS Safari doesn't
+  // expose one to web content at all, so this is a no-op enhancement there
+  // rather than a hard requirement, guarded so unsupported browsers just
+  // silently skip it.
+  function hapticTap(){
+    try { if (navigator.vibrate) navigator.vibrate(10); } catch (e) {}
+  }
+
   document.querySelectorAll('#bottomNav .nav-tab').forEach(tab=>{
     tab.addEventListener('click', ()=>{
       const name = tab.dataset.navTab;
+      hapticTap();
       setActiveNavTab(name);
       closeAllNavOverlays();
       if (name === 'chats'){
@@ -4518,6 +4636,7 @@
     closeMentionMenu();
     if (msgSearchBar.style.display === 'flex') closeMsgSearch();
     openReactPickerFor = null;
+    revealedReactionsFor = new Set();
     renderConv();
     renderChatList();
     connectSocket(chatId);
@@ -6516,7 +6635,13 @@
       const targetPinHash = await sha256Hex(pin);
       const r = await apiFetch('/contacts', { method:'POST', body: JSON.stringify({ targetPinHash }) });
       if (!r.ok){
-        showDmError(r.body && r.body.error === 'pin_not_found' ? 'No PArA PIN found with that number.' : (r.body && r.body.error === 'cannot_add_self' ? "That's your own PIN." : 'Could not add contact. Try again.'));
+        const err = r.body && r.body.error;
+        showDmError(
+          err === 'pin_not_found' ? 'No PArA PIN found with that number.' :
+          err === 'cannot_add_self' ? "That's your own PIN." :
+          err === 'rate_limited' ? `Too many lookups. Try again in ${formatRetryAfter(r.body.retryAfterMs)}.` :
+          'Could not add contact. Try again.'
+        );
         return;
       }
       if (!sessionChats.some(c => c.id === r.body.chat.id)) sessionChats.push(r.body.chat);
@@ -6599,13 +6724,22 @@
     for (const p of extraPins){
       if (!/^\d{7}$/.test(p)){ showGroupError(`"${p}" isn't a valid 7-digit PIN.`); return; }
     }
+    if (extraPins.length > 40){ showGroupError('Add at most 40 PINs at once, split larger invites into a couple of batches.'); return; }
     if (!name || (selectedContacts.size === 0 && extraPins.length === 0)) return;
     groupCreateBtn.dataset.busy = '1';
     groupCreateBtn.disabled = true;
     try {
       const memberPinHashes = await Promise.all(extraPins.map(p => sha256Hex(p)));
       const r = await apiFetch('/groups', { method:'POST', body: JSON.stringify({ name, memberIds: [...selectedContacts], memberPinHashes }) });
-      if (!r.ok){ showGroupError('Could not create group. Try again.'); return; }
+      if (!r.ok){
+        const err = r.body && r.body.error;
+        showGroupError(
+          err === 'rate_limited' ? `Too many PIN lookups. Try again in ${formatRetryAfter(r.body.retryAfterMs)}.` :
+          err === 'too_many_members_at_once' ? 'Add at most 40 PINs at once.' :
+          'Could not create group. Try again.'
+        );
+        return;
+      }
       sessionChats.push(r.body.chat);
       activeChatId = r.body.chat.id;
       closeModal('groupOverlay');

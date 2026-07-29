@@ -32,6 +32,42 @@ function sanitizeAvatarUrl(value) {
   return /^\/api\/media\/[A-Za-z0-9_-]{1,100}$/.test(value) ? value : null;
 }
 
+// ================= Rate limiting (PIN brute-force / enumeration defense) =================
+// A PIN is this app's ONLY credential, a flat ~9,000,000-value numeric space
+// (see the /roster generator below) with no separate password. Two endpoints
+// turn that into a brute-forceable oracle if left unthrottled:
+//   /session  - logging in with a PIN that happens to belong to someone else
+//               IS account takeover, and any never-before-seen PIN silently
+//               gets a fresh account created for it, so this doubles as a
+//               "does this PIN exist yet" oracle too.
+//   /contact and /group - confirm whether a given PIN belongs to a real
+//               account at all (used to add them as a contact / group member).
+// A sliding window counter per key (caller IP pre-login, caller's own user id
+// once authenticated) with an escalating lockout on top makes scripted
+// enumeration of the PIN space impractically slow while staying invisible to
+// normal usage, a real person never comes close to these thresholds.
+async function checkRateLimit(storage, key, { maxAttempts, windowMs, lockoutMs, cost = 1 }) {
+  const now = Date.now();
+  const storeKey = `ratelimit:${key}`;
+  const rec = (await storage.get(storeKey)) || { count: 0, windowStart: now, lockedUntil: 0 };
+  if (rec.lockedUntil && now < rec.lockedUntil) {
+    return { allowed: false, retryAfterMs: rec.lockedUntil - now };
+  }
+  if (now - rec.windowStart > windowMs) {
+    rec.count = 0;
+    rec.windowStart = now;
+    rec.lockedUntil = 0;
+  }
+  rec.count += cost;
+  if (rec.count > maxAttempts) {
+    rec.lockedUntil = now + lockoutMs;
+    await storage.put(storeKey, rec);
+    return { allowed: false, retryAfterMs: lockoutMs };
+  }
+  await storage.put(storeKey, rec);
+  return { allowed: true };
+}
+
 // Builds the cached "public view" of a user that other people's clients can
 // look up via GET /users, kept in its own function so every place that
 // writes it (session, profile edits, key uploads, device resets, admin
@@ -233,8 +269,19 @@ export class Registry {
     const url = new URL(request.url);
 
     if (request.method === 'POST' && url.pathname === '/session') {
-      const { pinHash, displayName, deviceId } = await request.json();
+      const { pinHash, displayName, deviceId, ip } = await request.json();
       if (!pinHash) return json({ error: 'missing_pin_hash' }, 400);
+
+      // Every login attempt counts against this IP's budget, whether it
+      // guesses right, guesses wrong, or lands on a never-claimed PIN (which
+      // is itself a successful "account exists / doesn't" oracle, see the
+      // checkRateLimit comment above). 20 tries per 5 minutes is generous for
+      // a real person mistyping a PIN a few times, and hopeless for anyone
+      // scripting a sweep through the ~9,000,000-value PIN space.
+      const rl = await checkRateLimit(this.state.storage, `session:${ip || 'unknown'}`, {
+        maxAttempts: 20, windowMs: 5 * 60 * 1000, lockoutMs: 15 * 60 * 1000,
+      });
+      if (!rl.allowed) return json({ error: 'rate_limited', retryAfterMs: rl.retryAfterMs }, 429);
 
       // A roster entry pre-provisioned by an admin (see /admin/roster) claims
       // itself the first time its PIN is actually used, the person gets
@@ -469,6 +516,17 @@ export class Registry {
       const { pinHash, targetPinHash } = await request.json();
       const me = await this.state.storage.get(`user:${pinHash}`);
       if (!me) return json({ error: 'not_registered' }, 401);
+
+      // Rate-limited per account rather than per IP, this caller is already
+      // authenticated so their user id is a stabler identity than an IP that
+      // could rotate. Shared bucket with /group's memberPinHashes checks
+      // below, both are "does this PIN belong to someone" lookups and
+      // shouldn't add up to double the effective budget.
+      const rl = await checkRateLimit(this.state.storage, `contact:${me.id}`, {
+        maxAttempts: 15, windowMs: 10 * 60 * 1000, lockoutMs: 30 * 60 * 1000,
+      });
+      if (!rl.allowed) return json({ error: 'rate_limited', retryAfterMs: rl.retryAfterMs }, 429);
+
       const other = await this.state.storage.get(`user:${targetPinHash}`);
       if (!other) return json({ error: 'pin_not_found' }, 404);
       if (other.id === me.id) return json({ error: 'cannot_add_self' }, 400);
@@ -520,6 +578,24 @@ export class Registry {
       const { pinHash, name, memberPinHashes, memberIds: directMemberIds } = await request.json();
       const me = await this.state.storage.get(`user:${pinHash}`);
       if (!me) return json({ error: 'not_registered' }, 401);
+
+      // memberPinHashes is a batch of "does this PIN belong to someone"
+      // checks, exactly what /contact's rate limit exists to throttle, a
+      // single unbounded array here would let one call check thousands of
+      // PINs before that limit ever saw more than one request. Hard-cap the
+      // batch size (40 invitees is already generous for one group) and
+      // charge the whole batch against the same per-account budget /contact
+      // uses, so the two surfaces can't be combined to double it.
+      if (Array.isArray(memberPinHashes) && memberPinHashes.length > 40) {
+        return json({ error: 'too_many_members_at_once', max: 40 }, 400);
+      }
+      const lookupCost = Array.isArray(memberPinHashes) ? memberPinHashes.length : 0;
+      if (lookupCost > 0) {
+        const rl = await checkRateLimit(this.state.storage, `contact:${me.id}`, {
+          maxAttempts: 15, windowMs: 10 * 60 * 1000, lockoutMs: 30 * 60 * 1000, cost: lookupCost,
+        });
+        if (!rl.allowed) return json({ error: 'rate_limited', retryAfterMs: rl.retryAfterMs }, 429);
+      }
 
       const memberIds = [me.id];
       const notFound = [];
@@ -1878,9 +1954,10 @@ export default {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
         const body = await request.json().catch(() => ({}));
+        const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
         const res = await registryStub.fetch('https://internal/session', {
           method: 'POST',
-          body: JSON.stringify({ pinHash, displayName: body.displayName || null, deviceId: body.deviceId || null }),
+          body: JSON.stringify({ pinHash, displayName: body.displayName || null, deviceId: body.deviceId || null, ip }),
         });
         return res;
       }
