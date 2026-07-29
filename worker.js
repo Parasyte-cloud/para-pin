@@ -1496,7 +1496,7 @@ export class ChatRoom {
           nameCiphertext: attachment.nameCiphertext ? String(attachment.nameCiphertext).slice(0, 2000) : null,
           nameIv: attachment.nameIv ? String(attachment.nameIv).slice(0, 50) : null,
           size: Number(attachment.size) || null,
-          kind: ['image', 'voice', 'file'].includes(attachment.kind) ? attachment.kind : 'image',
+          kind: ['image', 'voice', 'video', 'file'].includes(attachment.kind) ? attachment.kind : 'image',
           duration: attachment.duration ? Number(attachment.duration) : null,
           fileIv: attachment.fileIv ? String(attachment.fileIv).slice(0, 50) : null,
         };
