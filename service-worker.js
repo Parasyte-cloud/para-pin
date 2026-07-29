@@ -1,5 +1,5 @@
 // PArA PIN — minimal offline app-shell cache
-const CACHE = 'para-pin-v1';
+const CACHE = 'para-pin-v2';
 const ASSETS = ['/', '/index.html', '/icon-192.png', '/icon-512.png', '/favicon.png'];
 
 self.addEventListener('install', (e) => {
@@ -18,11 +18,40 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
+
+  // The app shell (the HTML document itself) must be NETWORK-FIRST. It used
+  // to be cache-first like everything else, which meant an installed PWA kept
+  // serving whatever index.html it first cached and never picked up a new
+  // deploy until its storage was cleared by hand, every fix looking like it
+  // simply hadn't shipped. Falling back to cache on failure keeps it working
+  // offline, which was the point of caching it in the first place.
+  const isDocument = e.request.mode === 'navigate' ||
+    (e.request.headers.get('accept') || '').includes('text/html');
+  if (isDocument) {
+    e.respondWith(
+      fetch(e.request)
+        .then((res) => {
+          if (res.ok) {
+            const copy = res.clone();
+            caches.open(CACHE).then((c) => c.put(e.request, copy));
+          }
+          return res;
+        })
+        .catch(() => caches.match(e.request).then((cached) => cached || caches.match('/index.html')))
+    );
+    return;
+  }
+
+  // Static assets (icons, etc.) stay cache-first with a background refresh,
+  // they're immutable enough that serving instantly matters more.
   e.respondWith(
     caches.match(e.request).then((cached) => {
       const fetchPromise = fetch(e.request)
         .then((res) => {
-          if (res.ok) caches.open(CACHE).then((c) => c.put(e.request, res.clone()));
+          if (res.ok) {
+            const copy = res.clone();
+            caches.open(CACHE).then((c) => c.put(e.request, copy));
+          }
           return res;
         })
         .catch(() => cached);
@@ -127,15 +156,26 @@ self.addEventListener('push', (event) => {
     body: data.body || '',
     icon: '/icon-192.png',
     badge: '/icon-192.png',
+    // One notification per chat (tag), but `renotify` is what makes a second
+    // message in that same chat actually alert again (sound/vibration)
+    // instead of silently swapping the text of the existing one, which is
+    // exactly what "sometimes there's no ping" looked like.
     tag: data.chatId ? 'parapin-' + data.chatId : 'parapin',
+    renotify: true,
+    vibrate: [200, 100, 200],
+    timestamp: Date.now(),
     data: { chatId: data.chatId || null },
   };
   event.waitUntil((async () => {
     await self.registration.showNotification(title, options);
     // A page that's actually open and visible keeps its own accurate badge
     // count already (see index.html's updateTitleBadge) and will stomp on
-    // whatever we set here the moment it handles the message itself — so
+    // whatever we set here the moment it handles the message itself, so
     // only take over the icon badge when nothing visible is around to do it.
+    // When the app does come back to the foreground it immediately resyncs
+    // the real unread total from the server and posts it here (see the
+    // 'set-badge-count' message handler below), so this counter self-corrects
+    // rather than drifting further with every push while away.
     const clientList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     const hasVisible = clientList.some((c) => c.visibilityState === 'visible');
     if (!hasVisible) {

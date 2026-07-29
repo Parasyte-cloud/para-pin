@@ -2127,10 +2127,14 @@ export default {
           { urls: 'stun:stun.l.google.com:19302' },
           { urls: 'stun:stun1.l.google.com:19302' },
         ];
+        let turnError = null;
         if (env.CF_TURN_KEY_ID && env.CF_TURN_API_TOKEN) {
           try {
+            // generate-ice-servers returns a ready-to-use iceServers ARRAY
+            // (the older /generate returns a single object). Handling both
+            // shapes keeps this working whichever endpoint Cloudflare serves.
             const turnRes = await fetch(
-              `https://rtc.live.cloudflare.com/v1/turn/keys/${env.CF_TURN_KEY_ID}/credentials/generate`,
+              `https://rtc.live.cloudflare.com/v1/turn/keys/${env.CF_TURN_KEY_ID}/credentials/generate-ice-servers`,
               {
                 method: 'POST',
                 headers: {
@@ -2142,11 +2146,30 @@ export default {
             );
             if (turnRes.ok) {
               const turnData = await turnRes.json();
-              if (turnData && turnData.iceServers) iceServers.push(turnData.iceServers);
+              const entries = turnData && turnData.iceServers
+                ? (Array.isArray(turnData.iceServers) ? turnData.iceServers : [turnData.iceServers])
+                : [];
+              for (const entry of entries) {
+                if (!entry) continue;
+                // Cloudflare's docs warn that the alternate port 53 URLs are
+                // blocked by browsers and will simply time out. Without
+                // trickle ICE that stalls connection setup, so drop them.
+                const urls = Array.isArray(entry.urls) ? entry.urls : [entry.urls];
+                const filtered = urls.filter((u) => typeof u === 'string' && !u.includes(':53'));
+                if (filtered.length) iceServers.push({ ...entry, urls: filtered });
+              }
+            } else {
+              turnError = `turn_http_${turnRes.status}`;
             }
-          } catch (e) {}
+          } catch (e) {
+            turnError = 'turn_request_failed';
+          }
+        } else {
+          turnError = 'turn_not_configured';
         }
-        return json({ iceServers });
+        // Surfaced so the client can say "calls will fail on some networks
+        // because TURN isn't set up" instead of just timing out mysteriously.
+        return json({ iceServers, turnError });
       }
 
       // ---- Meeting Room (group calls, Cloudflare Realtime SFU) ----

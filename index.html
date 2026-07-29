@@ -4829,6 +4829,16 @@
     if (myPinHash && (!notifySocket || notifySocket.readyState !== WebSocket.OPEN)){
       connectNotifySocket();
     }
+    // Coming back to the foreground ALWAYS needs a resync, not just after an
+    // unexpected drop. Going hidden deliberately closes the notify socket
+    // (see the branch above), so every message that arrived while away was
+    // delivered by push only, with nothing here to bump the unread count,
+    // refresh the chat list preview, or correct the icon badge. Because that
+    // close is intentional it never increments notifyReconnectAttempts, so
+    // the reconnect-triggered resync inside connectNotifySocket() never fired
+    // for this (by far the most common) case. That is what made the badge and
+    // list look stale or plain wrong until a chat was opened by hand.
+    if (myPinHash) resyncChatsAndUnread();
     if (!activeChatId) return;
     // On mobile, .show-chat is what's actually switching the visible pane
     // between the chat list and a conversation. renderConv() (called from
