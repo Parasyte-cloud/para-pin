@@ -2374,7 +2374,7 @@ export default {
       if (request.method === 'POST' && url.pathname === '/api/groups/avatar') {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
-        const { chatId, avatarUrl } = await request.json();
+        const { chatId, avatarUrl } = await request.json().catch(() => ({}));
         if (!chatId) return json({ error: 'missing_chat_id' }, 400);
         const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
         const who = await whoRes.json();

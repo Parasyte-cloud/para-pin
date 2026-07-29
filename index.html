@@ -3463,10 +3463,25 @@
   // it is) can look the owner back up via meetingMidToTrack.
   let meetingMidToTrack = {};
   let meetingParticipants = {}; // userId -> { name, avatarUrl, tileEl }
+  let meetingWsPingInterval = null;
+  let meetingWsReconnectTimer = null;
+  let meetingLeavingIntentionally = false;
 
   function meetingTileFor(userId, name, avatarUrl){
     let tile = document.getElementById('meetingTile_' + userId);
-    if (tile) return tile;
+    if (tile){
+      // A track can arrive over the WS before the roster/join event that
+      // carries this person's real name (rare, but not impossible under
+      // network jitter), in which case the tile was first created with a
+      // placeholder "Someone". Refresh the label/avatar every time real
+      // info comes in so it doesn't get stuck on the placeholder forever.
+      if (name){
+        tile.querySelector('.meeting-tile-name').textContent = name;
+        const av = tile.querySelector('.avatar');
+        if (av) renderAvatar(av, name, false, avatarUrl || null);
+      }
+      return tile;
+    }
     tile = document.createElement('div');
     tile.className = 'meeting-tile';
     tile.id = 'meetingTile_' + userId;
@@ -3609,11 +3624,19 @@
   }
 
   async function joinMeetingRoom(id, meetingName, inviteUserIds){
+    // Joining while already in a meeting (an invite arriving mid-call, a
+    // stray double-tap, rejoining after a drop) previously leaked the old
+    // WebSocket, RTCPeerConnection, and camera/mic stream, since nothing
+    // ever tore the old one down before wiring up a new one. Leave whatever
+    // was active first, unconditionally, so this is always a clean start.
+    if (meetingId || meetingPc || meetingWs) leaveMeeting();
+
     meetingId = id;
     meetingParticipants = {};
     meetingMidToTrack = {};
     meetingMuted = false;
     meetingCameraOff = false;
+    meetingLeavingIntentionally = false;
     document.getElementById('meetingCallName').textContent = meetingName || 'Meeting';
     document.getElementById('meetingCallStatus').textContent = 'Connecting…';
     document.getElementById('meetingTilesGrid').innerHTML = '';
@@ -3647,13 +3670,44 @@
       meetingAttachTrack(info.userId, info.name, info.avatarUrl, ev.track, ev.streams[0]);
     });
 
+    connectMeetingWs(inviteUserIds, meetingName, false);
+  }
+
+  // Opens (or re-opens, after an unexpected drop) the presence WebSocket to
+  // the MeetingRoom Durable Object. First connect does the full "create an
+  // SFU session, publish my tracks, send invites" bootstrap; a reconnect
+  // skips all of that (the underlying RTCPeerConnection/SFU session are
+  // untouched by a presence-socket drop, they're independent) and just
+  // re-announces the still-live session/tracks so the room's fresh view of
+  // "who's here" picks this participant back up.
+  function connectMeetingWs(inviteUserIds, meetingName, isReconnect){
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     meetingWs = new WebSocket(`${proto}://${location.host}/api/meeting/room/ws?meetingId=${encodeURIComponent(meetingId)}&pinHash=${encodeURIComponent(myPinHash)}`);
     meetingWs.addEventListener('message', (ev)=>{
       let data; try { data = JSON.parse(ev.data); } catch(e){ return; }
+      if (data.type === 'pong') return;
       meetingHandleWsMessage(data);
     });
     meetingWs.addEventListener('open', async ()=>{
+      if (meetingWsPingInterval) clearInterval(meetingWsPingInterval);
+      meetingWsPingInterval = setInterval(()=>meetingWsSend({ type: 'ping' }), 20000);
+
+      if (isReconnect){
+        // The room DO's session for us was rebuilt fresh on this new
+        // connection (empty tracks/sfuSessionId until we say otherwise),
+        // re-tell it what's already live so other participants can still
+        // discover our tracks after this reconnect.
+        if (meetingSfuSessionId){
+          meetingWsSend({ type: 'set-session', sfuSessionId: meetingSfuSessionId });
+        }
+        if (meetingPc){
+          meetingPc.getTransceivers()
+            .filter(t => t.sender && t.sender.track)
+            .forEach(t => meetingWsSend({ type: 'publish', trackName: (t.sender.track.kind === 'video' ? 'video-' : 'audio-') + myUserId, kind: t.sender.track.kind }));
+        }
+        return;
+      }
+
       const r = await meetingSfuFetch('sessions/new', { method: 'POST', body: JSON.stringify({}) });
       if (!r.ok || !r.body || !r.body.sessionId){
         document.getElementById('meetingCallStatus').textContent = 'Could not reach the meeting server.';
@@ -3667,9 +3721,24 @@
         apiFetch('/meeting/invite', { method: 'POST', body: JSON.stringify({ toUserId: uid, meetingId, meetingName: meetingName || null }) }).catch(()=>{});
       });
     });
+    const onDrop = ()=>{
+      if (meetingWsPingInterval){ clearInterval(meetingWsPingInterval); meetingWsPingInterval = null; }
+      // Only reconnect if we're still supposed to be in this meeting, not
+      // when this fired because leaveMeeting() itself closed the socket.
+      if (meetingLeavingIntentionally || !meetingId) return;
+      if (meetingWsReconnectTimer) clearTimeout(meetingWsReconnectTimer);
+      meetingWsReconnectTimer = setTimeout(()=>{
+        if (!meetingLeavingIntentionally && meetingId) connectMeetingWs(inviteUserIds, meetingName, true);
+      }, 2000);
+    };
+    meetingWs.addEventListener('close', onDrop);
+    meetingWs.addEventListener('error', onDrop);
   }
 
   function leaveMeeting(){
+    meetingLeavingIntentionally = true;
+    if (meetingWsReconnectTimer){ clearTimeout(meetingWsReconnectTimer); meetingWsReconnectTimer = null; }
+    if (meetingWsPingInterval){ clearInterval(meetingWsPingInterval); meetingWsPingInterval = null; }
     if (meetingWs){ try { meetingWs.close(); } catch(e){} meetingWs = null; }
     if (meetingPc){ try { meetingPc.close(); } catch(e){} meetingPc = null; }
     if (meetingLocalStream){ meetingLocalStream.getTracks().forEach(t=>t.stop()); meetingLocalStream = null; }
@@ -3688,6 +3757,20 @@
     meetingLocalStream.getAudioTracks().forEach(t => t.enabled = !meetingMuted);
     document.getElementById('meetingMuteBtn').textContent = meetingMuted ? '🔇' : '🎙️';
     document.getElementById('meetingMuteBtn').classList.toggle('active', meetingMuted);
+    const myTile = document.getElementById('meetingTile_' + myUserId);
+    if (myTile){
+      let badge = myTile.querySelector('.meeting-tile-muted');
+      if (meetingMuted){
+        if (!badge){
+          badge = document.createElement('div');
+          badge.className = 'meeting-tile-muted';
+          badge.textContent = '🔇';
+          myTile.appendChild(badge);
+        }
+      } else if (badge){
+        badge.remove();
+      }
+    }
   });
   document.getElementById('meetingCameraBtn').addEventListener('click', ()=>{
     if (!meetingLocalStream) return;
@@ -3751,6 +3834,12 @@
   let pendingMeetingInvite = null;
 
   function handleMeetingInvite(signal){
+    // Don't stack an invite prompt over an active 1:1 call or an already-
+    // running meeting, same "busy" reasoning as declining a second 1:1 call
+    // while one is already in progress (see handleCallSignal's offer branch).
+    // The inviter never learns it was auto-declined (there's no signal back
+    // for that today, same as a plain missed call), it just won't ring here.
+    if (callState !== 'idle' || meetingId) return;
     pendingMeetingInvite = signal;
     renderAvatar(document.getElementById('meetingInviteAvatar'), signal.fromName || 'Someone', false, signal.fromAvatarUrl || null);
     document.getElementById('meetingInviteName').textContent = signal.fromName || 'Someone';
