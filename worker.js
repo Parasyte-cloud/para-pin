@@ -526,7 +526,7 @@ export class Registry {
       if (memberIds.length < 2) return json({ error: 'need_at_least_one_member', notFound }, 400);
 
       const chatId = crypto.randomUUID();
-      const chat = { id: chatId, type: 'group', name: name || 'Group', memberIds, createdAt: Date.now() };
+      const chat = { id: chatId, type: 'group', name: name || 'Group', memberIds, createdAt: Date.now(), createdBy: me.id, avatarUrl: null };
       await this.state.storage.put(`chat:${chatId}`, chat);
       for (const uid of memberIds) {
         const list = (await this.state.storage.get(`userChats:${uid}`)) || [];
@@ -535,6 +535,27 @@ export class Registry {
       const allChatIds = (await this.state.storage.get('allChatIds')) || [];
       await this.state.storage.put('allChatIds', [...allChatIds, chatId]);
       return json({ chat, notFound });
+    }
+
+    // Group photo, restricted to whoever created the group and to app-wide
+    // admins (the same "admins" list /admin/promote already manages), a
+    // regular member can't reach in and change how the group looks for
+    // everyone else, same reasoning as e.g. only the creator/an admin being
+    // able to rename a shared Slack channel.
+    if (request.method === 'POST' && url.pathname === '/group/avatar') {
+      const { pinHash, chatId, avatarUrl } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      const chat = await this.state.storage.get(`chat:${chatId}`);
+      if (!chat || chat.type !== 'group' || !chat.memberIds.includes(me.id)) {
+        return json({ error: 'not_found' }, 404);
+      }
+      const admins = (await this.state.storage.get('admins')) || [];
+      const canEdit = chat.createdBy === me.id || admins.includes(me.id);
+      if (!canEdit) return json({ error: 'not_allowed' }, 403);
+      chat.avatarUrl = avatarUrl ? String(avatarUrl).slice(0, 500) : null;
+      await this.state.storage.put(`chat:${chatId}`, chat);
+      return json({ ok: true, chat });
     }
 
     if (request.method === 'GET' && url.pathname === '/verify-member') {
@@ -1174,14 +1195,20 @@ export class UserChannel {
       // for next-open), a call is time-sensitive enough to accept the
       // occasional double-alert on a device that has the app open and
       // focused too. Same retry/cleanup logic /notify already uses for pushSubs.
-      if (data && data.type === 'call-signal' && data.signal && data.signal.kind === 'offer') {
+      if (data && data.type === 'call-signal' && data.signal && (data.signal.kind === 'offer' || data.signal.kind === 'meeting-invite')) {
         const subs = (await this.state.storage.get('pushSubs')) || [];
         if (subs.length) {
-          const pushPayload = {
-            title: 'PArA PIN',
-            body: `Incoming call from ${data.signal.fromName || 'Someone'}`,
-            chatId: null,
-          };
+          const pushPayload = data.signal.kind === 'meeting-invite'
+            ? {
+                title: 'PArA PIN',
+                body: `${data.signal.fromName || 'Someone'} started a meeting${data.signal.meetingName ? `: ${data.signal.meetingName}` : ''}`,
+                chatId: null,
+              }
+            : {
+                title: 'PArA PIN',
+                body: `Incoming call from ${data.signal.fromName || 'Someone'}`,
+                chatId: null,
+              };
           const stillValid = [];
           for (const sub of subs) {
             try {
@@ -1631,6 +1658,127 @@ export class ChatRoom {
       return json({ ok: true, message: msg });
     }
 
+    // A chat-level property changed (currently just the group photo), tell
+    // anyone with this chat open right now so their local copy updates
+    // immediately instead of only picking it up on next full reload. The
+    // system message posted alongside this (see /api/groups/avatar) covers
+    // the "what happened" text; this covers the actual new value.
+    if (request.method === 'POST' && url.pathname === '/meta-broadcast') {
+      const meta = await request.json().catch(() => ({}));
+      this.broadcast(JSON.stringify({ type: 'chat-meta', ...meta }), null);
+      return json({ ok: true });
+    }
+
+    return new Response('not found', { status: 404 });
+  }
+}
+
+// Group meeting rooms ride Cloudflare Realtime's SFU for the actual media
+// (see the /api/meeting/sfu/* proxy in the default export), but the SFU
+// itself has no concept of a "room", it only knows Sessions (roughly one per
+// participant's PeerConnection) and Tracks. This Durable Object, one per
+// meetingId, is the presence/room layer Cloudflare's docs say is entirely
+// the caller's job: who's currently in the room, what their SFU sessionId
+// is, and which of their tracks are live, so every other participant knows
+// what to go pull. Same WebSocket-fan-out shape as ChatRoom, just keyed by
+// meetingId instead of chatId, and carrying presence/track events instead
+// of chat messages.
+export class MeetingRoom {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.sessions = new Map(); // ws -> { userId, name, avatarUrl, sfuSessionId, tracks: Map(trackName -> kind) }
+  }
+
+  roster() {
+    return [...this.sessions.values()].map((p) => ({
+      userId: p.userId,
+      name: p.name,
+      avatarUrl: p.avatarUrl || null,
+      sfuSessionId: p.sfuSessionId || null,
+      tracks: [...p.tracks.entries()].map(([trackName, kind]) => ({ trackName, kind })),
+    }));
+  }
+
+  broadcast(payload, exceptWs) {
+    for (const [ws] of this.sessions) {
+      if (ws === exceptWs) continue;
+      try {
+        ws.send(payload);
+      } catch (e) {
+        this.sessions.delete(ws);
+      }
+    }
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+
+    if (request.headers.get('Upgrade') === 'websocket') {
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+      server.accept();
+
+      const userId = url.searchParams.get('userId') || null;
+      const name = url.searchParams.get('name') || 'Someone';
+      const avatarUrl = url.searchParams.get('avatarUrl') || null;
+      const me = { userId, name, avatarUrl, sfuSessionId: null, tracks: new Map() };
+      this.sessions.set(server, me);
+
+      // Bring the new joiner up to speed on who's already here (including
+      // their published tracks), then tell everyone else about the new face.
+      try {
+        server.send(JSON.stringify({ type: 'roster', participants: this.roster().filter((p) => p.userId !== userId) }));
+      } catch (e) {}
+      this.broadcast(JSON.stringify({ type: 'participant-joined', userId, name, avatarUrl }), server);
+
+      const cleanup = () => {
+        this.sessions.delete(server);
+        if (userId) this.broadcast(JSON.stringify({ type: 'participant-left', userId }), null);
+      };
+      server.addEventListener('close', cleanup);
+      server.addEventListener('error', cleanup);
+
+      server.addEventListener('message', (ev) => {
+        let data;
+        try { data = JSON.parse(ev.data); } catch (e) { return; }
+
+        if (data.type === 'ping') {
+          try { server.send(JSON.stringify({ type: 'pong' })); } catch (e) {}
+          return;
+        }
+
+        // A participant tells the room "this is my SFU session", so anyone
+        // who joins after can go pull tracks from it.
+        if (data.type === 'set-session' && data.sfuSessionId) {
+          me.sfuSessionId = data.sfuSessionId;
+          return;
+        }
+
+        // A participant published a track (mic, camera, screen-share, ...),
+        // fan it out so everyone else knows to go pull it from that session.
+        if (data.type === 'publish' && data.trackName && data.kind) {
+          me.tracks.set(data.trackName, data.kind);
+          this.broadcast(JSON.stringify({
+            type: 'participant-track', userId, sfuSessionId: me.sfuSessionId, trackName: data.trackName, kind: data.kind,
+          }), server);
+          return;
+        }
+
+        if (data.type === 'unpublish' && data.trackName) {
+          me.tracks.delete(data.trackName);
+          this.broadcast(JSON.stringify({ type: 'participant-untrack', userId, trackName: data.trackName }), server);
+          return;
+        }
+      });
+
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/roster') {
+      return json({ participants: this.roster() });
+    }
+
     return new Response('not found', { status: 404 });
   }
 }
@@ -1989,6 +2137,93 @@ export default {
         return json({ iceServers });
       }
 
+      // ---- Meeting Room (group calls, Cloudflare Realtime SFU) ----
+      // The App Secret must never reach the client, so every SFU call is a
+      // thin authenticated proxy: check the caller's pinHash, then forward
+      // to https://rtc.live.cloudflare.com/v1/apps/{appId}/... with the
+      // secret attached server-side. The room/presence layer (who's in the
+      // meeting, whose track is whose) is handled separately by the
+      // MeetingRoom Durable Object below, this block is purely the media
+      // plane pass-through.
+      const meetingSfuMatch = url.pathname.match(/^\/api\/meeting\/sfu\/(.+)$/);
+      if (meetingSfuMatch) {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        if (!env.CF_REALTIME_APP_ID || !env.CF_REALTIME_APP_SECRET) {
+          return json({ error: 'sfu_not_configured' }, 501);
+        }
+        const cfPath = meetingSfuMatch[1]; // e.g. "sessions/new" or "sessions/{id}/tracks/new"
+        const cfUrl = `https://rtc.live.cloudflare.com/v1/apps/${env.CF_REALTIME_APP_ID}/${cfPath}`;
+        const init = {
+          method: request.method,
+          headers: {
+            authorization: `Bearer ${env.CF_REALTIME_APP_SECRET}`,
+            'content-type': 'application/json',
+          },
+        };
+        if (request.method !== 'GET') {
+          init.body = await request.text();
+        }
+        const cfRes = await fetch(cfUrl, init);
+        const cfBody = await cfRes.text();
+        return new Response(cfBody, {
+          status: cfRes.status,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      // Room presence WebSocket, one connection per open meeting screen.
+      // Keyed by meetingId (client-generated UUID), not by user, everyone in
+      // the same meeting lands in the same MeetingRoom Durable Object.
+      if (url.pathname === '/api/meeting/room/ws') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const meetingId = url.searchParams.get('meetingId');
+        if (!meetingId) return json({ error: 'missing_meeting_id' }, 400);
+        const roomStub = env.MEETING_ROOM.get(env.MEETING_ROOM.idFromName(meetingId));
+        const roomUrl = new URL(request.url);
+        roomUrl.searchParams.set('userId', who.userId);
+        roomUrl.searchParams.set('name', who.displayName || 'Someone');
+        if (who.avatarUrl) roomUrl.searchParams.set('avatarUrl', who.avatarUrl);
+        return roomStub.fetch(new Request(roomUrl.toString(), request));
+      }
+
+      // Invites one person to an already-created (or about-to-be-joined)
+      // meeting, riding the same per-user notify channel as 1:1 calls, so it
+      // gets both the in-app ding and a real OS push if they're not looking.
+      if (request.method === 'POST' && url.pathname === '/api/meeting/invite') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const { toUserId, meetingId, meetingName } = await request.json().catch(() => ({}));
+        if (!toUserId || !meetingId) return json({ error: 'invalid' }, 400);
+        if (toUserId === who.userId) return json({ error: 'cannot_invite_self' }, 400);
+        const channelStub = env.USER_CHANNEL.get(env.USER_CHANNEL.idFromName(toUserId));
+        const res = await channelStub.fetch('https://internal/call-signal', {
+          method: 'POST',
+          body: JSON.stringify({
+            type: 'call-signal',
+            signal: {
+              kind: 'meeting-invite',
+              meetingId,
+              meetingName: meetingName || null,
+              fromUserId: who.userId,
+              fromName: who.displayName,
+              fromAvatarUrl: who.avatarUrl || null,
+            },
+          }),
+        });
+        return res;
+      }
+
       if (request.method === 'GET' && url.pathname === '/api/push/vapid-public-key') {
         if (!env.VAPID_PUBLIC_KEY) return json({ error: 'not_configured' }, 501);
         return json({ key: env.VAPID_PUBLIC_KEY });
@@ -2127,6 +2362,40 @@ export default {
             body: JSON.stringify({ text: sysText }),
           }).catch(() => {});
           if (ctx && ctx.waitUntil) ctx.waitUntil(sysPromise); else await sysPromise;
+        }
+        return json(resBody, res.status);
+      }
+
+      // Group photo, gated to the group's creator or an app-wide admin (see
+      // the permission check in Registry's /group/avatar handler). Posts a
+      // system message into the chat so everyone currently looking at it
+      // sees the change happen live, same pattern as the "left the group"
+      // message above.
+      if (request.method === 'POST' && url.pathname === '/api/groups/avatar') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const { chatId, avatarUrl } = await request.json();
+        if (!chatId) return json({ error: 'missing_chat_id' }, 400);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const res = await registryStub.fetch('https://internal/group/avatar', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, chatId, avatarUrl }),
+        });
+        const resBody = await res.json();
+        if (res.ok && resBody.ok) {
+          const roomStub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(chatId));
+          const sysText = avatarUrl ? `${who.displayName || 'Someone'} changed the group photo` : `${who.displayName || 'Someone'} removed the group photo`;
+          const sysPromise = roomStub.fetch('https://internal/system-message', {
+            method: 'POST',
+            body: JSON.stringify({ text: sysText }),
+          }).catch(() => {});
+          const metaPromise = roomStub.fetch('https://internal/meta-broadcast', {
+            method: 'POST',
+            body: JSON.stringify({ chatId, avatarUrl: avatarUrl || null }),
+          }).catch(() => {});
+          if (ctx && ctx.waitUntil) { ctx.waitUntil(sysPromise); ctx.waitUntil(metaPromise); } else { await sysPromise; await metaPromise; }
         }
         return json(resBody, res.status);
       }

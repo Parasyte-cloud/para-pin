@@ -20,6 +20,10 @@
 			{
 				"name": "USER_CHANNEL",
 				"class_name": "UserChannel"
+			},
+			{
+				"name": "MEETING_ROOM",
+				"class_name": "MeetingRoom"
 			}
 		]
 	},
@@ -36,6 +40,12 @@
 			"new_sqlite_classes": [
 				"UserChannel"
 			]
+		},
+		{
+			"tag": "v3",
+			"new_sqlite_classes": [
+				"MeetingRoom"
+			]
 		}
 	],
 	"r2_buckets": [
@@ -49,6 +59,8 @@
 		"VAPID_SUBJECT": "mailto:infra@parasyte.cloud"
 	},
 	"triggers": {
-		"crons": ["0 3 * * *"]
+		"crons": [
+			"0 3 * * *"
+		]
 	}
 }
