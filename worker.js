@@ -20,6 +20,18 @@ function authHash(request, url) {
   return request.headers.get('X-Para-Pin-Hash') || url.searchParams.get('pinHash') || null;
 }
 
+// Avatar URLs (profile photos, group photos) are always produced by this
+// app's own /api/upload, which returns exactly `/api/media/<uuid>`. They get
+// interpolated client-side into a CSS `url("...")`, so a stored value
+// containing a quote could break out of that and inject arbitrary CSS for
+// everyone who views that profile or group. Rather than escaping at every
+// render site, reject anything that isn't the one shape we ever legitimately
+// produce. Returns null for "no avatar" and for anything malformed.
+function sanitizeAvatarUrl(value) {
+  if (typeof value !== 'string' || !value) return null;
+  return /^\/api\/media\/[A-Za-z0-9_-]{1,100}$/.test(value) ? value : null;
+}
+
 // Builds the cached "public view" of a user that other people's clients can
 // look up via GET /users, kept in its own function so every place that
 // writes it (session, profile edits, key uploads, device resets, admin
@@ -399,7 +411,7 @@ export class Registry {
       const user = await this.state.storage.get(`user:${pinHash}`);
       if (!user) return json({ error: 'not_registered' }, 401);
       if (typeof displayName === 'string' && displayName.trim()) user.displayName = displayName.trim().slice(0, 40);
-      if (typeof avatarUrl === 'string' || avatarUrl === null) user.avatarUrl = avatarUrl ? String(avatarUrl).slice(0, 500) : null;
+      if (typeof avatarUrl === 'string' || avatarUrl === null) user.avatarUrl = sanitizeAvatarUrl(avatarUrl);
       if (typeof department === 'string') user.department = department.trim().slice(0, 60) || null;
       await this.state.storage.put(`user:${user.pinHash}`, user);
       await this.state.storage.put(`userById:${user.id}`, userByIdSnapshot(user));
@@ -553,7 +565,7 @@ export class Registry {
       const admins = (await this.state.storage.get('admins')) || [];
       const canEdit = chat.createdBy === me.id || admins.includes(me.id);
       if (!canEdit) return json({ error: 'not_allowed' }, 403);
-      chat.avatarUrl = avatarUrl ? String(avatarUrl).slice(0, 500) : null;
+      chat.avatarUrl = sanitizeAvatarUrl(avatarUrl);
       await this.state.storage.put(`chat:${chatId}`, chat);
       return json({ ok: true, chat });
     }

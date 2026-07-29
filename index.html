@@ -2181,10 +2181,19 @@
     return prefix + m.text;
   }
 
+  // Defense in depth against CSS injection through a stored avatar URL. The
+  // server now rejects anything that isn't the /api/media/<id> shape it
+  // produces itself, but values saved before that check existed are still in
+  // storage, and this is the one place they get interpolated into CSS.
+  function safeCssUrl(url){
+    return typeof url === 'string' && /^\/api\/media\/[A-Za-z0-9_-]{1,100}$/.test(url) ? url : null;
+  }
+
   function renderAvatar(el, name, isGroup, avatarUrl){
     el.classList.toggle('group', !!isGroup);
-    if (avatarUrl){
-      el.style.background = `center/cover no-repeat url("${avatarUrl}")`;
+    const safe = safeCssUrl(avatarUrl);
+    if (safe){
+      el.style.background = `center/cover no-repeat url("${safe}")`;
       el.textContent = '';
     } else {
       el.textContent = isGroup ? '' : initials(name);
@@ -2804,8 +2813,13 @@
   // Coming soon) closes back to the Chats tab; failing that, an open
   // conversation (mobile single-pane view) closes back to the chat list.
   // At the root already, it's a no-op, nothing further to go back to.
-  const NAV_OVERLAY_IDS = ['rosterOverlay','settingsOverlay','comingSoonOverlay','callsOverlay','videoOverlay','profileOverlay'];
+  const NAV_OVERLAY_IDS = ['rosterOverlay','settingsOverlay','comingSoonOverlay','callsOverlay','videoOverlay','profileOverlay','meetingRoomOverlay'];
   function goBack(){
+    // A live call or meeting deliberately isn't "backable", swiping out of a
+    // call you're actually in would be a nasty surprise, those screens have
+    // their own explicit End/Leave buttons.
+    if (document.getElementById('meetingCallScreen').classList.contains('show')) return;
+    if (callState !== 'idle') return;
     const openOverlayId = NAV_OVERLAY_IDS.find(id => document.getElementById(id).classList.contains('show'));
     if (openOverlayId){
       closeModal(openOverlayId);
@@ -3531,56 +3545,106 @@
     return apiFetch('/meeting/sfu/' + path, opts);
   }
 
+  // WebRTC allows exactly one offer/answer exchange in flight at a time per
+  // PeerConnection. Everything that touches the SDP (publishing our own
+  // tracks, pulling each remote track) therefore has to be serialized, or
+  // the second concurrent setLocalDescription/setRemoteDescription throws
+  // InvalidStateError and that track silently never arrives. This matters
+  // immediately rather than rarely: every participant publishes BOTH audio
+  // and video, so even a single other person in the room means two pulls
+  // fired back to back, and a roster of three means six. Chaining them
+  // through one promise queue keeps each negotiation strictly sequential.
+  let meetingNegotiationQueue = Promise.resolve();
+  function meetingEnqueue(fn){
+    meetingNegotiationQueue = meetingNegotiationQueue.then(fn).catch(()=>{});
+    return meetingNegotiationQueue;
+  }
+
+  // Guards against pulling the same track twice. The room DO re-sends its
+  // full roster on every (re)connect, so without this a reconnect would
+  // re-pull every track already flowing, stacking duplicate transceivers.
+  let meetingPulledTracks = new Set();
+
   // Pulls one other participant's already-published track down from the
   // SFU into our own PeerConnection. Cloudflare's response tells us whether
   // this requires a fresh round of SDP renegotiation (pulling almost always
   // does, the first pull especially), the mid it lands on is how the later
   // `ontrack` event gets matched back up to whose track this actually is.
-  async function meetingPullTrack(userId, name, avatarUrl, remoteSessionId, trackName, kind){
-    if (!meetingPc || !meetingSfuSessionId || !remoteSessionId) return;
-    const r = await meetingSfuFetch(`sessions/${meetingSfuSessionId}/tracks/new`, {
-      method: 'POST',
-      body: JSON.stringify({ tracks: [{ location: 'remote', sessionId: remoteSessionId, trackName }] }),
-    });
-    if (!r.ok || !r.body) return;
-    const track = (r.body.tracks || [])[0];
-    if (track && track.mid){
-      meetingMidToTrack[track.mid] = { userId, name, avatarUrl, kind };
-    }
-    if (r.body.requiresImmediateRenegotiation && r.body.sessionDescription){
-      await meetingPc.setRemoteDescription(r.body.sessionDescription);
-      const answer = await meetingPc.createAnswer();
-      await meetingPc.setLocalDescription(answer);
-      await meetingSfuFetch(`sessions/${meetingSfuSessionId}/renegotiate`, {
-        method: 'PUT',
-        body: JSON.stringify({ sessionDescription: { type: answer.type, sdp: answer.sdp } }),
+  function meetingPullTrack(userId, name, avatarUrl, remoteSessionId, trackName, kind){
+    if (!remoteSessionId || !trackName) return;
+    const dedupeKey = userId + '|' + trackName;
+    if (meetingPulledTracks.has(dedupeKey)) return;
+    meetingPulledTracks.add(dedupeKey);
+
+    return meetingEnqueue(async ()=>{
+      // Re-checked inside the queue, not just at call time: this may have
+      // been waiting behind several other negotiations, and the meeting
+      // could have ended (or been rejoined) in the meantime.
+      if (!meetingPc || !meetingSfuSessionId){
+        meetingPulledTracks.delete(dedupeKey);
+        return;
+      }
+      const r = await meetingSfuFetch(`sessions/${meetingSfuSessionId}/tracks/new`, {
+        method: 'POST',
+        body: JSON.stringify({ tracks: [{ location: 'remote', sessionId: remoteSessionId, trackName }] }),
       });
-    }
+      if (!r.ok || !r.body){
+        // Let a later roster/participant-track event retry this one.
+        meetingPulledTracks.delete(dedupeKey);
+        return;
+      }
+      const track = (r.body.tracks || [])[0];
+      if (track && track.mid){
+        meetingMidToTrack[track.mid] = { userId, name, avatarUrl, kind };
+      }
+      if (r.body.requiresImmediateRenegotiation && r.body.sessionDescription){
+        await meetingPc.setRemoteDescription(r.body.sessionDescription);
+        const answer = await meetingPc.createAnswer();
+        await meetingPc.setLocalDescription(answer);
+        await meetingSfuFetch(`sessions/${meetingSfuSessionId}/renegotiate`, {
+          method: 'PUT',
+          body: JSON.stringify({ sessionDescription: { type: answer.type, sdp: answer.sdp } }),
+        });
+      }
+    });
   }
 
   function meetingWsSend(payload){
     if (meetingWs && meetingWs.readyState === WebSocket.OPEN) meetingWs.send(JSON.stringify(payload));
   }
 
+  // Single source of truth for the participant count. It has to be derived
+  // (not set to a literal at any one point in the flow) because the room's
+  // roster arrives over the WebSocket the instant it opens, which is
+  // reliably BEFORE our own sessions/new HTTP round-trip finishes, so any
+  // hardcoded "1 in the meeting" written after that would clobber a correct
+  // larger count and make a busy room look empty.
+  function updateMeetingStatus(){
+    const n = Object.keys(meetingParticipants).length + 1; // +1 for me
+    document.getElementById('meetingCallStatus').textContent = n === 1 ? 'Waiting for others…' : n + ' in the meeting';
+  }
+
   function meetingHandleWsMessage(data){
     if (data.type === 'roster'){
       (data.participants || []).forEach(p=>{
+        if (p.userId === myUserId) return;
         meetingParticipants[p.userId] = { name: p.name, avatarUrl: p.avatarUrl };
         meetingTileFor(p.userId, p.name, p.avatarUrl);
         (p.tracks || []).forEach(t => meetingPullTrack(p.userId, p.name, p.avatarUrl, p.sfuSessionId, t.trackName, t.kind));
       });
+      updateMeetingStatus();
       return;
     }
     if (data.type === 'participant-joined'){
       if (data.userId === myUserId) return;
       meetingParticipants[data.userId] = { name: data.name, avatarUrl: data.avatarUrl };
       meetingTileFor(data.userId, data.name, data.avatarUrl);
-      document.getElementById('meetingCallStatus').textContent = Object.keys(meetingParticipants).length + 1 + ' in the meeting';
+      updateMeetingStatus();
       return;
     }
     if (data.type === 'participant-left'){
       meetingRemoveParticipant(data.userId);
-      document.getElementById('meetingCallStatus').textContent = Object.keys(meetingParticipants).length + 1 + ' in the meeting';
+      updateMeetingStatus();
       return;
     }
     if (data.type === 'participant-track'){
@@ -3605,7 +3669,12 @@
   // about it. `mid` has to be read back off the actual transceiver after
   // setLocalDescription assigns one, rather than assumed, addTrack order
   // isn't a reliable way to predict which mid a browser will pick.
-  async function meetingPublishLocalTracks(){
+  function meetingPublishLocalTracks(){
+    // Shares the one negotiation queue with meetingPullTrack, publishing is
+    // an offer/answer exchange like any pull, and a remote track arriving in
+    // the same instant would otherwise collide with it mid-handshake.
+    return meetingEnqueue(async ()=>{
+    if (!meetingPc || !meetingSfuSessionId) return;
     const offer = await meetingPc.createOffer();
     await meetingPc.setLocalDescription(offer);
     const tracksPayload = meetingPc.getTransceivers()
@@ -3621,6 +3690,7 @@
     }
     await meetingPc.setRemoteDescription(r.body.sessionDescription);
     tracksPayload.forEach(t => meetingWsSend({ type: 'publish', trackName: t.trackName, kind: t.trackName.startsWith('video') ? 'video' : 'audio' }));
+    });
   }
 
   async function joinMeetingRoom(id, meetingName, inviteUserIds){
@@ -3716,7 +3786,7 @@
       meetingSfuSessionId = r.body.sessionId;
       meetingWsSend({ type: 'set-session', sfuSessionId: meetingSfuSessionId });
       await meetingPublishLocalTracks();
-      document.getElementById('meetingCallStatus').textContent = '1 in the meeting';
+      updateMeetingStatus();
       (inviteUserIds || []).forEach(uid=>{
         apiFetch('/meeting/invite', { method: 'POST', body: JSON.stringify({ toUserId: uid, meetingId, meetingName: meetingName || null }) }).catch(()=>{});
       });
@@ -3748,6 +3818,10 @@
     meetingSfuSessionId = null;
     meetingParticipants = {};
     meetingMidToTrack = {};
+    meetingPulledTracks = new Set();
+    // Drop any queued negotiations from the meeting that just ended, so a
+    // fresh join doesn't inherit stale work pointing at a dead session.
+    meetingNegotiationQueue = Promise.resolve();
   }
 
   document.getElementById('meetingLeaveBtn').addEventListener('click', leaveMeeting);
