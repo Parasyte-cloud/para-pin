@@ -691,6 +691,22 @@
   .contact-pick{ max-height:220px; overflow-y:auto; display:flex; flex-direction:column; gap:4px; margin-bottom:16px; }
   .pick-row{ display:flex; align-items:center; gap:10px; padding:8px; border-radius:10px; cursor:pointer; }
   .pick-row:hover{ background:rgba(var(--tint-rgb),0.04); }
+
+  /* Tap to switch which space (Personal or a real workspace) the chat list
+     and new-chat/new-group actions operate in, see switchWorkspace(). */
+  .workspace-bar{
+    margin:0 16px 10px; padding:8px 12px; border-radius:12px; cursor:pointer;
+    display:flex; align-items:center; justify-content:space-between; gap:8px;
+    background:rgba(var(--tint-rgb),0.05); border:1px solid var(--glass-brd);
+    font-size:12.5px; font-weight:600; color:var(--text-hi);
+  }
+  .workspace-bar:hover{ background:rgba(var(--tint-rgb),0.08); }
+  .workspace-bar-chevron{ color:var(--text-low); font-size:11px; }
+  .workspace-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px; border-radius:10px; cursor:pointer; }
+  .workspace-row:hover{ background:rgba(var(--tint-rgb),0.04); }
+  .workspace-row.active{ background:rgba(0,212,255,0.08); border:1px solid rgba(0,212,255,0.25); }
+  .workspace-row-name{ font-weight:600; font-size:13.5px; }
+  .workspace-row-admin{ font-size:10.5px; color:var(--text-low); }
   .pick-row input{ accent-color:var(--ice); width:16px; height:16px; }
   .pick-row .avatar{ width:30px; height:30px; border-radius:50%; font-size:11px; }
   .pick-row .pname{ font-size:13px; }
@@ -795,6 +811,10 @@
           <div class="icon-btn" id="newDmBtn" title="New chat">＋</div>
           <div class="icon-btn" id="newGroupBtn" title="New group">👥</div>
         </div>
+      </div>
+      <div class="workspace-bar" id="workspaceBar">
+        <span id="workspaceBarLabel">Personal</span>
+        <span class="workspace-bar-chevron">▾</span>
       </div>
       <div id="sessionBanner" style="display:none;margin:0 16px 10px;padding:10px 12px;border-radius:12px;background:rgba(255,80,80,0.08);border:1px solid rgba(255,80,80,0.25);font-size:12px;color:#ff9a9a;">
         <span id="sessionBannerText">Couldn't reach the PArA PIN server.</span>
@@ -1016,6 +1036,55 @@
     <div class="modal-actions">
       <div class="btn" onclick="closeModal('groupOverlay')">Cancel</div>
       <div class="btn primary" id="groupCreateBtn" disabled>Create group</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ WORKSPACES MODAL ============ -->
+<div class="overlay" id="workspacesOverlay">
+  <div class="modal lg">
+    <h3>Workspaces</h3>
+    <div class="hint">Personal is your own space. A workspace is a separate space shared with a team, only people its admin adds can see it.</div>
+    <div class="contact-pick" id="workspaceList"></div>
+    <div class="modal-actions">
+      <div class="btn" onclick="closeModal('workspacesOverlay')">Close</div>
+      <div class="btn primary" id="createWorkspaceBtn">Create workspace</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ CREATE WORKSPACE MODAL ============ -->
+<div class="overlay" id="createWorkspaceOverlay">
+  <div class="modal lg">
+    <h3>Create workspace</h3>
+    <div class="hint">You'll be its first admin, able to invite people and manage it.</div>
+    <input type="text" id="createWorkspaceNameInput" placeholder="Workspace name" maxlength="60">
+    <div class="hint" id="createWorkspaceError" style="display:none;color:#ff6a6a;margin-top:-6px;margin-bottom:12px;"></div>
+    <div class="modal-actions">
+      <div class="btn" onclick="closeModal('createWorkspaceOverlay')">Cancel</div>
+      <div class="btn primary" id="createWorkspaceSaveBtn">Create</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ WORKSPACE MEMBERS / INVITE MODAL ============ -->
+<div class="overlay" id="workspaceMembersOverlay">
+  <div class="modal lg">
+    <h3 id="workspaceMembersTitle">Members</h3>
+    <div class="contact-pick" id="workspaceMembersList"></div>
+    <div id="workspaceInviteSection" style="display:none;">
+      <div class="hint">Invite by PIN (they must already have a PArA PIN account), or invite someone brand new by name/email.</div>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <input type="text" id="workspaceInvitePinInput" placeholder="1234567" inputmode="numeric" maxlength="7" style="flex:1;">
+        <div class="btn" id="workspaceInvitePinBtn">Add</div>
+      </div>
+      <input type="text" id="workspaceInviteNameInput" placeholder="Full name (for a brand-new person)" style="margin-top:8px;">
+      <input type="text" id="workspaceInviteEmailInput" placeholder="Email (optional, sends their PIN)" style="margin-top:8px;">
+      <div class="btn" id="workspaceInviteNewBtn" style="margin-top:8px;">Invite new person</div>
+      <div class="hint" id="workspaceInviteError" style="display:none;color:#ff6a6a;"></div>
+    </div>
+    <div class="modal-actions">
+      <div class="btn" onclick="closeModal('workspaceMembersOverlay')">Close</div>
     </div>
   </div>
 </div>
@@ -1522,6 +1591,12 @@
   let socketLastActivityAt = 0;
   let sessionChats = [];
   let pinnedChatIds = [];
+  // Workspaces: Personal (id: null) always exists implicitly; anything else
+  // is a real, separate-space workspace this account belongs to. Which one
+  // is "active" is a per-device UI preference, not server state, so it's
+  // just localStorage, same as e.g. the theme choice.
+  let myOrgs = [{ id: null, name: 'Personal' }];
+  let activeOrgId = localStorage.getItem('parapin_active_org') || null;
   let activeChatId = null;
   // True right after the user taps Back to the mobile chat list.
   // `activeChatId` deliberately stays set (still needed for read state etc.)
@@ -1665,6 +1740,13 @@
     myTrustedDeviceCount = r.body.trustedDeviceCount || 1;
     sessionChats = r.body.chats || [];
     pinnedChatIds = r.body.pinnedChatIds || [];
+    myOrgs = r.body.orgs || [{ id: null, name: 'Personal' }];
+    // The workspace remembered from last time might have been left, or this
+    // could be a first-ever login on this device, either way fall back to
+    // Personal rather than getting stuck showing an empty chat list for a
+    // workspace that's no longer valid.
+    if (!myOrgs.some(o => (o.id || null) === (activeOrgId || null))) activeOrgId = null;
+    updateWorkspaceBar();
     activeChatId = null;
     messagesByChat = {};
     userNameCache = {};
@@ -2407,7 +2489,12 @@
   function renderChatList(){
     const q = searchInput.value.trim().toLowerCase();
     chatListEl.innerHTML = '';
-    const sorted = [...sessionChats].sort((a,b)=>{
+    // A workspace is a genuinely separate space, only its own chats show
+    // while it's active, exactly like switching Slack workspaces. Personal
+    // (activeOrgId === null) shows chats with no orgId, same as before this
+    // feature existed.
+    const inActiveWorkspace = sessionChats.filter(c => (c.orgId || null) === (activeOrgId || null));
+    const sorted = [...inActiveWorkspace].sort((a,b)=>{
       const aPinned = pinnedChatIds.includes(a.id), bPinned = pinnedChatIds.includes(b.id);
       if (aPinned !== bPinned) return aPinned ? -1 : 1;
       const la = lastMsg(a), lb = lastMsg(b);
@@ -2465,6 +2552,166 @@
       chatListEl.appendChild(row);
     });
   }
+
+  // ---------------- workspaces ----------------
+  function currentOrg(){
+    return myOrgs.find(o => (o.id || null) === (activeOrgId || null)) || myOrgs[0];
+  }
+
+  function updateWorkspaceBar(){
+    const org = currentOrg();
+    document.getElementById('workspaceBarLabel').textContent = org ? org.name : 'Personal';
+  }
+
+  function renderWorkspaceList(){
+    const list = document.getElementById('workspaceList');
+    list.innerHTML = '';
+    myOrgs.forEach(org=>{
+      const row = document.createElement('div');
+      row.className = 'workspace-row' + ((org.id || null) === (activeOrgId || null) ? ' active' : '');
+      const left = document.createElement('div');
+      left.innerHTML = `<div class="workspace-row-name">${escapeHtml(org.name)}</div>` +
+        (org.id ? `<div class="workspace-row-admin">${org.isAdmin ? 'Admin' : 'Member'}</div>` : '<div class="workspace-row-admin">Your own space</div>');
+      row.appendChild(left);
+      if (org.id){
+        const manageBtn = document.createElement('div');
+        manageBtn.className = 'btn';
+        manageBtn.style.padding = '4px 10px';
+        manageBtn.style.fontSize = '11.5px';
+        manageBtn.textContent = org.isAdmin ? 'Manage' : 'Members';
+        manageBtn.onclick = (e)=>{ e.stopPropagation(); openWorkspaceMembers(org); };
+        row.appendChild(manageBtn);
+      }
+      row.onclick = ()=> switchWorkspace(org.id || null);
+      list.appendChild(row);
+    });
+  }
+
+  function switchWorkspace(orgId){
+    activeOrgId = orgId || null;
+    localStorage.setItem('parapin_active_org', activeOrgId || '');
+    updateWorkspaceBar();
+    activeChatId = null;
+    renderChatList();
+    renderConv();
+    closeModal('workspacesOverlay');
+  }
+
+  document.getElementById('workspaceBar').addEventListener('click', ()=>{
+    renderWorkspaceList();
+    openModal('workspacesOverlay');
+  });
+
+  document.getElementById('createWorkspaceBtn').addEventListener('click', ()=>{
+    closeModal('workspacesOverlay');
+    document.getElementById('createWorkspaceNameInput').value = '';
+    document.getElementById('createWorkspaceError').style.display = 'none';
+    openModal('createWorkspaceOverlay');
+    setTimeout(()=>document.getElementById('createWorkspaceNameInput').focus(), 50);
+  });
+
+  document.getElementById('createWorkspaceSaveBtn').addEventListener('click', async ()=>{
+    const errEl = document.getElementById('createWorkspaceError');
+    const name = document.getElementById('createWorkspaceNameInput').value.trim();
+    if (!name){ errEl.textContent = 'Enter a name.'; errEl.style.display = 'block'; return; }
+    const r = await apiFetch('/org/create', { method: 'POST', body: JSON.stringify({ name }) });
+    if (!r.ok || !r.body.org){
+      errEl.textContent = 'Could not create workspace. Try again.';
+      errEl.style.display = 'block';
+      return;
+    }
+    myOrgs.push({ id: r.body.org.id, name: r.body.org.name, isAdmin: true });
+    closeModal('createWorkspaceOverlay');
+    switchWorkspace(r.body.org.id);
+  });
+
+  let activeWorkspaceForMembers = null;
+
+  async function openWorkspaceMembers(org){
+    activeWorkspaceForMembers = org;
+    document.getElementById('workspaceMembersTitle').textContent = org.name + ' members';
+    document.getElementById('workspaceInviteSection').style.display = org.isAdmin ? 'block' : 'none';
+    document.getElementById('workspaceInviteError').style.display = 'none';
+    document.getElementById('workspaceInvitePinInput').value = '';
+    document.getElementById('workspaceInviteNameInput').value = '';
+    document.getElementById('workspaceInviteEmailInput').value = '';
+    const list = document.getElementById('workspaceMembersList');
+    list.innerHTML = '<div class="hint">Loading…</div>';
+    openModal('workspaceMembersOverlay');
+    const r = await apiFetch(`/org/members?orgId=${encodeURIComponent(org.id)}`);
+    list.innerHTML = '';
+    if (!r.ok || !r.body.members){
+      list.innerHTML = '<div class="hint">Could not load members.</div>';
+      return;
+    }
+    if (!r.body.members.length){
+      list.innerHTML = '<div class="hint">No members yet.</div>';
+      return;
+    }
+    r.body.members.forEach(m=>{
+      const row = document.createElement('div');
+      row.className = 'pick-row';
+      const av = document.createElement('div');
+      av.className = 'avatar';
+      av.style.width = '32px'; av.style.height = '32px'; av.style.fontSize = '12px';
+      renderAvatar(av, m.displayName || 'PArA PIN user', false, m.avatarUrl);
+      const nm = document.createElement('div');
+      nm.textContent = m.displayName || 'PArA PIN user';
+      row.appendChild(av);
+      row.appendChild(nm);
+      list.appendChild(row);
+    });
+  }
+
+  document.getElementById('workspaceInvitePinBtn').addEventListener('click', async ()=>{
+    const errEl = document.getElementById('workspaceInviteError');
+    const pinInput = document.getElementById('workspaceInvitePinInput');
+    const pin = pinInput.value.trim();
+    if (!/^\d{7}$/.test(pin)){ errEl.textContent = 'Enter their 7-digit PIN.'; errEl.style.display = 'block'; return; }
+    const targetPinHash = await sha256Hex(pin);
+    const r = await apiFetch('/org/invite', { method: 'POST', body: JSON.stringify({ orgId: activeWorkspaceForMembers.id, targetPinHash }) });
+    if (!r.ok){
+      const err = r.body && r.body.error;
+      errEl.textContent =
+        err === 'pin_not_found' ? "No PArA PIN found with that number, use 'Invite new person' below instead." :
+        err === 'rate_limited' ? `Too many lookups. Try again in ${formatRetryAfter(r.body.retryAfterMs)}.` :
+        'Could not add them. Try again.';
+      errEl.style.display = 'block';
+      return;
+    }
+    errEl.style.display = 'none';
+    pinInput.value = '';
+    openWorkspaceMembers(activeWorkspaceForMembers);
+  });
+
+  document.getElementById('workspaceInviteNewBtn').addEventListener('click', async ()=>{
+    const errEl = document.getElementById('workspaceInviteError');
+    const name = document.getElementById('workspaceInviteNameInput').value.trim();
+    const email = document.getElementById('workspaceInviteEmailInput').value.trim();
+    if (!name){ errEl.textContent = 'Enter their name.'; errEl.style.display = 'block'; return; }
+    const r = await apiFetch('/org/roster', { method: 'POST', body: JSON.stringify({ orgId: activeWorkspaceForMembers.id, name, email: email || undefined }) });
+    if (!r.ok){
+      const err = r.body && r.body.error;
+      errEl.textContent =
+        err === 'duplicate_name' ? 'Someone with that name is already pending/invited.' :
+        err === 'invalid_email' ? 'That email address looks off.' :
+        'Could not create the invite. Try again.';
+      errEl.style.display = 'block';
+      return;
+    }
+    errEl.style.display = 'none';
+    document.getElementById('workspaceInviteNameInput').value = '';
+    document.getElementById('workspaceInviteEmailInput').value = '';
+    if (r.body.emailSent) {
+      errEl.style.color = 'var(--text-mid)';
+      errEl.textContent = `Invited, their PIN was emailed to them.`;
+      errEl.style.display = 'block';
+    } else if (r.body.pin) {
+      errEl.style.color = 'var(--text-mid)';
+      errEl.textContent = `Invited. Their PIN is ${r.body.pin}, hand it to them directly (shown once).`;
+      errEl.style.display = 'block';
+    }
+  });
 
   function renderConv(){
     const chat = getChat(activeChatId);
@@ -6633,13 +6880,14 @@
     btn.disabled = true;
     try {
       const targetPinHash = await sha256Hex(pin);
-      const r = await apiFetch('/contacts', { method:'POST', body: JSON.stringify({ targetPinHash }) });
+      const r = await apiFetch('/contacts', { method:'POST', body: JSON.stringify({ targetPinHash, orgId: activeOrgId }) });
       if (!r.ok){
         const err = r.body && r.body.error;
         showDmError(
           err === 'pin_not_found' ? 'No PArA PIN found with that number.' :
           err === 'cannot_add_self' ? "That's your own PIN." :
           err === 'rate_limited' ? `Too many lookups. Try again in ${formatRetryAfter(r.body.retryAfterMs)}.` :
+          err === 'not_org_member' ? `That PIN isn't a member of ${currentOrg() ? currentOrg().name : 'this workspace'}.` :
           'Could not add contact. Try again.'
         );
         return;
@@ -6730,7 +6978,7 @@
     groupCreateBtn.disabled = true;
     try {
       const memberPinHashes = await Promise.all(extraPins.map(p => sha256Hex(p)));
-      const r = await apiFetch('/groups', { method:'POST', body: JSON.stringify({ name, memberIds: [...selectedContacts], memberPinHashes }) });
+      const r = await apiFetch('/groups', { method:'POST', body: JSON.stringify({ name, memberIds: [...selectedContacts], memberPinHashes, orgId: activeOrgId }) });
       if (!r.ok){
         const err = r.body && r.body.error;
         showGroupError(
@@ -6739,6 +6987,9 @@
           'Could not create group. Try again.'
         );
         return;
+      }
+      if (r.body.notOrgMember && r.body.notOrgMember.length){
+        showGroupError(`Some people weren't added, they aren't members of ${currentOrg() ? currentOrg().name : 'this workspace'} yet.`);
       }
       sessionChats.push(r.body.chat);
       activeChatId = r.body.chat.id;

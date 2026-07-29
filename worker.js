@@ -68,6 +68,44 @@ async function checkRateLimit(storage, key, { maxAttempts, windowMs, lockoutMs, 
   return { allowed: true };
 }
 
+// ================= Organizations / workspaces =================
+// A workspace is a genuinely separate space (its own directory, its own
+// chats), same idea as a Slack workspace, layered on top of the exact same
+// Registry storage rather than a new Durable Object per org, everyone's
+// existing personal space (orgId = null/undefined on a chat) keeps working
+// completely unchanged. A user's account (PIN, display name, avatar) is
+// shared across every workspace they're in, only the chat lists and
+// directories are walled off from each other.
+async function addUserToOrg(storage, orgId, userId) {
+  const org = await storage.get(`org:${orgId}`);
+  if (!org) return false;
+  const members = (await storage.get(`orgMembers:${orgId}`)) || [];
+  if (!members.includes(userId)) {
+    await storage.put(`orgMembers:${orgId}`, [...members, userId]);
+  }
+  const userOrgs = (await storage.get(`userOrgs:${userId}`)) || [];
+  if (!userOrgs.includes(orgId)) {
+    await storage.put(`userOrgs:${userId}`, [...userOrgs, orgId]);
+  }
+  return true;
+}
+
+async function isOrgMember(storage, orgId, userId) {
+  const members = (await storage.get(`orgMembers:${orgId}`)) || [];
+  return members.includes(userId);
+}
+
+async function isOrgAdmin(storage, orgId, userId) {
+  const org = await storage.get(`org:${orgId}`);
+  if (!org) return false;
+  if (Array.isArray(org.admins) && org.admins.includes(userId)) return true;
+  // App-wide admins (the same list /admin/promote manages) can manage any
+  // workspace too, useful for support/ops without needing to be personally
+  // added to every org that gets created.
+  const appAdmins = (await storage.get('admins')) || [];
+  return appAdmins.includes(userId);
+}
+
 // Builds the cached "public view" of a user that other people's clients can
 // look up via GET /users, kept in its own function so every place that
 // writes it (session, profile edits, key uploads, device resets, admin
@@ -384,6 +422,15 @@ export class Registry {
             } catch (e) {}
           }
         }
+
+        // A roster entry provisioned via /org/roster (as opposed to the
+        // app-wide /admin/roster) is how someone brand-new to PArA PIN gets
+        // into a specific workspace, claiming that PIN for the first time is
+        // this person's actual "join the org" moment, so it happens here
+        // rather than needing a separate acceptance step.
+        if (roster.orgId) {
+          await addUserToOrg(this.state.storage, roster.orgId, user.id);
+        }
       }
 
       const chatIds = (await this.state.storage.get(`userChats:${user.id}`)) || [];
@@ -434,6 +481,17 @@ export class Registry {
       const pinnedChatIds = (await this.state.storage.get(`pinnedChats:${user.id}`)) || [];
 
       const admins = (await this.state.storage.get('admins')) || [];
+
+      // "Personal" (id: null) always exists implicitly for everyone, it's
+      // exactly today's single shared space, unchanged. Anything else here
+      // is a real workspace this user has been added to.
+      const myOrgIds = (await this.state.storage.get(`userOrgs:${user.id}`)) || [];
+      const orgs = [{ id: null, name: 'Personal' }];
+      for (const oid of myOrgIds) {
+        const org = await this.state.storage.get(`org:${oid}`);
+        if (org) orgs.push({ id: org.id, name: org.name, isAdmin: await isOrgAdmin(this.state.storage, org.id, user.id) });
+      }
+
       return json({
         userId: user.id,
         displayName: user.displayName,
@@ -450,6 +508,7 @@ export class Registry {
         chats: visibleChats,
         summaries,
         pinnedChatIds,
+        orgs,
       });
     }
 
@@ -513,7 +572,7 @@ export class Registry {
     }
 
     if (request.method === 'POST' && url.pathname === '/contact') {
-      const { pinHash, targetPinHash } = await request.json();
+      const { pinHash, targetPinHash, orgId } = await request.json();
       const me = await this.state.storage.get(`user:${pinHash}`);
       if (!me) return json({ error: 'not_registered' }, 401);
 
@@ -527,14 +586,26 @@ export class Registry {
       });
       if (!rl.allowed) return json({ error: 'rate_limited', retryAfterMs: rl.retryAfterMs }, 429);
 
+      if (orgId && !(await isOrgMember(this.state.storage, orgId, me.id))) {
+        return json({ error: 'not_org_member' }, 403);
+      }
+
       const other = await this.state.storage.get(`user:${targetPinHash}`);
       if (!other) return json({ error: 'pin_not_found' }, 404);
       if (other.id === me.id) return json({ error: 'cannot_add_self' }, 400);
 
+      // A workspace is a genuinely separate space, per the earlier design
+      // decision, so starting a chat "inside" one requires the other person
+      // to actually be a member of it, otherwise this would be a backdoor
+      // for reaching people outside the workspace from within it.
+      if (orgId && !(await isOrgMember(this.state.storage, orgId, other.id))) {
+        return json({ error: 'not_org_member' }, 403);
+      }
+
       const myChatIds = (await this.state.storage.get(`userChats:${me.id}`)) || [];
       for (const cid of myChatIds) {
         const c = await this.state.storage.get(`chat:${cid}`);
-        if (c && c.type === 'dm' && c.memberIds.includes(other.id)) {
+        if (c && c.type === 'dm' && c.memberIds.includes(other.id) && (c.orgId || null) === (orgId || null)) {
           // Re-adding someone whose chat you'd previously removed from your
           // own list should bring it back, you clearly want to talk to them
           // again, so there's no reason to leave it hidden.
@@ -557,14 +628,14 @@ export class Registry {
       const otherChatIds = (await this.state.storage.get(`userChats:${other.id}`)) || [];
       for (const cid of otherChatIds) {
         const c = await this.state.storage.get(`chat:${cid}`);
-        if (c && c.type === 'dm' && c.memberIds.includes(me.id)) {
+        if (c && c.type === 'dm' && c.memberIds.includes(me.id) && (c.orgId || null) === (orgId || null)) {
           await this.state.storage.put(`userChats:${me.id}`, [...myChatIds, cid]);
           return json({ chat: c, existing: true });
         }
       }
 
       const chatId = crypto.randomUUID();
-      const chat = { id: chatId, type: 'dm', name: null, memberIds: [me.id, other.id], createdAt: Date.now() };
+      const chat = { id: chatId, type: 'dm', name: null, memberIds: [me.id, other.id], createdAt: Date.now(), orgId: orgId || null };
       await this.state.storage.put(`chat:${chatId}`, chat);
       await this.state.storage.put(`userChats:${me.id}`, [...myChatIds, chatId]);
       await this.state.storage.put(`userChats:${other.id}`, [...otherChatIds, chatId]);
@@ -575,9 +646,13 @@ export class Registry {
     }
 
     if (request.method === 'POST' && url.pathname === '/group') {
-      const { pinHash, name, memberPinHashes, memberIds: directMemberIds } = await request.json();
+      const { pinHash, name, memberPinHashes, memberIds: directMemberIds, orgId } = await request.json();
       const me = await this.state.storage.get(`user:${pinHash}`);
       if (!me) return json({ error: 'not_registered' }, 401);
+
+      if (orgId && !(await isOrgMember(this.state.storage, orgId, me.id))) {
+        return json({ error: 'not_org_member' }, 403);
+      }
 
       // memberPinHashes is a batch of "does this PIN belong to someone"
       // checks, exactly what /contact's rate limit exists to throttle, a
@@ -599,22 +674,27 @@ export class Registry {
 
       const memberIds = [me.id];
       const notFound = [];
+      const notOrgMember = [];
 
       for (const id of directMemberIds || []) {
         if (id === me.id || memberIds.includes(id)) continue;
         const rec = await this.state.storage.get(`userById:${id}`);
-        if (rec) memberIds.push(id);
+        if (!rec) continue;
+        if (orgId && !(await isOrgMember(this.state.storage, orgId, id))) { notOrgMember.push(id); continue; }
+        memberIds.push(id);
       }
 
       for (const ph of memberPinHashes || []) {
         const u = await this.state.storage.get(`user:${ph}`);
-        if (u && !memberIds.includes(u.id)) memberIds.push(u.id);
-        else if (!u) notFound.push(ph);
+        if (!u) { notFound.push(ph); continue; }
+        if (memberIds.includes(u.id)) continue;
+        if (orgId && !(await isOrgMember(this.state.storage, orgId, u.id))) { notOrgMember.push(u.id); continue; }
+        memberIds.push(u.id);
       }
-      if (memberIds.length < 2) return json({ error: 'need_at_least_one_member', notFound }, 400);
+      if (memberIds.length < 2) return json({ error: 'need_at_least_one_member', notFound, notOrgMember }, 400);
 
       const chatId = crypto.randomUUID();
-      const chat = { id: chatId, type: 'group', name: name || 'Group', memberIds, createdAt: Date.now(), createdBy: me.id, avatarUrl: null };
+      const chat = { id: chatId, type: 'group', name: name || 'Group', memberIds, createdAt: Date.now(), createdBy: me.id, avatarUrl: null, orgId: orgId || null };
       await this.state.storage.put(`chat:${chatId}`, chat);
       for (const uid of memberIds) {
         const list = (await this.state.storage.get(`userChats:${uid}`)) || [];
@@ -622,7 +702,7 @@ export class Registry {
       }
       const allChatIds = (await this.state.storage.get('allChatIds')) || [];
       await this.state.storage.put('allChatIds', [...allChatIds, chatId]);
-      return json({ chat, notFound });
+      return json({ chat, notFound, notOrgMember });
     }
 
     // Group photo, restricted to whoever created the group and to app-wide
@@ -765,6 +845,131 @@ export class Registry {
       const capped = log.slice(0, 50);
       await this.state.storage.put(`callLog:${userId}`, capped);
       return json({ ok: true, log: capped });
+    }
+
+    // ---- Organizations / workspaces ----
+    // Admin-invited only: no email-domain detection, no self-serve joining.
+    // Someone who already has a PArA PIN account gets added by PIN (like
+    // /contact). Someone brand new gets provisioned a PIN via /org/roster,
+    // reusing the exact same generate-PIN-and-email-it flow as /admin/roster,
+    // just tagged with an orgId so claiming it also joins that workspace
+    // (see the roster-claim block in /session above).
+    if (request.method === 'POST' && url.pathname === '/org/create') {
+      const { pinHash, name } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!name || !name.trim()) return json({ error: 'missing_name' }, 400);
+
+      const orgId = crypto.randomUUID();
+      const org = { id: orgId, name: name.trim().slice(0, 60), createdAt: Date.now(), createdBy: me.id, admins: [me.id] };
+      await this.state.storage.put(`org:${orgId}`, org);
+      await addUserToOrg(this.state.storage, orgId, me.id);
+      return json({ org });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/org/invite') {
+      const { pinHash, orgId, targetPinHash } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgAdmin(this.state.storage, orgId, me.id))) {
+        return json({ error: 'forbidden' }, 403);
+      }
+
+      // Same "does this PIN belong to someone" surface as /contact, sharing
+      // its rate-limit bucket so this can't be used to get extra lookups.
+      const rl = await checkRateLimit(this.state.storage, `contact:${me.id}`, {
+        maxAttempts: 15, windowMs: 10 * 60 * 1000, lockoutMs: 30 * 60 * 1000,
+      });
+      if (!rl.allowed) return json({ error: 'rate_limited', retryAfterMs: rl.retryAfterMs }, 429);
+
+      const other = await this.state.storage.get(`user:${targetPinHash}`);
+      if (!other) return json({ error: 'pin_not_found' }, 404);
+      await addUserToOrg(this.state.storage, orgId, other.id);
+      return json({ ok: true, userId: other.id, displayName: other.displayName, avatarUrl: other.avatarUrl || null });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/org/members') {
+      const pinHash = url.searchParams.get('pinHash');
+      const orgId = url.searchParams.get('orgId');
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) {
+        return json({ error: 'forbidden' }, 403);
+      }
+      const memberIds = (await this.state.storage.get(`orgMembers:${orgId}`)) || [];
+      const members = [];
+      for (const id of memberIds) {
+        const rec = await this.state.storage.get(`userById:${id}`);
+        if (rec) members.push(rec);
+      }
+      return json({ members });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/org/leave') {
+      const { pinHash, orgId } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      const userOrgs = (await this.state.storage.get(`userOrgs:${me.id}`)) || [];
+      await this.state.storage.put(`userOrgs:${me.id}`, userOrgs.filter((id) => id !== orgId));
+      const members = (await this.state.storage.get(`orgMembers:${orgId}`)) || [];
+      await this.state.storage.put(`orgMembers:${orgId}`, members.filter((id) => id !== me.id));
+      return json({ ok: true });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/org/roster') {
+      const { pinHash, orgId, name, department, email, force } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgAdmin(this.state.storage, orgId, me.id))) {
+        return json({ error: 'forbidden' }, 403);
+      }
+      if (!name || !name.trim()) return json({ error: 'missing_name' }, 400);
+      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: 'invalid_email' }, 400);
+
+      if (!force) {
+        const trimmedName = name.trim().toLowerCase();
+        const list = (await this.state.storage.get('rosterList')) || [];
+        for (const id of list) {
+          const e = await this.state.storage.get(`roster:${id}`);
+          if (e && e.status !== 'disabled' && e.name.trim().toLowerCase() === trimmedName) {
+            return json({ error: 'duplicate_name', existingStatus: e.status }, 409);
+          }
+        }
+      }
+
+      let pin = null;
+      let pinHashOut = null;
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const candidate = String(Math.floor(1000000 + Math.random() * 9000000));
+        const candidateHash = await sha256Hex(candidate);
+        const existingUser = await this.state.storage.get(`user:${candidateHash}`);
+        const existingRoster = await this.state.storage.get(`rosterByPin:${candidateHash}`);
+        if (!existingUser && !existingRoster) { pin = candidate; pinHashOut = candidateHash; break; }
+      }
+      if (!pin) return json({ error: 'could_not_generate_pin' }, 500);
+
+      const id = crypto.randomUUID();
+      const entry = {
+        id,
+        name: name.trim().slice(0, 60),
+        department: (department || '').trim().slice(0, 60) || null,
+        email: email ? String(email).trim().slice(0, 200) : null,
+        status: 'pending',
+        userId: null,
+        orgId,
+        createdAt: Date.now(),
+        claimedAt: null,
+      };
+      await this.state.storage.put(`roster:${id}`, entry);
+      await this.state.storage.put(`rosterByPin:${pinHashOut}`, id);
+      const list = (await this.state.storage.get('rosterList')) || [];
+      await this.state.storage.put('rosterList', [...list, id]);
+
+      let emailResult = { sent: false, error: 'no_email_provided' };
+      if (entry.email) {
+        emailResult = await sendOnboardingEmail(this.env, { to: entry.email, name: entry.name, pin });
+      }
+      return json({ entry, pin: emailResult.sent ? undefined : pin, emailSent: emailResult.sent, emailError: emailResult.sent ? undefined : emailResult.error });
     }
 
     // ---- Admin roster: lightweight stand-in for "HR-linked onboarding" ----
@@ -2438,10 +2643,10 @@ export default {
       if (request.method === 'POST' && url.pathname === '/api/contacts') {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
-        const { targetPinHash } = await request.json();
+        const { targetPinHash, orgId } = await request.json();
         const res = await registryStub.fetch('https://internal/contact', {
           method: 'POST',
-          body: JSON.stringify({ pinHash, targetPinHash }),
+          body: JSON.stringify({ pinHash, targetPinHash, orgId: orgId || null }),
         });
         return res;
       }
@@ -2449,12 +2654,60 @@ export default {
       if (request.method === 'POST' && url.pathname === '/api/groups') {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
-        const { name, memberPinHashes, memberIds } = await request.json();
+        const { name, memberPinHashes, memberIds, orgId } = await request.json();
         const res = await registryStub.fetch('https://internal/group', {
           method: 'POST',
-          body: JSON.stringify({ pinHash, name, memberPinHashes, memberIds }),
+          body: JSON.stringify({ pinHash, name, memberPinHashes, memberIds, orgId: orgId || null }),
         });
         return res;
+      }
+
+      // ---- Organizations / workspaces: thin authenticated proxy to Registry ----
+      if (request.method === 'POST' && url.pathname === '/api/org/create') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const { name } = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/org/create', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, name }),
+        });
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/org/invite') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const { orgId, targetPinHash } = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/org/invite', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, orgId, targetPinHash }),
+        });
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/org/members') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const orgId = url.searchParams.get('orgId') || '';
+        return registryStub.fetch(`https://internal/org/members?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}`);
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/org/leave') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const { orgId } = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/org/leave', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, orgId }),
+        });
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/org/roster') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/org/roster', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, orgId: body.orgId, name: body.name, department: body.department, email: body.email, force: !!body.force }),
+        });
       }
 
       if (request.method === 'POST' && url.pathname === '/api/groups/leave') {
