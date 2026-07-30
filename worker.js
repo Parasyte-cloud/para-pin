@@ -87,6 +87,11 @@ async function addUserToOrg(storage, orgId, userId) {
   if (!userOrgs.includes(orgId)) {
     await storage.put(`userOrgs:${userId}`, [...userOrgs, orgId]);
   }
+  // Arrivo People (HR module) uses this as the default hire date for anyone
+  // who hasn't been given a real one by HR yet, only set once so a later
+  // re-add (e.g. leave-then-rejoin) doesn't reset someone's tenure.
+  const joinKey = `orgJoinedAt:${orgId}:${userId}`;
+  if (!(await storage.get(joinKey))) await storage.put(joinKey, Date.now());
   return true;
 }
 
@@ -104,6 +109,78 @@ async function isOrgAdmin(storage, orgId, userId) {
   // added to every org that gets created.
   const appAdmins = (await storage.get('admins')) || [];
   return appAdmins.includes(userId);
+}
+
+// ==================== Arrivo People (HR module, Phase 1) ====================
+// Workspace-scoped like everything else org-related: Ride Arrivo's employee
+// data never crosses into another workspace or into Personal. Org admins
+// double as "HR" for permission purposes (same isOrgAdmin gate the rest of
+// the workspace features use), a direct manager gets a narrower slice
+// (approve their own reports' leave) via employee.job.current.managerId.
+
+// Lazily created on first touch rather than at org-join time, most org
+// members will never fill in HR fields at all in Phase 1, forcing a full
+// record to exist immediately would just be empty rows nobody asked for.
+async function getEmployee(storage, orgId, userId) {
+  const rec = await storage.get(`employee:${orgId}:${userId}`);
+  if (rec) return rec;
+  const joinedAt = (await storage.get(`orgJoinedAt:${orgId}:${userId}`)) || Date.now();
+  return {
+    orgId, userId,
+    personal: {
+      firstName: null, middleName: null, lastName: null, preferredName: null,
+      dob: null, gender: null, maritalStatus: null, nationalId: null,
+      homeAddress: { street: null, city: null, state: null, postal: null, country: null },
+      workPhone: null, personalMobile: null, personalEmail: null,
+      officeLocation: null, employmentType: 'full_time',
+    },
+    hireDate: joinedAt,
+    job: { current: { effectiveDate: joinedAt, entity: null, department: null, jobTitle: null, managerId: null }, history: [] },
+    createdAt: joinedAt, updatedAt: joinedAt,
+  };
+}
+
+// Annual leave: 20/year, pro-rated by whole months remaining in the hire
+// year, full 20 every Jan 1 after (per spec). Sick leave: flat 10/year, no
+// proration, resets every calendar year (tracked as "used year-to-date").
+// Carryover/caps are deliberately out of scope for Phase 1.
+function entitlementForYear(hireDate, type, year) {
+  const hireYear = new Date(hireDate).getUTCFullYear();
+  if (type === 'sick') return year < hireYear ? 0 : 10;
+  if (year < hireYear) return 0;
+  if (year > hireYear) return 20;
+  const hireMonth = new Date(hireDate).getUTCMonth(); // 0-11
+  const monthsRemaining = 12 - hireMonth;
+  return Math.round(20 * monthsRemaining / 12);
+}
+
+// Ledger rows are the ONLY source of truth for usage/adjustments (nothing is
+// mutated in place), so the balance is always re-derivable and the history
+// table (below) is just this same ledger rendered, not a separate log.
+async function getLeaveLedger(storage, orgId, userId) {
+  return (await storage.get(`leaveLedger:${orgId}:${userId}`)) || [];
+}
+async function appendLeaveLedger(storage, orgId, userId, entry) {
+  const ledger = await getLeaveLedger(storage, orgId, userId);
+  ledger.push({ id: crypto.randomUUID(), ts: Date.now(), ...entry });
+  await storage.put(`leaveLedger:${orgId}:${userId}`, ledger);
+}
+// Annual leave doesn't reset, so its balance nets the WHOLE ledger; sick
+// leave resets every calendar year, so only this year's rows count.
+function computeLeaveBalance(ledger, type, hireDate, now = Date.now()) {
+  const year = new Date(now).getUTCFullYear();
+  const entitlement = entitlementForYear(hireDate, type, year);
+  const relevant = ledger.filter((e) => e.type === type && (type === 'annual' || new Date(e.ts).getUTCFullYear() === year));
+  const net = relevant.reduce((sum, e) => sum + e.delta, 0);
+  return Math.round((entitlement + net) * 100) / 100;
+}
+
+function daysBetweenInclusive(startDate, endDate, halfDay) {
+  const start = new Date(startDate + 'T00:00:00Z').getTime();
+  const end = new Date(endDate + 'T00:00:00Z').getTime();
+  if (isNaN(start) || isNaN(end) || end < start) return 0;
+  const days = Math.round((end - start) / 86400000) + 1;
+  return halfDay ? 0.5 : days;
 }
 
 // Builds the cached "public view" of a user that other people's clients can
@@ -1007,6 +1084,306 @@ export class Registry {
         emailResult = await sendOnboardingEmail(this.env, { to: entry.email, name: entry.name, pin });
       }
       return json({ entry, pin: emailResult.sent ? undefined : pin, emailSent: emailResult.sent, emailError: emailResult.sent ? undefined : emailResult.error });
+    }
+
+    // ==================== Arrivo People (HR module, Phase 1) ====================
+    if (request.method === 'GET' && url.pathname === '/org/hr/profile') {
+      const pinHash = url.searchParams.get('pinHash');
+      const orgId = url.searchParams.get('orgId');
+      const targetUserId = url.searchParams.get('targetUserId') || null;
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+      const viewingSelf = !targetUserId || targetUserId === me.id;
+      const isAdmin = await isOrgAdmin(this.state.storage, orgId, me.id);
+      // Anyone in the org can look someone up via the People directory (that's
+      // the whole point of it), but a plain colleague only ever gets the
+      // "public" fields the directory/org-chart are meant to show, not the
+      // full record, per the access-control matrix (address, national ID,
+      // personal contact info, DOB are self/HR-only).
+      let employee = await getEmployee(this.state.storage, orgId, targetUserId || me.id);
+      if (!viewingSelf && !isAdmin) {
+        employee = {
+          orgId, userId: employee.userId,
+          personal: {
+            firstName: employee.personal.firstName, lastName: employee.personal.lastName,
+            preferredName: employee.personal.preferredName, officeLocation: employee.personal.officeLocation,
+            middleName: null, dob: null, gender: null, maritalStatus: null, nationalId: null,
+            homeAddress: { street: null, city: null, state: null, postal: null, country: null },
+            workPhone: null, personalMobile: null, personalEmail: null, employmentType: null,
+          },
+          hireDate: null,
+          job: { current: employee.job.current, history: [] },
+        };
+      }
+      return json({ employee, canEditJob: isAdmin, isSelf: viewingSelf });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/org/hr/profile') {
+      const { pinHash, orgId, targetUserId, personal, job, hireDate } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+      const isAdmin = await isOrgAdmin(this.state.storage, orgId, me.id);
+      const uid = targetUserId || me.id;
+      const editingSelf = uid === me.id;
+      if (!editingSelf && !isAdmin) return json({ error: 'forbidden' }, 403);
+      const employee = await getEmployee(this.state.storage, orgId, uid);
+
+      // Self-service fields any employee can edit for themselves; HR (org
+      // admin) can edit these for anyone. Job history, hire date,
+      // employment type, and national ID are HR-only per the access matrix.
+      if (personal && typeof personal === 'object') {
+        const selfEditable = ['firstName', 'middleName', 'lastName', 'preferredName', 'dob', 'gender', 'maritalStatus', 'homeAddress', 'workPhone', 'personalMobile', 'personalEmail', 'officeLocation'];
+        const hrOnly = ['nationalId', 'employmentType'];
+        for (const k of selfEditable) if (k in personal) employee.personal[k] = personal[k];
+        if (isAdmin) for (const k of hrOnly) if (k in personal) employee.personal[k] = personal[k];
+      }
+      if (job && typeof job === 'object' && isAdmin) {
+        if (job.current) {
+          employee.job.history.unshift(employee.job.current);
+          employee.job.current = { effectiveDate: Date.now(), entity: job.current.entity || null, department: job.current.department || null, jobTitle: job.current.jobTitle || null, managerId: job.current.managerId || null };
+        }
+      }
+      // Hire date drives tenure/accrual math, changing it retroactively
+      // affects both balance calculations, HR-only for exactly that reason.
+      if (isAdmin && hireDate){
+        const parsed = new Date(hireDate).getTime();
+        if (!isNaN(parsed)) employee.hireDate = parsed;
+      }
+      employee.updatedAt = Date.now();
+      await this.state.storage.put(`employee:${orgId}:${uid}`, employee);
+      return json({ employee });
+    }
+
+    // People directory: photo/name/title/department only, never the
+    // sensitive fields (address, emergency contact, compensation aren't
+    // even modeled yet in Phase 1), matching the access-control matrix.
+    if (request.method === 'GET' && url.pathname === '/org/hr/directory') {
+      const pinHash = url.searchParams.get('pinHash');
+      const orgId = url.searchParams.get('orgId');
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+      const memberIds = (await this.state.storage.get(`orgMembers:${orgId}`)) || [];
+      const rows = [];
+      for (const id of memberIds) {
+        const userRec = await this.state.storage.get(`userById:${id}`);
+        if (!userRec) continue;
+        const employee = await getEmployee(this.state.storage, orgId, id);
+        rows.push({
+          userId: id, displayName: userRec.displayName, avatarUrl: userRec.avatarUrl || null,
+          jobTitle: employee.job.current.jobTitle || null, department: employee.job.current.department || null,
+          managerId: employee.job.current.managerId || null,
+        });
+      }
+      return json({ members: rows });
+    }
+
+    // Home dashboard: own leave balances/upcoming leave, plus org-wide
+    // celebrations, who's out, and welcome-new-hires widgets.
+    if (request.method === 'GET' && url.pathname === '/org/hr/home') {
+      const pinHash = url.searchParams.get('pinHash');
+      const orgId = url.searchParams.get('orgId');
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+
+      const myEmployee = await getEmployee(this.state.storage, orgId, me.id);
+      const myLedger = await getLeaveLedger(this.state.storage, orgId, me.id);
+      const balances = {
+        annual: computeLeaveBalance(myLedger, 'annual', myEmployee.hireDate),
+        sick: computeLeaveBalance(myLedger, 'sick', myEmployee.hireDate),
+      };
+
+      const memberIds = (await this.state.storage.get(`orgMembers:${orgId}`)) || [];
+      const now = Date.now();
+      const in30Days = now + 30 * 24 * 60 * 60 * 1000;
+      const celebrations = [];
+      const newHires = [];
+      const nowDate = new Date(now);
+
+      for (const id of memberIds) {
+        const userRec = await this.state.storage.get(`userById:${id}`);
+        if (!userRec) continue;
+        const employee = await getEmployee(this.state.storage, orgId, id);
+        // Birthdays and work anniversaries: next occurrence of the
+        // month/day, whether that's later this year or wraps into next.
+        for (const [dateField, label] of [[employee.personal.dob, 'birthday'], [employee.hireDate, 'anniversary']]) {
+          if (!dateField) continue;
+          const d = new Date(dateField);
+          let next = new Date(Date.UTC(nowDate.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+          if (next.getTime() < now - 24 * 60 * 60 * 1000) next = new Date(Date.UTC(nowDate.getUTCFullYear() + 1, d.getUTCMonth(), d.getUTCDate()));
+          if (next.getTime() <= in30Days) {
+            celebrations.push({
+              userId: id, displayName: userRec.displayName, avatarUrl: userRec.avatarUrl || null,
+              type: label, date: next.getTime(),
+              years: label === 'anniversary' ? next.getUTCFullYear() - d.getUTCFullYear() : null,
+            });
+          }
+        }
+        if (userRec.hasOwnProperty('_placeholder')) continue; // never set, keeps this branch harmless if fields shift later
+        const hireD = new Date(employee.hireDate);
+        if (hireD.getUTCFullYear() === nowDate.getUTCFullYear() && hireD.getUTCMonth() === nowDate.getUTCMonth()) {
+          newHires.push({ userId: id, displayName: userRec.displayName, avatarUrl: userRec.avatarUrl || null, hireDate: employee.hireDate });
+        }
+      }
+      celebrations.sort((a, b) => a.date - b.date);
+
+      // Who's out: anyone with an approved leave request overlapping today.
+      const requestIds = (await this.state.storage.get(`leaveRequestIds:${orgId}`)) || [];
+      const todayStr = new Date(now).toISOString().slice(0, 10);
+      const whosOut = [];
+      const myUpcoming = [];
+      for (const rid of requestIds) {
+        const reqRec = await this.state.storage.get(`leaveRequest:${orgId}:${rid}`);
+        if (!reqRec || reqRec.status !== 'approved') continue;
+        if (reqRec.startDate <= todayStr && reqRec.endDate >= todayStr) {
+          const userRec = await this.state.storage.get(`userById:${reqRec.userId}`);
+          whosOut.push({ userId: reqRec.userId, displayName: userRec ? userRec.displayName : 'Someone', avatarUrl: userRec ? userRec.avatarUrl : null, type: reqRec.type, endDate: reqRec.endDate });
+        }
+        if (reqRec.userId === me.id && reqRec.endDate >= todayStr) {
+          myUpcoming.push({ id: reqRec.id, type: reqRec.type, startDate: reqRec.startDate, endDate: reqRec.endDate });
+        }
+      }
+      myUpcoming.sort((a, b) => (a.startDate < b.startDate ? -1 : 1));
+
+      return json({ balances, celebrations, whosOut, newHires, myUpcoming: myUpcoming.slice(0, 5) });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/org/hr/leave/request') {
+      const { pinHash, orgId, type, startDate, endDate, halfDay, reason } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+      if (!['annual', 'sick'].includes(type)) return json({ error: 'invalid_type' }, 400);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate || '') || !/^\d{4}-\d{2}-\d{2}$/.test(endDate || '')) {
+        return json({ error: 'invalid_dates' }, 400);
+      }
+      const days = daysBetweenInclusive(startDate, endDate, !!halfDay);
+      if (days <= 0) return json({ error: 'invalid_dates' }, 400);
+
+      const employee = await getEmployee(this.state.storage, orgId, me.id);
+      const ledger = await getLeaveLedger(this.state.storage, orgId, me.id);
+      const currentBalance = computeLeaveBalance(ledger, type, employee.hireDate);
+      if (days > currentBalance) return json({ error: 'insufficient_balance', balance: currentBalance }, 400);
+
+      const id = crypto.randomUUID();
+      const reqRec = {
+        id, orgId, userId: me.id, type, startDate, endDate, halfDay: !!halfDay, days,
+        reason: (reason || '').toString().slice(0, 500),
+        status: 'pending', createdAt: Date.now(), decidedAt: null, decidedBy: null, comment: null,
+      };
+      await this.state.storage.put(`leaveRequest:${orgId}:${id}`, reqRec);
+      const ids = (await this.state.storage.get(`leaveRequestIds:${orgId}`)) || [];
+      await this.state.storage.put(`leaveRequestIds:${orgId}`, [...ids, id]);
+
+      // Notify HR (all org admins) and the requester's direct manager, if
+      // set, reusing the same per-user push/in-app channel 1:1 calls use.
+      const notifyTargets = new Set((await this.state.storage.get(`org:${orgId}`)).admins || []);
+      if (employee.job.current.managerId) notifyTargets.add(employee.job.current.managerId);
+      notifyTargets.delete(me.id);
+      if (this.env.USER_CHANNEL) {
+        const payload = JSON.stringify({ title: 'PArA PIN', body: `${me.displayName || 'Someone'} requested ${type === 'sick' ? 'sick' : 'annual'} leave (${days}d)`, chatId: null });
+        for (const targetId of notifyTargets) {
+          try { await this.env.USER_CHANNEL.get(this.env.USER_CHANNEL.idFromName(targetId)).fetch('https://internal/push-direct', { method: 'POST', body: payload }); } catch (e) {}
+        }
+      }
+      return json({ request: reqRec });
+    }
+
+    // Pending requests visible to the caller: org admins (HR) see every
+    // pending request; a line manager sees only their own reports'.
+    if (request.method === 'GET' && url.pathname === '/org/hr/leave/inbox') {
+      const pinHash = url.searchParams.get('pinHash');
+      const orgId = url.searchParams.get('orgId');
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+      const isAdmin = await isOrgAdmin(this.state.storage, orgId, me.id);
+      const ids = (await this.state.storage.get(`leaveRequestIds:${orgId}`)) || [];
+      const out = [];
+      for (const rid of ids) {
+        const reqRec = await this.state.storage.get(`leaveRequest:${orgId}:${rid}`);
+        if (!reqRec || reqRec.status !== 'pending') continue;
+        let visible = isAdmin;
+        if (!visible) {
+          const requesterEmployee = await getEmployee(this.state.storage, orgId, reqRec.userId);
+          visible = requesterEmployee.job.current.managerId === me.id;
+        }
+        if (!visible) continue;
+        const userRec = await this.state.storage.get(`userById:${reqRec.userId}`);
+        out.push({ ...reqRec, displayName: userRec ? userRec.displayName : 'Someone', avatarUrl: userRec ? userRec.avatarUrl : null });
+      }
+      return json({ requests: out });
+    }
+
+    if (request.method === 'POST' && url.pathname.match(/^\/org\/hr\/leave\/[^/]+\/decide$/)) {
+      const requestId = url.pathname.split('/')[4];
+      const { pinHash, orgId, decision, comment } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+      if (!['approve', 'decline'].includes(decision)) return json({ error: 'invalid_decision' }, 400);
+      const reqRec = await this.state.storage.get(`leaveRequest:${orgId}:${requestId}`);
+      if (!reqRec) return json({ error: 'not_found' }, 404);
+      if (reqRec.status !== 'pending') return json({ error: 'already_decided' }, 400);
+
+      const isAdmin = await isOrgAdmin(this.state.storage, orgId, me.id);
+      let allowed = isAdmin;
+      if (!allowed) {
+        const requesterEmployee = await getEmployee(this.state.storage, orgId, reqRec.userId);
+        allowed = requesterEmployee.job.current.managerId === me.id;
+      }
+      if (!allowed) return json({ error: 'forbidden' }, 403);
+
+      reqRec.status = decision === 'approve' ? 'approved' : 'declined';
+      reqRec.decidedAt = Date.now();
+      reqRec.decidedBy = me.id;
+      reqRec.comment = (comment || '').toString().slice(0, 500) || null;
+      await this.state.storage.put(`leaveRequest:${orgId}:${requestId}`, reqRec);
+
+      if (decision === 'approve') {
+        await appendLeaveLedger(this.state.storage, orgId, reqRec.userId, {
+          type: reqRec.type, delta: -reqRec.days, kind: 'used',
+          note: `${reqRec.startDate} to ${reqRec.endDate}${reqRec.halfDay ? ' (half day)' : ''}`,
+          requestId: reqRec.id,
+        });
+      }
+
+      if (this.env.USER_CHANNEL) {
+        const payload = JSON.stringify({
+          title: 'PArA PIN',
+          body: `Your ${reqRec.type === 'sick' ? 'sick' : 'annual'} leave request was ${reqRec.status}${reqRec.comment ? `: ${reqRec.comment}` : ''}`,
+          chatId: null,
+        });
+        try { await this.env.USER_CHANNEL.get(this.env.USER_CHANNEL.idFromName(reqRec.userId)).fetch('https://internal/push-direct', { method: 'POST', body: payload }); } catch (e) {}
+      }
+      return json({ request: reqRec });
+    }
+
+    // History table: ledger rows (accruals/usage/adjustments) merged with
+    // the request that caused each usage row, sorted newest first, with a
+    // running balance column computed left-to-right in chronological order.
+    if (request.method === 'GET' && url.pathname === '/org/hr/leave/history') {
+      const pinHash = url.searchParams.get('pinHash');
+      const orgId = url.searchParams.get('orgId');
+      const targetUserId = url.searchParams.get('targetUserId') || null;
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+      const uid = targetUserId || me.id;
+      if (uid !== me.id && !(await isOrgAdmin(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+
+      const employee = await getEmployee(this.state.storage, orgId, uid);
+      const ledger = (await getLeaveLedger(this.state.storage, orgId, uid)).slice().sort((a, b) => a.ts - b.ts);
+      let runningAnnual = 0;
+      let runningSick = 0;
+      const rows = ledger.map((e) => {
+        if (e.type === 'annual') runningAnnual += e.delta; else runningSick += e.delta;
+        return { ...e, runningBalance: e.type === 'annual' ? runningAnnual : runningSick };
+      }).reverse();
+      return json({ rows, hireDate: employee.hireDate });
     }
 
     // ---- Admin roster: lightweight stand-in for "HR-linked onboarding" ----
@@ -2836,6 +3213,75 @@ export default {
           method: 'POST',
           body: JSON.stringify({ pinHash, orgId: body.orgId, name: body.name, department: body.department, email: body.email, force: !!body.force }),
         });
+      }
+
+      // ---- Arrivo People (HR module): thin authenticated proxy to Registry ----
+      if (request.method === 'GET' && url.pathname === '/api/org/hr/profile') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const orgId = url.searchParams.get('orgId') || '';
+        const targetUserId = url.searchParams.get('targetUserId') || '';
+        return registryStub.fetch(`https://internal/org/hr/profile?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}&targetUserId=${encodeURIComponent(targetUserId)}`);
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/org/hr/profile') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/org/hr/profile', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, orgId: body.orgId, targetUserId: body.targetUserId, personal: body.personal, job: body.job, hireDate: body.hireDate }),
+        });
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/org/hr/directory') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const orgId = url.searchParams.get('orgId') || '';
+        return registryStub.fetch(`https://internal/org/hr/directory?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}`);
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/org/hr/home') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const orgId = url.searchParams.get('orgId') || '';
+        return registryStub.fetch(`https://internal/org/hr/home?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}`);
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/org/hr/leave/request') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/org/hr/leave/request', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, orgId: body.orgId, type: body.type, startDate: body.startDate, endDate: body.endDate, halfDay: !!body.halfDay, reason: body.reason }),
+        });
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/org/hr/leave/inbox') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const orgId = url.searchParams.get('orgId') || '';
+        return registryStub.fetch(`https://internal/org/hr/leave/inbox?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}`);
+      }
+
+      const hrLeaveDecideMatch = url.pathname.match(/^\/api\/org\/hr\/leave\/([^/]+)\/decide$/);
+      if (hrLeaveDecideMatch && request.method === 'POST') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch(`https://internal/org/hr/leave/${encodeURIComponent(hrLeaveDecideMatch[1])}/decide`, {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, orgId: body.orgId, decision: body.decision, comment: body.comment }),
+        });
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/org/hr/leave/history') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const orgId = url.searchParams.get('orgId') || '';
+        const targetUserId = url.searchParams.get('targetUserId') || '';
+        return registryStub.fetch(`https://internal/org/hr/leave/history?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}&targetUserId=${encodeURIComponent(targetUserId)}`);
       }
 
       if (request.method === 'POST' && url.pathname === '/api/groups/leave') {

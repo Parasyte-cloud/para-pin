@@ -744,6 +744,29 @@
   .pick-row{ display:flex; align-items:center; gap:10px; padding:8px; border-radius:10px; cursor:pointer; }
   .pick-row:hover{ background:rgba(var(--tint-rgb),0.04); }
 
+  /* ---- Arrivo People (HR module) ---- */
+  .hr-balance-cards{ display:flex; gap:10px; flex-wrap:wrap; }
+  .hr-balance-card{
+    flex:1; min-width:130px; padding:14px; border-radius:14px;
+    background:rgba(var(--tint-rgb),0.05); border:1px solid var(--glass-brd);
+  }
+  .hr-balance-card .hr-balance-num{ font-size:24px; font-weight:700; color:var(--text-hi); }
+  .hr-balance-card .hr-balance-label{ font-size:11.5px; color:var(--text-mid); margin-top:2px; }
+  .hr-widget-row{ display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--glass-brd); }
+  .hr-widget-row:last-child{ border-bottom:none; }
+  .hr-widget-row .avatar{ width:32px; height:32px; font-size:12px; flex-shrink:0; }
+  .hr-widget-row-name{ font-weight:600; font-size:13px; }
+  .hr-widget-row-sub{ font-size:11.5px; color:var(--text-mid); }
+  .hr-field-grid{ display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .hr-field-grid label{ display:flex; flex-direction:column; gap:3px; font-size:11px; color:var(--text-mid); }
+  .hr-field-grid input, .hr-field-grid select{ width:100%; }
+  .hr-field-grid .hr-field-full{ grid-column:1 / -1; }
+  .hr-history-table{ width:100%; border-collapse:collapse; font-size:12px; }
+  .hr-history-table th, .hr-history-table td{ text-align:left; padding:6px 8px; border-bottom:1px solid var(--glass-brd); }
+  .hr-history-table th{ color:var(--text-mid); font-weight:600; font-size:10.5px; text-transform:uppercase; letter-spacing:.03em; }
+  .hr-approval-row{ padding:10px; border-radius:12px; background:rgba(var(--tint-rgb),0.05); border:1px solid var(--glass-brd); margin-bottom:8px; }
+  .hr-approval-actions{ display:flex; gap:8px; margin-top:8px; }
+
   /* Tap to switch which space (Personal or a real workspace) the chat list
      and new-chat/new-group actions operate in, see switchWorkspace(). */
   .workspace-bar{
@@ -1162,7 +1185,97 @@
       <div class="hint" id="workspaceInviteError" style="display:none;color:#ff6a6a;"></div>
     </div>
     <div class="modal-actions">
+      <div class="btn" id="workspaceOpenHrBtn">People & HR</div>
       <div class="btn" onclick="closeModal('workspaceMembersOverlay')">Close</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ ARRIVO PEOPLE (HR module) ============ -->
+<div class="overlay admin-console-overlay" id="hrOverlay">
+  <div class="modal lg admin-console">
+    <div class="admin-console-head">
+      <h2 id="hrOverlayTitle">People & HR</h2>
+    </div>
+    <div class="admin-console-tabs">
+      <div class="admin-console-tab active" data-tab="home">Home</div>
+      <div class="admin-console-tab" data-tab="profile">My Profile</div>
+      <div class="admin-console-tab" data-tab="directory">People</div>
+    </div>
+    <div class="admin-console-body">
+      <section class="admin-console-section" data-section="home">
+        <div id="hrApprovalsSection" style="display:none; margin-bottom:20px;">
+          <h3>Pending approvals</h3>
+          <div id="hrApprovalsList"></div>
+        </div>
+        <h3>Time Off</h3>
+        <div class="hr-balance-cards" id="hrBalanceCards"></div>
+        <div class="btn primary" id="hrRequestLeaveBtn" style="margin:10px 0 20px;">Request Time Off</div>
+        <div id="hrUpcomingLeave"></div>
+        <h3>Celebrations</h3>
+        <div id="hrCelebrations" class="hint">Nothing coming up in the next 30 days.</div>
+        <h3 style="margin-top:20px;">Who's Out</h3>
+        <div id="hrWhosOut" class="hint">No one's out today.</div>
+        <h3 style="margin-top:20px;">Welcome New Hires</h3>
+        <div id="hrNewHires" class="hint">No new hires this month.</div>
+      </section>
+      <section class="admin-console-section" data-section="profile" style="display:none;">
+        <div id="hrProfileBackRow" style="display:none; margin-bottom:10px;">
+          <div class="btn" id="hrProfileBackBtn">← Back to directory</div>
+        </div>
+        <div style="display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap;">
+          <div style="text-align:center; flex-shrink:0;">
+            <div class="avatar" id="hrProfileAvatar" style="width:80px; height:80px; font-size:26px; margin:0 auto 8px;"></div>
+            <div id="hrProfileName" style="font-weight:700;"></div>
+            <div id="hrProfileTitle" class="hint"></div>
+          </div>
+          <div style="flex:1; min-width:240px;">
+            <h3>Personal</h3>
+            <div class="hr-field-grid" id="hrPersonalFields"></div>
+            <div class="btn primary" id="hrPersonalSaveBtn" style="margin-top:10px;">Save</div>
+            <div class="hint" id="hrPersonalHint" style="display:none;"></div>
+          </div>
+        </div>
+        <h3 style="margin-top:22px;">Job</h3>
+        <div id="hrJobCurrent" class="hint"></div>
+        <div class="btn" id="hrJobEditBtn" style="display:none; margin:8px 0;">Record a change (promotion/transfer)</div>
+        <div id="hrJobEditForm" style="display:none;">
+          <div class="hr-field-grid" id="hrJobEditFields"></div>
+          <div class="btn primary" id="hrJobSaveBtn" style="margin-top:8px;">Save change</div>
+        </div>
+        <table class="hr-history-table" id="hrJobHistoryTable" style="margin-top:10px;"></table>
+        <h3 style="margin-top:22px;">Time Off History</h3>
+        <table class="hr-history-table" id="hrLeaveHistoryTable"></table>
+      </section>
+      <section class="admin-console-section" data-section="directory" style="display:none;">
+        <input type="text" id="hrDirectorySearch" placeholder="Search people…" style="width:100%; margin-bottom:10px;">
+        <div class="contact-pick" id="hrDirectoryList" style="max-height:none;"></div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<!-- ============ ARRIVO PEOPLE: REQUEST TIME OFF ============ -->
+<div class="overlay" id="hrRequestLeaveOverlay">
+  <div class="modal">
+    <h3>Request Time Off</h3>
+    <select id="hrLeaveTypeSelect" style="width:100%; margin-bottom:8px;">
+      <option value="annual">Annual leave</option>
+      <option value="sick">Sick leave</option>
+    </select>
+    <div style="display:flex; gap:8px;">
+      <input type="date" id="hrLeaveStartInput" style="flex:1;">
+      <input type="date" id="hrLeaveEndInput" style="flex:1;">
+    </div>
+    <label style="display:flex; align-items:center; gap:8px; margin-top:8px; font-size:12.5px; color:var(--text-mid);">
+      <input type="checkbox" id="hrLeaveHalfDayInput" style="width:auto;"> Half day (uses the start date only)
+    </label>
+    <textarea id="hrLeaveReasonInput" placeholder="Reason (optional)" rows="2" style="width:100%; margin-top:8px; resize:none;"></textarea>
+    <div class="hint" id="hrLeaveBalancePreview" style="margin-top:6px;"></div>
+    <div class="hint" id="hrLeaveError" style="display:none;color:#ff6a6a;"></div>
+    <div class="modal-actions">
+      <div class="btn" onclick="closeModal('hrRequestLeaveOverlay')">Cancel</div>
+      <div class="btn primary" id="hrLeaveSubmitBtn">Submit</div>
     </div>
   </div>
 </div>
@@ -2912,6 +3025,365 @@
     document.getElementById('workspaceMembersTitle').textContent = r.body.org.name + ' members';
     updateWorkspaceBar();
     hintEl.textContent = 'Saved.'; hintEl.style.color = '#7ee08a';
+  });
+
+  // ==================== Arrivo People (HR module, Phase 1) ====================
+  // Everything here is scoped to whichever org the Members modal was opened
+  // for (activeWorkspaceForMembers), same workspace-isolation model as the
+  // rest of the org features, Ride Arrivo's employee data never crosses
+  // into another workspace or into Personal.
+  let hrActiveOrg = null;
+  let hrProfileTargetUserId = null; // null = viewing/editing my own profile
+  let hrCanEditJob = false;
+  let hrDirectoryCache = [];
+
+  document.querySelectorAll('#hrOverlay .admin-console-tab').forEach(tab=>{
+    tab.addEventListener('click', ()=>{
+      document.querySelectorAll('#hrOverlay .admin-console-tab').forEach(t=>t.classList.remove('active'));
+      tab.classList.add('active');
+      const target = tab.dataset.tab;
+      document.querySelectorAll('#hrOverlay .admin-console-section').forEach(sec=>{
+        sec.style.display = sec.dataset.section === target ? 'block' : 'none';
+      });
+      if (target === 'directory') loadHrDirectory();
+      if (target === 'profile' && !document.getElementById('hrProfileBackRow').dataset.other) loadHrProfile(null);
+    });
+  });
+
+  document.getElementById('workspaceOpenHrBtn').addEventListener('click', ()=>{
+    if (!activeWorkspaceForMembers || !activeWorkspaceForMembers.id) return;
+    openHrOverlay(activeWorkspaceForMembers);
+  });
+
+  function openHrOverlay(org){
+    hrActiveOrg = org;
+    document.getElementById('hrOverlayTitle').textContent = `${org.name} · People & HR`;
+    document.querySelectorAll('#hrOverlay .admin-console-tab').forEach(t=>t.classList.remove('active'));
+    document.querySelector('#hrOverlay .admin-console-tab[data-tab="home"]').classList.add('active');
+    document.querySelectorAll('#hrOverlay .admin-console-section').forEach(sec=>{
+      sec.style.display = sec.dataset.section === 'home' ? 'block' : 'none';
+    });
+    closeModal('workspaceMembersOverlay');
+    openModal('hrOverlay');
+    loadHrHome();
+  }
+
+  function hrFmtDate(ts){
+    if (!ts) return '';
+    return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  }
+
+  async function loadHrHome(){
+    if (!hrActiveOrg) return;
+    const orgId = hrActiveOrg.id;
+    const [homeRes, inboxRes] = await Promise.all([
+      apiFetch(`/org/hr/home?orgId=${encodeURIComponent(orgId)}`),
+      apiFetch(`/org/hr/leave/inbox?orgId=${encodeURIComponent(orgId)}`),
+    ]);
+
+    const cards = document.getElementById('hrBalanceCards');
+    const upcomingEl = document.getElementById('hrUpcomingLeave');
+    const celebEl = document.getElementById('hrCelebrations');
+    const outEl = document.getElementById('hrWhosOut');
+    const hiresEl = document.getElementById('hrNewHires');
+
+    if (!homeRes.ok || !homeRes.body){
+      cards.innerHTML = '<div class="hint">Could not load this. Try again.</div>';
+      return;
+    }
+    const { balances, myUpcoming, celebrations, whosOut, newHires } = homeRes.body;
+
+    cards.innerHTML = `
+      <div class="hr-balance-card"><div class="hr-balance-num">${balances.annual}</div><div class="hr-balance-label">Annual Leave available</div></div>
+      <div class="hr-balance-card"><div class="hr-balance-num">${balances.sick}</div><div class="hr-balance-label">Sick Leave available</div></div>
+    `;
+
+    upcomingEl.innerHTML = myUpcoming.length
+      ? myUpcoming.map(u => `<div class="hr-widget-row"><div><div class="hr-widget-row-name">${u.type === 'sick' ? 'Sick' : 'Annual'} leave</div><div class="hr-widget-row-sub">${escapeHtml(u.startDate)} → ${escapeHtml(u.endDate)}</div></div></div>`).join('')
+      : '<div class="hint">No upcoming time off.</div>';
+
+    celebEl.innerHTML = celebrations.length
+      ? celebrations.map(c => {
+          const av = `<div class="avatar" style="width:32px;height:32px;font-size:12px;"></div>`;
+          const label = c.type === 'birthday' ? '🎂 Birthday' : `🎉 ${c.years || ''}${c.years ? 'y' : ''} anniversary`;
+          return `<div class="hr-widget-row" data-avatar-for="${escapeHtml(c.userId)}">${av}<div><div class="hr-widget-row-name">${escapeHtml(c.displayName || 'Someone')}</div><div class="hr-widget-row-sub">${label} · ${hrFmtDate(c.date)}</div></div></div>`;
+        }).join('')
+      : '<div class="hint">Nothing coming up in the next 30 days.</div>';
+
+    outEl.innerHTML = whosOut.length
+      ? whosOut.map(w => `<div class="hr-widget-row" data-avatar-for="${escapeHtml(w.userId)}"><div class="avatar" style="width:32px;height:32px;font-size:12px;"></div><div><div class="hr-widget-row-name">${escapeHtml(w.displayName || 'Someone')}</div><div class="hr-widget-row-sub">${w.type === 'sick' ? 'Sick' : 'Annual'} leave, back after ${escapeHtml(w.endDate)}</div></div></div>`).join('')
+      : '<div class="hint">No one\'s out today.</div>';
+
+    hiresEl.innerHTML = newHires.length
+      ? newHires.map(h => `<div class="hr-widget-row" data-avatar-for="${escapeHtml(h.userId)}"><div class="avatar" style="width:32px;height:32px;font-size:12px;"></div><div><div class="hr-widget-row-name">${escapeHtml(h.displayName || 'Someone')}</div><div class="hr-widget-row-sub">Started ${hrFmtDate(h.hireDate)}</div></div></div>`).join('')
+      : '<div class="hint">No new hires this month.</div>';
+
+    // Fill in the little avatars after the fact, keeps the innerHTML above
+    // simple string concatenation instead of juggling DOM node creation for
+    // every widget row.
+    document.querySelectorAll('#hrOverlay [data-avatar-for]').forEach(row=>{
+      const uid = row.dataset.avatarFor;
+      const av = row.querySelector('.avatar');
+      const source = [...celebrations, ...whosOut, ...newHires].find(x => x.userId === uid);
+      if (av && source) renderAvatar(av, source.displayName || 'Someone', false, source.avatarUrl);
+    });
+
+    const approvalsSection = document.getElementById('hrApprovalsSection');
+    const approvalsList = document.getElementById('hrApprovalsList');
+    const inboxRows = (inboxRes.ok && inboxRes.body && inboxRes.body.requests) || [];
+    if (inboxRows.length){
+      approvalsSection.style.display = 'block';
+      approvalsList.innerHTML = '';
+      inboxRows.forEach(req=>{
+        const row = document.createElement('div');
+        row.className = 'hr-approval-row';
+        row.innerHTML = `
+          <div class="hr-widget-row-name">${escapeHtml(req.displayName || 'Someone')} · ${req.type === 'sick' ? 'Sick' : 'Annual'} leave (${req.days}d)</div>
+          <div class="hr-widget-row-sub">${escapeHtml(req.startDate)} → ${escapeHtml(req.endDate)}${req.halfDay ? ' (half day)' : ''}${req.reason ? ' · ' + escapeHtml(req.reason) : ''}</div>
+          <div class="hr-approval-actions">
+            <div class="btn primary hr-approve-btn" data-id="${escapeHtml(req.id)}">Approve</div>
+            <div class="btn hr-decline-btn" data-id="${escapeHtml(req.id)}">Decline</div>
+          </div>
+        `;
+        approvalsList.appendChild(row);
+      });
+      approvalsList.querySelectorAll('.hr-approve-btn, .hr-decline-btn').forEach(btn=>{
+        btn.addEventListener('click', async ()=>{
+          const decision = btn.classList.contains('hr-approve-btn') ? 'approve' : 'decline';
+          btn.closest('.hr-approval-actions').querySelectorAll('.btn').forEach(b=>b.style.pointerEvents = 'none');
+          await apiFetch(`/org/hr/leave/${encodeURIComponent(btn.dataset.id)}/decide`, { method: 'POST', body: JSON.stringify({ orgId, decision }) });
+          loadHrHome();
+        });
+      });
+    } else {
+      approvalsSection.style.display = 'none';
+    }
+  }
+
+  function hrFieldRow(label, name, value, type){
+    const val = value == null ? '' : escapeHtml(String(value));
+    if (type === 'select-gender'){
+      const opts = ['', 'female', 'male', 'nonbinary', 'prefer_not_to_say'];
+      const labels = { '': 'Not set', female: 'Female', male: 'Male', nonbinary: 'Non-binary', prefer_not_to_say: 'Prefer not to say' };
+      return `<label>${label}<select data-field="${name}">${opts.map(o=>`<option value="${o}" ${value===o?'selected':''}>${labels[o]}</option>`).join('')}</select></label>`;
+    }
+    if (type === 'select-marital'){
+      const opts = ['', 'single', 'married', 'domestic_partnership', 'divorced', 'widowed'];
+      const labels = { '': 'Not set', single: 'Single', married: 'Married', domestic_partnership: 'Domestic partnership', divorced: 'Divorced', widowed: 'Widowed' };
+      return `<label>${label}<select data-field="${name}">${opts.map(o=>`<option value="${o}" ${value===o?'selected':''}>${labels[o]}</option>`).join('')}</select></label>`;
+    }
+    return `<label>${label}<input type="${type||'text'}" data-field="${name}" value="${val}"></label>`;
+  }
+
+  async function loadHrProfile(targetUserId){
+    if (!hrActiveOrg) return;
+    hrProfileTargetUserId = targetUserId;
+    const backRow = document.getElementById('hrProfileBackRow');
+    backRow.style.display = targetUserId ? 'flex' : 'none';
+    backRow.dataset.other = targetUserId ? '1' : '';
+
+    const url = `/org/hr/profile?orgId=${encodeURIComponent(hrActiveOrg.id)}` + (targetUserId ? `&targetUserId=${encodeURIComponent(targetUserId)}` : '');
+    const [profRes, historyRes] = await Promise.all([
+      apiFetch(url),
+      apiFetch(`/org/hr/leave/history?orgId=${encodeURIComponent(hrActiveOrg.id)}` + (targetUserId ? `&targetUserId=${encodeURIComponent(targetUserId)}` : '')),
+    ]);
+    if (!profRes.ok || !profRes.body){
+      document.getElementById('hrPersonalFields').innerHTML = '<div class="hint">Could not load this profile.</div>';
+      return;
+    }
+    const { employee, canEditJob, isSelf } = profRes.body;
+    hrCanEditJob = canEditJob;
+    const uid = targetUserId || myUserId;
+    // The directory cache (already loaded if we got here via a directory
+    // click) has the right name/photo even for someone the viewer has never
+    // DMed, userNameCache only knows about people already in a shared chat.
+    const dirEntry = hrDirectoryCache.find(m => m.userId === uid);
+    const userRec = targetUserId
+      ? { displayName: (dirEntry && dirEntry.displayName) || userNameCache[uid] || 'PArA PIN user', avatarUrl: (dirEntry && dirEntry.avatarUrl) || userAvatarCache[uid] || null }
+      : { displayName: myDisplayName || 'PArA PIN user', avatarUrl: myAvatarUrl };
+
+    renderAvatar(document.getElementById('hrProfileAvatar'), userRec.displayName, false, userRec.avatarUrl);
+    document.getElementById('hrProfileName').textContent = userRec.displayName;
+    document.getElementById('hrProfileTitle').textContent = employee.job.current.jobTitle || (isSelf ? 'No title set yet' : '');
+
+    const p = employee.personal;
+    const canEditSelfFields = isSelf || canEditJob;
+    const fieldsHtml = [
+      hrFieldRow('First name', 'firstName', p.firstName),
+      hrFieldRow('Last name', 'lastName', p.lastName),
+      hrFieldRow('Preferred name', 'preferredName', p.preferredName),
+      hrFieldRow('Date of birth', 'dob', p.dob ? new Date(p.dob).toISOString().slice(0,10) : '', 'date'),
+      hrFieldRow('Gender', 'gender', p.gender, 'select-gender'),
+      hrFieldRow('Marital status', 'maritalStatus', p.maritalStatus, 'select-marital'),
+      hrFieldRow('Work phone', 'workPhone', p.workPhone, 'tel'),
+      hrFieldRow('Personal mobile', 'personalMobile', p.personalMobile, 'tel'),
+      hrFieldRow('Personal email', 'personalEmail', p.personalEmail, 'email'),
+      hrFieldRow('Office location', 'officeLocation', p.officeLocation),
+      hrFieldRow('Street address', 'homeAddress.street', p.homeAddress.street),
+      hrFieldRow('City', 'homeAddress.city', p.homeAddress.city),
+      hrFieldRow('State/Region', 'homeAddress.state', p.homeAddress.state),
+      hrFieldRow('Postal code', 'homeAddress.postal', p.homeAddress.postal),
+      hrFieldRow('Country', 'homeAddress.country', p.homeAddress.country),
+    ].join('');
+    document.getElementById('hrPersonalFields').innerHTML = fieldsHtml;
+    document.querySelectorAll('#hrPersonalFields input, #hrPersonalFields select').forEach(el=>{
+      el.disabled = !canEditSelfFields;
+    });
+    document.getElementById('hrPersonalSaveBtn').style.display = canEditSelfFields ? 'block' : 'none';
+
+    const cur = employee.job.current;
+    document.getElementById('hrJobCurrent').textContent = cur.jobTitle
+      ? `${cur.jobTitle}${cur.department ? ' · ' + cur.department : ''}${cur.entity ? ' · ' + cur.entity : ''}, since ${hrFmtDate(cur.effectiveDate)}`
+      : 'No job details recorded yet.';
+    document.getElementById('hrJobEditBtn').style.display = canEditJob ? 'inline-flex' : 'none';
+    document.getElementById('hrJobEditForm').style.display = 'none';
+
+    const histRows = [cur, ...employee.job.history];
+    const jobTable = document.getElementById('hrJobHistoryTable');
+    jobTable.innerHTML = histRows.length
+      ? `<tr><th>Effective</th><th>Title</th><th>Department</th><th>Entity</th></tr>` +
+        histRows.map(h => `<tr><td>${hrFmtDate(h.effectiveDate)}</td><td>${escapeHtml(h.jobTitle || '')}</td><td>${escapeHtml(h.department || '')}</td><td>${escapeHtml(h.entity || '')}</td></tr>`).join('')
+      : '';
+
+    const leaveTable = document.getElementById('hrLeaveHistoryTable');
+    const rows = (historyRes.ok && historyRes.body && historyRes.body.rows) || [];
+    leaveTable.innerHTML = rows.length
+      ? `<tr><th>Date</th><th>Type</th><th>Note</th><th>Days</th><th>Balance</th></tr>` +
+        rows.map(r => `<tr><td>${hrFmtDate(r.ts)}</td><td>${r.type === 'sick' ? 'Sick' : 'Annual'}</td><td>${escapeHtml(r.note || '')}</td><td>${r.delta > 0 ? '+' : ''}${r.delta}</td><td>${r.runningBalance}</td></tr>`).join('')
+      : '<div class="hint">No leave history yet.</div>';
+  }
+
+  document.getElementById('hrProfileBackBtn').addEventListener('click', ()=>{
+    document.querySelectorAll('#hrOverlay .admin-console-tab').forEach(t=>t.classList.remove('active'));
+    document.querySelector('#hrOverlay .admin-console-tab[data-tab="directory"]').classList.add('active');
+    document.querySelectorAll('#hrOverlay .admin-console-section').forEach(sec=>{
+      sec.style.display = sec.dataset.section === 'directory' ? 'block' : 'none';
+    });
+  });
+
+  document.getElementById('hrPersonalSaveBtn').addEventListener('click', async ()=>{
+    const hintEl = document.getElementById('hrPersonalHint');
+    const personal = {};
+    document.querySelectorAll('#hrPersonalFields [data-field]').forEach(el=>{
+      const name = el.dataset.field;
+      let value = el.value || null;
+      if (name === 'dob' && value) value = new Date(value).getTime();
+      if (name.startsWith('homeAddress.')){
+        personal.homeAddress = personal.homeAddress || {};
+        personal.homeAddress[name.split('.')[1]] = value;
+      } else {
+        personal[name] = value;
+      }
+    });
+    const r = await apiFetch('/org/hr/profile', {
+      method: 'POST',
+      body: JSON.stringify({ orgId: hrActiveOrg.id, targetUserId: hrProfileTargetUserId, personal }),
+    });
+    hintEl.style.display = 'block';
+    if (r.ok){ hintEl.textContent = 'Saved.'; hintEl.style.color = '#7ee08a'; }
+    else { hintEl.textContent = "Couldn't save. Try again."; hintEl.style.color = '#ff6a6a'; }
+  });
+
+  document.getElementById('hrJobEditBtn').addEventListener('click', ()=>{
+    const form = document.getElementById('hrJobEditForm');
+    const showing = form.style.display === 'block';
+    if (showing){ form.style.display = 'none'; return; }
+    document.getElementById('hrJobEditFields').innerHTML = [
+      hrFieldRow('Job title', 'jobTitle', ''),
+      hrFieldRow('Department', 'department', ''),
+      hrFieldRow('Entity/Office', 'entity', ''),
+    ].join('');
+    form.style.display = 'block';
+  });
+
+  document.getElementById('hrJobSaveBtn').addEventListener('click', async ()=>{
+    const current = {};
+    document.querySelectorAll('#hrJobEditFields [data-field]').forEach(el=>{ current[el.dataset.field] = el.value || null; });
+    await apiFetch('/org/hr/profile', {
+      method: 'POST',
+      body: JSON.stringify({ orgId: hrActiveOrg.id, targetUserId: hrProfileTargetUserId, job: { current } }),
+    });
+    loadHrProfile(hrProfileTargetUserId);
+  });
+
+  async function loadHrDirectory(){
+    if (!hrActiveOrg) return;
+    const list = document.getElementById('hrDirectoryList');
+    list.innerHTML = '<div class="hint">Loading…</div>';
+    const r = await apiFetch(`/org/hr/directory?orgId=${encodeURIComponent(hrActiveOrg.id)}`);
+    if (!r.ok || !r.body || !r.body.members){
+      list.innerHTML = '<div class="hint">Could not load the directory.</div>';
+      return;
+    }
+    hrDirectoryCache = r.body.members;
+    renderHrDirectoryList();
+  }
+
+  function renderHrDirectoryList(){
+    const q = document.getElementById('hrDirectorySearch').value.trim().toLowerCase();
+    const list = document.getElementById('hrDirectoryList');
+    const filtered = q ? hrDirectoryCache.filter(m => (m.displayName || '').toLowerCase().includes(q) || (m.jobTitle || '').toLowerCase().includes(q) || (m.department || '').toLowerCase().includes(q)) : hrDirectoryCache;
+    list.innerHTML = '';
+    if (!filtered.length){
+      list.innerHTML = '<div class="hint">No one matches that search.</div>';
+      return;
+    }
+    filtered.forEach(m=>{
+      const row = document.createElement('div');
+      row.className = 'pick-row';
+      const av = document.createElement('div');
+      av.className = 'avatar';
+      av.style.width = '32px'; av.style.height = '32px'; av.style.fontSize = '12px';
+      renderAvatar(av, m.displayName || 'PArA PIN user', false, m.avatarUrl);
+      const info = document.createElement('div');
+      info.innerHTML = `<div class="hr-widget-row-name">${escapeHtml(m.displayName || 'PArA PIN user')}</div><div class="hr-widget-row-sub">${escapeHtml(m.jobTitle || 'No title set')}${m.department ? ' · ' + escapeHtml(m.department) : ''}</div>`;
+      row.appendChild(av);
+      row.appendChild(info);
+      row.addEventListener('click', ()=>{
+        document.querySelectorAll('#hrOverlay .admin-console-tab').forEach(t=>t.classList.remove('active'));
+        document.querySelector('#hrOverlay .admin-console-tab[data-tab="profile"]').classList.add('active');
+        document.querySelectorAll('#hrOverlay .admin-console-section').forEach(sec=>{
+          sec.style.display = sec.dataset.section === 'profile' ? 'block' : 'none';
+        });
+        loadHrProfile(m.userId);
+      });
+      list.appendChild(row);
+    });
+  }
+  document.getElementById('hrDirectorySearch').addEventListener('input', renderHrDirectoryList);
+
+  // ---- Request Time Off ----
+  document.getElementById('hrRequestLeaveBtn').addEventListener('click', ()=>{
+    document.getElementById('hrLeaveTypeSelect').value = 'annual';
+    document.getElementById('hrLeaveStartInput').value = '';
+    document.getElementById('hrLeaveEndInput').value = '';
+    document.getElementById('hrLeaveHalfDayInput').checked = false;
+    document.getElementById('hrLeaveReasonInput').value = '';
+    document.getElementById('hrLeaveError').style.display = 'none';
+    document.getElementById('hrLeaveBalancePreview').textContent = '';
+    openModal('hrRequestLeaveOverlay');
+  });
+
+  document.getElementById('hrLeaveSubmitBtn').addEventListener('click', async ()=>{
+    const errEl = document.getElementById('hrLeaveError');
+    const type = document.getElementById('hrLeaveTypeSelect').value;
+    const startDate = document.getElementById('hrLeaveStartInput').value;
+    const halfDay = document.getElementById('hrLeaveHalfDayInput').checked;
+    const endDate = halfDay ? startDate : document.getElementById('hrLeaveEndInput').value;
+    const reason = document.getElementById('hrLeaveReasonInput').value.trim();
+    if (!startDate || !endDate){ errEl.textContent = 'Pick a start (and end) date.'; errEl.style.display = 'block'; return; }
+    const r = await apiFetch('/org/hr/leave/request', {
+      method: 'POST',
+      body: JSON.stringify({ orgId: hrActiveOrg.id, type, startDate, endDate, halfDay, reason }),
+    });
+    if (!r.ok){
+      const err = r.body && r.body.error;
+      errEl.textContent = err === 'insufficient_balance' ? `You only have ${r.body.balance} day(s) available.` : "Couldn't submit that. Check the dates and try again.";
+      errEl.style.display = 'block';
+      return;
+    }
+    closeModal('hrRequestLeaveOverlay');
+    loadHrHome();
   });
 
   document.getElementById('workspaceInvitePinBtn').addEventListener('click', async ()=>{
