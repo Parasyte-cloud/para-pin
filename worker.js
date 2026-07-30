@@ -1816,7 +1816,7 @@ export class ChatRoom {
     // E2EE shipped kept their old plaintext `text` field as-is; nothing here
     // retroactively touches old history.
     if (request.method === 'POST' && url.pathname === '/messages') {
-      const { fromUserId, fromName, ciphertext, iv, alg, attachment, replyTo } = await request.json();
+      const { fromUserId, fromName, ciphertext, iv, alg, attachment, replyTo, protected: isProtected } = await request.json();
       const hasCiphertext = ciphertext && iv;
       const hasAttachment = attachment && attachment.url;
       if (!hasCiphertext && !hasAttachment) return json({ error: 'empty' }, 400);
@@ -1837,6 +1837,11 @@ export class ChatRoom {
         fromName: fromName || null,
         ts: Date.now(),
       };
+      // Secure Vault: this is purely a client-side render gate (the message
+      // is already E2EE, this server never sees plaintext either way), the
+      // flag just travels with the message so every client knows to keep it
+      // behind a "tap to unlock" placeholder instead of showing it automatically.
+      if (isProtected) msg.protected = true;
       if (hasCiphertext) {
         msg.ciphertext = String(ciphertext);
         msg.iv = String(iv).slice(0, 50);
@@ -3062,10 +3067,10 @@ export default {
         }
 
         if (action === 'messages' && request.method === 'POST') {
-          const { ciphertext, iv, alg, attachment, replyTo } = await request.json();
+          const { ciphertext, iv, alg, attachment, replyTo, protected: isProtected } = await request.json();
           const res = await roomStub.fetch('https://internal/messages', {
             method: 'POST',
-            body: JSON.stringify({ fromUserId: verify.userId, fromName: verify.displayName, ciphertext, iv, alg, attachment, replyTo }),
+            body: JSON.stringify({ fromUserId: verify.userId, fromName: verify.displayName, ciphertext, iv, alg, attachment, replyTo, protected: !!isProtected }),
           });
           const resBody = await res.json();
 

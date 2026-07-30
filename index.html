@@ -337,6 +337,7 @@
     transition:all .15s ease; font-size:16px;
   }
   .icon-btn:hover{ color:var(--text-hi); border-color:var(--glass-brd-hi); background:rgba(var(--tint-rgb),0.08); }
+  #secureSendBtn.armed{ color:#0a0d12; background:linear-gradient(135deg, var(--ice), var(--fire)); border-color:transparent; }
 
   .search{ margin:12px 16px; }
   .search input{
@@ -442,6 +443,15 @@
   .bubble.pending{ opacity:.72; }
   .bubble .edited-label{ font-style:italic; opacity:.8; }
   .deleted-label{ color:var(--text-low); }
+
+  .protected-msg{
+    padding:10px 14px; border-radius:12px; cursor:pointer; min-width:160px;
+    background:rgba(var(--tint-rgb),0.07); border:1px dashed var(--glass-brd-hi);
+  }
+  .protected-msg .protected-tap{ font-size:11px; color:var(--text-low); margin-top:2px; }
+  .protected-unlocked-badge{
+    font-size:10.5px; color:var(--text-low); margin-bottom:3px; display:flex; align-items:center; gap:3px;
+  }
 
   .msg-actions{ position:absolute; top:4px; right:6px; display:flex; gap:2px; }
   .msg-action-btn{
@@ -953,6 +963,11 @@
           <div class="icon-btn" id="shareLocationBtn" title="Share my location" style="display:none;">📍</div>
           <div class="icon-btn record-btn" id="recordBtn" title="Record voice note">🎙</div>
           <div class="icon-btn record-video-btn" id="recordVideoBtn" title="Record video">📹</div>
+          <!-- Arms the NEXT send only (resets after each message goes out,
+               see sendSecurely in the composer JS), rather than staying on
+               as a persistent per-chat mode, so it can't be left on by
+               accident and start silently locking every message. -->
+          <div class="icon-btn" id="secureSendBtn" title="Send securely (protected message)">🔓</div>
           <!-- Takes over the textarea's spot while a voice note is recording,
                live elapsed time + a simple animated waveform so recording
                has some feedback beyond just the pulsing mic icon. -->
@@ -1148,6 +1163,20 @@
     </div>
     <div class="modal-actions">
       <div class="btn" onclick="closeModal('workspaceMembersOverlay')">Close</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ SECURE VAULT: UNLOCK PROMPT ============ -->
+<div class="overlay" id="unlockProtectedOverlay">
+  <div class="modal" style="text-align:center;">
+    <h3>🔒 Protected Message</h3>
+    <div class="hint">Enter your PArA PIN to view this. It re-locks the moment you leave this chat.</div>
+    <input type="text" id="unlockProtectedPinInput" placeholder="1234567" inputmode="numeric" maxlength="7" class="mono" style="text-align:center; letter-spacing:.08em; font-size:18px; margin-top:14px;">
+    <div class="hint" id="unlockProtectedError" style="display:none;color:#ff6a6a;margin-top:8px;"></div>
+    <div class="modal-actions" style="justify-content:center;margin-top:14px;">
+      <div class="btn" onclick="closeModal('unlockProtectedOverlay')">Cancel</div>
+      <div class="btn primary" id="unlockProtectedBtn">Unlock</div>
     </div>
   </div>
 </div>
@@ -1697,12 +1726,60 @@
   // turning into a wall of pill rows. Membership here is what's currently
   // revealed, cleared whenever the chat changes.
   let revealedReactionsFor = new Set();
+  // Secure Vault: which protected message ids are unlocked FOR THIS SESSION
+  // ONLY, never persisted. Reset on chat switch and whenever the app is
+  // backgrounded/hidden (see the visibilitychange listener near
+  // promptUnlockProtected), that's the "re-lock on leaving" behavior.
+  let unlockedProtectedIds = new Set();
   const QUICK_REACTIONS = ['👍','❤️','😂','😮','😢','🙏'];
   let presenceByUser = {}; // userId -> { online, lastSeen }
   let presencePollTimer = null;
   let pendingAttachment = null; // { blob, url (object URL for preview), width, height }
   let notifyPrefs = {}; // chatId -> 'all' | 'mentions' | 'mute' (default 'all' when absent)
   let replyingTo = null; // { id, fromName, text } snapshot of the message being replied to, or null
+  // Secure Vault: armed for the NEXT send only (see secureSendBtn's comment
+  // in the HTML for why it resets instead of staying on as a mode).
+  let sendSecurely = false;
+  function updateSecureSendBtn(){
+    const btn = document.getElementById('secureSendBtn');
+    btn.textContent = sendSecurely ? '🔒' : '🔓';
+    btn.classList.toggle('armed', sendSecurely);
+    btn.title = sendSecurely ? 'Sending securely, tap to cancel' : 'Send securely (protected message)';
+  }
+  document.getElementById('secureSendBtn').addEventListener('click', ()=>{
+    sendSecurely = !sendSecurely;
+    updateSecureSendBtn();
+  });
+
+  // Secure Vault unlock. Important limitation, worth being honest about in
+  // code: this compares against myPinHash entirely client-side, there's no
+  // server round trip to rate-limit or audit. That's fine as a deterrent
+  // against a casual "someone else picked up my unlocked phone" glance, it
+  // is NOT a cryptographic boundary, the plaintext is already sitting
+  // decrypted in this page's memory either way (same as every other message
+  // in an E2EE chat app; the server never sees it regardless of this gate).
+  let unlockProtectedTargetId = null;
+  function promptUnlockProtected(messageId){
+    unlockProtectedTargetId = messageId;
+    document.getElementById('unlockProtectedPinInput').value = '';
+    document.getElementById('unlockProtectedError').style.display = 'none';
+    openModal('unlockProtectedOverlay');
+    setTimeout(()=>document.getElementById('unlockProtectedPinInput').focus(), 50);
+  }
+  async function attemptUnlockProtected(){
+    const errEl = document.getElementById('unlockProtectedError');
+    const pin = document.getElementById('unlockProtectedPinInput').value.trim();
+    if (!/^\d{7}$/.test(pin)){ errEl.textContent = 'Enter your 7-digit PIN.'; errEl.style.display = 'block'; return; }
+    const hash = await sha256Hex(pin);
+    if (hash !== myPinHash){ errEl.textContent = "That doesn't match your PIN."; errEl.style.display = 'block'; return; }
+    if (unlockProtectedTargetId) unlockedProtectedIds.add(unlockProtectedTargetId);
+    closeModal('unlockProtectedOverlay');
+    renderConv();
+  }
+  document.getElementById('unlockProtectedBtn').addEventListener('click', attemptUnlockProtected);
+  document.getElementById('unlockProtectedPinInput').addEventListener('keydown', (e)=>{
+    if (e.key === 'Enter') attemptUnlockProtected();
+  });
   let myAvatarUrl = null;
   let myDepartment = null;
   let iAmAdmin = false;
@@ -2223,7 +2300,7 @@
     unreadCounts = {};
     updateTitleBadge();
     if (editingMessageId) cancelEdit();
-    openReactPickerFor = null; revealedReactionsFor = new Set(); typingUsers = {}; readState = {}; presenceByUser = {};
+    openReactPickerFor = null; revealedReactionsFor = new Set(); unlockedProtectedIds = new Set(); typingUsers = {}; readState = {}; presenceByUser = {};
     stopPresencePolling();
     myPinHash = null; myUserId = null; myDisplayName = null; myRawPin = null;
     sessionChats = []; messagesByChat = {}; activeChatId = null;
@@ -2420,6 +2497,12 @@
     if (m.type === 'system') return m.text;
     if (m.deleted) return (m.fromUserId===myUserId?'You: ':'') + 'Message deleted';
     const prefix = m.fromUserId===myUserId ? 'You: ' : '';
+    // The chat list preview is a surface that's visible without opening the
+    // chat at all, a protected message's whole point is that it's never
+    // shown automatically, so this never reveals it, not even to whoever
+    // sent it, regardless of whether it happens to be unlocked in the open
+    // conversation right now.
+    if (m.protected) return prefix + '🔒 Protected message';
     const isImg = m.attachment && (m.attachment.kind === 'image' || !m.attachment.kind);
     const isVoice = m.attachment && m.attachment.kind === 'voice';
     if (m.attachment && !m.text) return prefix + (isImg ? '📷 Photo' : isVoice ? '🎙 Voice message' : m.attachment.kind === 'video' ? '📹 Video' : '📄 ' + (m.attachment.name || 'File'));
@@ -2966,7 +3049,15 @@
       }
       if (m.deleted){
         inner += `<span class="deleted-label">Message deleted</span>`;
+      } else if (m.protected && !unlockedProtectedIds.has(m.id)){
+        // Secure Vault: content is already decrypted in memory (m.text etc.
+        // are set same as any other message), this is purely a render gate,
+        // not a second encryption layer, see promptUnlockProtected().
+        inner += `<div class="protected-msg" data-protected-id="${escapeHtml(m.id)}">🔒 <b>Protected Message</b><div class="protected-tap">Tap to unlock</div></div>`;
       } else {
+        if (m.protected){
+          inner += `<div class="protected-unlocked-badge">🔓 Protected</div>`;
+        }
         if (m.attachment && m.attachment.url){
           const isEncryptedAtt = !!m.attachment.fileIv;
           const attUrl = isEncryptedAtt ? (m.attachment._decryptedUrl || '') : m.attachment.url;
@@ -3174,6 +3265,12 @@
     if (voiceBtn){
       const wrap = voiceBtn.closest('.voice-note');
       if (wrap) toggleVoicePlay(wrap.dataset.voiceId, wrap.dataset.url);
+      return;
+    }
+
+    const protectedMsg = e.target.closest('.protected-msg');
+    if (protectedMsg){
+      promptUnlockProtected(protectedMsg.dataset.protectedId);
       return;
     }
 
@@ -5079,6 +5176,7 @@
     if (msgSearchBar.style.display === 'flex') closeMsgSearch();
     openReactPickerFor = null;
     revealedReactionsFor = new Set();
+    unlockedProtectedIds = new Set();
     renderConv();
     renderChatList();
     connectSocket(chatId);
@@ -5126,7 +5224,10 @@
       return;
     }
     const q = searchQuery.toLowerCase();
-    searchMatchIds = msgs.filter(m => m.type !== 'system' && !m.deleted && m.text && m.text.toLowerCase().includes(q)).map(m => m.id);
+    // Protected messages are excluded from matching entirely (not just from
+    // display), searching shouldn't be able to confirm a protected message
+    // contains a given term via a highlighted hit before it's ever unlocked.
+    searchMatchIds = msgs.filter(m => m.type !== 'system' && !m.deleted && !m.protected && m.text && m.text.toLowerCase().includes(q)).map(m => m.id);
     searchCurrentIndex = searchMatchIds.length ? searchMatchIds.length - 1 : -1; // land on the most recent match first
     updateSearchCount();
     renderConv();
@@ -5389,6 +5490,14 @@
   let intentionalNotifyClose = false;
   document.addEventListener('visibilitychange', ()=>{
     if (document.visibilityState === 'hidden'){
+      // Secure Vault: re-lock the instant the app is backgrounded, not just
+      // on chat switch, someone picking up an unlocked phone while a
+      // protected message is still on screen is exactly the scenario this
+      // feature exists to guard against.
+      if (unlockedProtectedIds.size){
+        unlockedProtectedIds = new Set();
+        if (activeChatId) renderConv();
+      }
       if (notifySocket){
         intentionalNotifyClose = true;
         try { notifySocket.close(); } catch(e){}
@@ -6059,7 +6168,7 @@
         const original = msgs.find(x => x.id === m.replyTo.id);
         if (original && original._e2eeDone){
           m.replyTo.fromName = original.fromName || m.replyTo.fromName || 'Message';
-          m.replyTo.text = original.deleted ? 'Message deleted' : (original.text || '').slice(0, 200);
+          m.replyTo.text = original.deleted ? 'Message deleted' : original.protected ? '🔒 Protected message' : (original.text || '').slice(0, 200);
         } else {
           m.replyTo.fromName = m.replyTo.fromName || 'Message';
           m.replyTo.text = '…';
@@ -6081,7 +6190,11 @@
       updateTitleBadge();
 
       const pref = notifyPrefs[chatId] || 'all';
-      const msgText = msg.text || (msg.attachment ? (msg.attachment.kind === 'file' ? `📄 ${msg.attachment.name || 'File'}` : msg.attachment.kind === 'voice' ? '🎙 Voice message' : msg.attachment.kind === 'video' ? '📹 Video' : '📷 Photo') : '');
+      // A protected message's plaintext is already decrypted in memory at
+      // this point (mergeMessages ran above), same as any other message, but
+      // an OS notification banner is exactly the kind of "visible without
+      // unlocking anything" surface this feature exists to keep it off of.
+      const msgText = msg.protected ? '🔒 Protected message' : (msg.text || (msg.attachment ? (msg.attachment.kind === 'file' ? `📄 ${msg.attachment.name || 'File'}` : msg.attachment.kind === 'voice' ? '🎙 Voice message' : msg.attachment.kind === 'video' ? '📹 Video' : '📷 Photo') : ''));
       const mentioned = !!(myDisplayName && new RegExp(`@${myDisplayName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(msgText));
       const shouldAlert = pref === 'mute' ? false : pref === 'mentions' ? mentioned : true;
 
@@ -6792,6 +6905,12 @@
     const replyToPayload = replyingTo;
     cancelReply();
     sendBtn.disabled = true;
+    // Captured and reset right away, not after the round trip below, so it
+    // can't still read as "armed" if something in between (a slow upload,
+    // a retry) makes it look like the toggle never took effect.
+    const wasSecure = sendSecurely;
+    sendSecurely = false;
+    updateSecureSendBtn();
 
     // Optimistic bubble: the encrypt+upload+POST round trip below can easily
     // take a second or more on a slow connection, and the compose box has
@@ -6809,6 +6928,7 @@
       text: text || '',
       _pending: true,
       _e2eeDone: true,
+      protected: wasSecure,
       replyTo: replyToPayload ? { id: replyToPayload.id, fromName: replyToPayload.fromName, text: replyToPayload.text } : null,
     };
     if (attachment){
@@ -6878,6 +6998,7 @@
         alg: chat.type === 'group' ? 'group' : 'dm',
         attachment: attachmentPayload,
         replyTo: replyToPayload ? { id: replyToPayload.id } : null,
+        protected: wasSecure,
       }),
     });
     sendBtn.disabled = false;
