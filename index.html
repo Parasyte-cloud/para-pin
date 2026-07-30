@@ -645,7 +645,12 @@
   .file-card{ display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:10px; background:rgba(var(--tint-rgb),0.07); text-decoration:none; color:inherit; min-width:180px; max-width:240px; }
   .file-card-icon{ font-size:22px; flex-shrink:0; }
   .file-card-info{ min-width:0; flex:1; }
-  .file-card-name{ font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-hi, inherit); }
+  /* text-overflow:ellipsis is a no-op on a plain inline element, it only
+     ever clips a box with a definite width, this is a <span> so it needs
+     display:block to actually get one from its flex-shrunk parent, without
+     it a long filename just overflows past the card's edge uncut instead of
+     truncating (nowrap alone stops it wrapping, but does nothing to clip). */
+  .file-card-name{ display:block; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-hi, inherit); }
   .file-card-size{ font-size:11px; color:var(--text-mid); }
   .att-decrypting{ padding:8px 10px; border-radius:10px; background:rgba(var(--tint-rgb),0.07); font-size:12px; color:var(--text-mid); min-width:140px; }
 
@@ -1041,7 +1046,7 @@
           <div class="icon-btn attach-btn" id="attachBtn" title="Attach file">📎</div>
           <div class="icon-btn" id="shareLocationBtn" title="Share my location" style="display:none;">📍</div>
           <div class="icon-btn record-btn" id="recordBtn" title="Record voice note">🎙</div>
-          <div class="icon-btn record-video-btn" id="recordVideoBtn" title="Record video">📹</div>
+          <div class="icon-btn record-video-btn" id="recordVideoBtn" title="Record video"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-0.15em;"><rect x="2" y="6" width="14" height="12" rx="2.5"/><path d="M16 10.2 22 7v10l-6-3.2"/></svg></div>
           <!-- Arms the NEXT send only (resets after each message goes out,
                see sendSecurely in the composer JS), rather than staying on
                as a persistent per-chat mode, so it can't be left on by
@@ -1246,7 +1251,7 @@
       <div class="btn" id="workspaceInviteNewBtn" style="margin-top:8px;">Invite new person</div>
       <div class="hint" id="workspaceInviteError" style="display:none;color:#ff6a6a;"></div>
     </div>
-    <div class="modal-actions">
+    <div class="modal-actions" style="margin-top:14px;">
       <div class="btn" id="workspaceOpenHrBtn">People & HR</div>
       <div class="btn" onclick="closeModal('workspaceMembersOverlay')">Close</div>
     </div>
@@ -5154,7 +5159,15 @@
         return;
       }
 
-      const r = await meetingSfuFetch('sessions/new', { method: 'POST', body: JSON.stringify({}) });
+      // Deliberately no body at all here, not even '{}'. Cloudflare's own
+      // docs list sessionDescription as optional on this endpoint, but the
+      // live API actually 400s an empty JSON object with a "Body JSON
+      // validation error: sessionDescription" decoding_error, confirmed by
+      // hitting rtc.live.cloudflare.com directly with curl both ways. A
+      // truly bodiless POST is what it wants; the offer/answer exchange
+      // happens on the later tracks/new call instead (see
+      // meetingPublishLocalTracks below), same as this app already did.
+      const r = await meetingSfuFetch('sessions/new', { method: 'POST' });
       if (!r.ok || !r.body || !r.body.sessionId){
         // Say WHY, not just "couldn't reach it". By far the most common
         // cause is the Cloudflare Realtime SFU app credentials never having
@@ -7552,7 +7565,7 @@
     if (videoRecorder && videoRecorder.state !== 'inactive') videoRecorder.stop();
     videoRecorder = null;
     recordVideoBtn.classList.remove('recording');
-    recordVideoBtn.textContent = '📹';
+    recordVideoBtn.innerHTML = ICON_VIDEO_ON;
     recordVideoBtn.title = 'Record video';
   }
 
