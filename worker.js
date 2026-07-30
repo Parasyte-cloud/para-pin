@@ -392,6 +392,74 @@ async function sendOnboardingEmail(env, { to, name, pin }) {
   }
 }
 
+// Same Resend setup as sendOnboardingEmail above, a short numeric code to
+// prove control of an address someone is attaching to their existing
+// account (see /account/email/request-code).
+async function sendVerificationCodeEmail(env, { to, name, code }) {
+  if (!env.RESEND_API_KEY) return { sent: false, error: 'resend_not_configured' };
+  if (!env.RESEND_FROM_EMAIL) return { sent: false, error: 'resend_from_not_configured' };
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: env.RESEND_FROM_EMAIL,
+        to: [to],
+        subject: 'Your PArA PIN verification code',
+        text: `Hi ${name || 'there'},\n\nYour verification code is: ${code}\n\nIt expires in 15 minutes. If you didn't request this, you can ignore this email.\n\nThe PArA PIN team`,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      return { sent: false, error: `status ${res.status}${body ? ': ' + body.slice(0, 200) : ''}` };
+    }
+    return { sent: true };
+  } catch (e) {
+    return { sent: false, error: e && e.message ? e.message : 'unknown error' };
+  }
+}
+
+// The magic-link sign-in email (see /auth/email/request). When this also
+// doubles as a brand-new account's very first contact (a company-domain
+// self-signup), it carries the freshly minted PIN too, same as the roster
+// onboarding email above, just folded into one message instead of two.
+async function sendMagicLinkEmail(env, { to, token, origin }) {
+  if (!env.RESEND_API_KEY) return { sent: false, error: 'resend_not_configured' };
+  if (!env.RESEND_FROM_EMAIL) return { sent: false, error: 'resend_from_not_configured' };
+  const base = origin || 'https://chat.parasyte.cloud';
+  const link = `${base}/auth/confirm?token=${encodeURIComponent(token)}`;
+  // No PIN ever travels in this email, even for a brand-new account
+  // self-provisioned off a matching company domain: the client forces a
+  // fresh, person-chosen PIN immediately after this link is used (see
+  // forcePinChangeOverlay), so a temporary generated one is never
+  // meaningful to show anyone.
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: env.RESEND_FROM_EMAIL,
+        to: [to],
+        subject: 'Sign in to PArA PIN',
+        text: `Hi,\n\nClick below to sign in:\n${link}\n\nThis link expires in 15 minutes and works once. If you didn't request this, you can ignore this email.\n\nThe PArA PIN team`,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      return { sent: false, error: `status ${res.status}${body ? ': ' + body.slice(0, 200) : ''}` };
+    }
+    return { sent: true };
+  } catch (e) {
+    return { sent: false, error: e && e.message ? e.message : 'unknown error' };
+  }
+}
+
 export class Registry {
   constructor(state, env) {
     this.state = state;
@@ -584,7 +652,7 @@ export class Registry {
       const orgs = [{ id: null, name: 'Personal' }];
       for (const oid of myOrgIds) {
         const org = await this.state.storage.get(`org:${oid}`);
-        if (org) orgs.push({ id: org.id, name: org.name, logoUrl: org.logoUrl || null, isAdmin: await isOrgAdmin(this.state.storage, org.id, user.id) });
+        if (org) orgs.push({ id: org.id, name: org.name, logoUrl: org.logoUrl || null, allowEmailAuth: !!org.allowEmailAuth, emailDomain: org.emailDomain || null, isAdmin: await isOrgAdmin(this.state.storage, org.id, user.id) });
       }
 
       return json({
@@ -592,6 +660,7 @@ export class Registry {
         displayName: user.displayName,
         avatarUrl: user.avatarUrl || null,
         department: user.department || null,
+        email: user.email || null,
         isAdmin: admins.includes(user.id),
         e2eePublicKey: user.e2eePublicKey || null,
         mustChangePin: !!user.mustChangePin,
@@ -956,7 +1025,7 @@ export class Registry {
       if (!name || !name.trim()) return json({ error: 'missing_name' }, 400);
 
       const orgId = crypto.randomUUID();
-      const org = { id: orgId, name: name.trim().slice(0, 60), logoUrl: null, createdAt: Date.now(), createdBy: me.id, admins: [me.id] };
+      const org = { id: orgId, name: name.trim().slice(0, 60), logoUrl: null, allowEmailAuth: false, emailDomain: null, createdAt: Date.now(), createdBy: me.id, admins: [me.id] };
       await this.state.storage.put(`org:${orgId}`, org);
       await addUserToOrg(this.state.storage, orgId, me.id);
       return json({ org });
@@ -967,7 +1036,7 @@ export class Registry {
     // be exactly this app's own /api/media/<uuid> shape), since it gets
     // interpolated client-side into a CSS url("...") the same way those do.
     if (request.method === 'POST' && url.pathname === '/org/update') {
-      const { pinHash, orgId, name, logoUrl } = await request.json();
+      const { pinHash, orgId, name, logoUrl, allowEmailAuth, emailDomain } = await request.json();
       const me = await this.state.storage.get(`user:${pinHash}`);
       if (!me) return json({ error: 'not_registered' }, 401);
       if (!orgId || !(await isOrgAdmin(this.state.storage, orgId, me.id))) {
@@ -977,8 +1046,207 @@ export class Registry {
       if (!org) return json({ error: 'not_found' }, 404);
       if (typeof name === 'string' && name.trim()) org.name = name.trim().slice(0, 60);
       if (logoUrl !== undefined) org.logoUrl = sanitizeAvatarUrl(logoUrl);
+      if (allowEmailAuth !== undefined) org.allowEmailAuth = !!allowEmailAuth;
+      // The domain is a global claim (whoever's it's set on decides who can
+      // self-provision with a matching address), so it needs its own
+      // uniqueness index the same way emailIndex does for individual
+      // addresses, one workspace can't silently steal another's domain by
+      // typing it into their own settings.
+      if (emailDomain !== undefined) {
+        const normalizedDomain = emailDomain ? String(emailDomain).trim().toLowerCase().replace(/^@/, '') : null;
+        if (normalizedDomain && !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(normalizedDomain)) {
+          return json({ error: 'invalid_domain' }, 400);
+        }
+        if (normalizedDomain) {
+          const claimedBy = await this.state.storage.get(`orgDomainIndex:${normalizedDomain}`);
+          if (claimedBy && claimedBy !== org.id) return json({ error: 'domain_taken' }, 409);
+        }
+        if (org.emailDomain && org.emailDomain !== normalizedDomain) {
+          const owner = await this.state.storage.get(`orgDomainIndex:${org.emailDomain}`);
+          if (owner === org.id) await this.state.storage.delete(`orgDomainIndex:${org.emailDomain}`);
+        }
+        if (normalizedDomain) await this.state.storage.put(`orgDomainIndex:${normalizedDomain}`, org.id);
+        org.emailDomain = normalizedDomain;
+      }
       await this.state.storage.put(`org:${orgId}`, org);
       return json({ org });
+    }
+
+    // ================= Self-service email verification =================
+    // Lets an existing account attach a verified email address. Once set,
+    // that address doubles as a magic-link sign-in credential (see
+    // /auth/email/request below) alongside the PIN, never instead of it.
+    if (request.method === 'POST' && url.pathname === '/account/email/request-code') {
+      const { pinHash, email } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      const normalized = (email || '').trim().toLowerCase();
+      if (!normalized || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) return json({ error: 'invalid_email' }, 400);
+
+      const rl = await checkRateLimit(this.state.storage, `emailcode:${me.id}`, {
+        maxAttempts: 8, windowMs: 15 * 60 * 1000, lockoutMs: 30 * 60 * 1000,
+      });
+      if (!rl.allowed) return json({ error: 'rate_limited', retryAfterMs: rl.retryAfterMs }, 429);
+
+      const existingOwner = await this.state.storage.get(`emailIndex:${normalized}`);
+      if (existingOwner && existingOwner !== me.id) return json({ error: 'email_taken' }, 409);
+
+      const code = String(Math.floor(100000 + Math.random() * 900000));
+      await this.state.storage.put(`emailVerify:${me.id}`, { email: normalized, code, expires: Date.now() + 15 * 60 * 1000 });
+      const result = await sendVerificationCodeEmail(this.env, { to: normalized, name: me.displayName, code });
+      return json({ ok: true, emailSent: result.sent, emailError: result.sent ? undefined : result.error });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/account/email/confirm-code') {
+      const { pinHash, code } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+
+      const rl = await checkRateLimit(this.state.storage, `emailcodeconfirm:${me.id}`, {
+        maxAttempts: 10, windowMs: 15 * 60 * 1000, lockoutMs: 30 * 60 * 1000,
+      });
+      if (!rl.allowed) return json({ error: 'rate_limited', retryAfterMs: rl.retryAfterMs }, 429);
+
+      const pending = await this.state.storage.get(`emailVerify:${me.id}`);
+      if (!pending || Date.now() > pending.expires) return json({ error: 'code_expired' }, 400);
+      if (String(code || '') !== pending.code) return json({ error: 'invalid_code' }, 400);
+
+      // The address could've been claimed by someone else between request
+      // and confirm, re-check right before committing rather than trusting
+      // the check done at request time.
+      const existingOwner = await this.state.storage.get(`emailIndex:${pending.email}`);
+      if (existingOwner && existingOwner !== me.id) return json({ error: 'email_taken' }, 409);
+
+      if (me.email && me.email !== pending.email) {
+        const oldOwner = await this.state.storage.get(`emailIndex:${me.email}`);
+        if (oldOwner === me.id) await this.state.storage.delete(`emailIndex:${me.email}`);
+      }
+
+      me.email = pending.email;
+      await this.state.storage.put(`user:${pinHash}`, me);
+      await this.state.storage.put(`emailIndex:${pending.email}`, me.id);
+      await this.state.storage.delete(`emailVerify:${me.id}`);
+      return json({ ok: true, email: me.email });
+    }
+
+    // ================= Magic-link sign-in =================
+    // A second credential path alongside the PIN: prove control of a
+    // verified email (or, for someone brand-new, a company email matching a
+    // workspace's registered domain) and get back this account's pinHash,
+    // the same thing typing the PIN into the unlock screen hands the
+    // client. Deliberately a two-step request/confirm exchange rather than
+    // the emailed link completing sign-in on GET, mail providers routinely
+    // prefetch/scan links sitting in an inbox, which would silently burn a
+    // single-use token before the real person ever clicks it.
+    if (request.method === 'POST' && url.pathname === '/auth/email/request') {
+      const { email, ip, origin } = await request.json();
+      const normalized = (email || '').trim().toLowerCase();
+      if (!normalized || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) return json({ error: 'invalid_email' }, 400);
+
+      const ipRl = await checkRateLimit(this.state.storage, `emaillink-ip:${ip || 'unknown'}`, {
+        maxAttempts: 20, windowMs: 15 * 60 * 1000, lockoutMs: 30 * 60 * 1000,
+      });
+      if (!ipRl.allowed) return json({ error: 'rate_limited', retryAfterMs: ipRl.retryAfterMs }, 429);
+      const addrRl = await checkRateLimit(this.state.storage, `emaillink-addr:${normalized}`, {
+        maxAttempts: 5, windowMs: 15 * 60 * 1000, lockoutMs: 30 * 60 * 1000,
+      });
+      if (!addrRl.allowed) return json({ error: 'rate_limited', retryAfterMs: addrRl.retryAfterMs }, 429);
+
+      const userId = await this.state.storage.get(`emailIndex:${normalized}`);
+      // Deliberately NOT creating a new-account record here, only a request
+      // for one. Anyone can POST an address they don't control (that's the
+      // whole reason this is rate-limited), if the account/org-membership
+      // were created right now, that alone would be enough to pollute a
+      // workspace's roster with accounts nobody ever proved they could
+      // actually receive mail at. Materializing the account is deferred to
+      // /auth/email/confirm, which only ever runs off a token that came
+      // from an email that actually reached this address.
+      let pendingSignupOrgId = null;
+      if (!userId) {
+        const domain = normalized.split('@')[1] || '';
+        const orgId = domain ? await this.state.storage.get(`orgDomainIndex:${domain}`) : null;
+        const org = orgId ? await this.state.storage.get(`org:${orgId}`) : null;
+        if (org && org.allowEmailAuth) pendingSignupOrgId = orgId;
+      }
+
+      // Always the same generic response either way, revealing whether an
+      // address is registered (or domain-eligible) here would be a
+      // user-enumeration oracle, the same thing already avoided at /contact
+      // and /session.
+      if (userId || pendingSignupOrgId) {
+        const token = crypto.randomUUID() + crypto.randomUUID();
+        const record = userId
+          ? { userId, expires: Date.now() + 15 * 60 * 1000 }
+          : { pendingSignupEmail: normalized, pendingSignupOrgId, expires: Date.now() + 15 * 60 * 1000 };
+        await this.state.storage.put(`magicLink:${token}`, record);
+        await sendMagicLinkEmail(this.env, { to: normalized, token, origin });
+      }
+      return json({ ok: true });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/auth/email/confirm') {
+      const { token } = await request.json();
+      if (!token) return json({ error: 'invalid_token' }, 400);
+      const record = await this.state.storage.get(`magicLink:${token}`);
+      // One-time use: delete on the very first read regardless of whether
+      // it's still valid, a retried/duplicated confirm should never
+      // succeed twice off the same token.
+      if (record) await this.state.storage.delete(`magicLink:${token}`);
+      if (!record || Date.now() > record.expires) return json({ error: 'invalid_or_expired_token' }, 400);
+
+      let userId = record.userId;
+      if (!userId && record.pendingSignupEmail) {
+        // Clicking the link IS the proof of mailbox access this deferred,
+        // create the account now, mirroring /org/roster's PIN-generation
+        // pattern. Re-check the address hasn't been claimed in the
+        // meantime (two links requested back-to-back, first one confirmed
+        // already) rather than trusting the snapshot taken at request time.
+        const existingOwner = await this.state.storage.get(`emailIndex:${record.pendingSignupEmail}`);
+        if (existingOwner) {
+          userId = existingOwner;
+        } else {
+          let pin = null, pinHashOut = null;
+          for (let attempt = 0; attempt < 20; attempt++) {
+            const candidate = String(Math.floor(1000000 + Math.random() * 9000000));
+            const candidateHash = await sha256Hex(candidate);
+            const existingUser = await this.state.storage.get(`user:${candidateHash}`);
+            const existingRoster = await this.state.storage.get(`rosterByPin:${candidateHash}`);
+            if (!existingUser && !existingRoster) { pin = candidate; pinHashOut = candidateHash; break; }
+          }
+          if (!pin) return json({ error: 'could_not_provision' }, 500);
+          const newUser = {
+            id: crypto.randomUUID(),
+            pinHash: pinHashOut,
+            displayName: record.pendingSignupEmail.split('@')[0].replace(/[._]+/g, ' ').trim().slice(0, 40) || null,
+            department: null,
+            avatarUrl: null,
+            e2eePublicKey: null,
+            deviceIds: [],
+            email: record.pendingSignupEmail,
+            // Freshly minted for this one sign-in, the client forces a real
+            // PIN choice right after (see the client's forced-change flow
+            // for any magic-link login), so this value is never actually
+            // shown to anyone, it just satisfies the "every account has a
+            // pinHash" invariant until it's immediately replaced.
+            mustChangePin: true,
+            pendingDeviceLink: null,
+            createdAt: Date.now(),
+          };
+          await this.state.storage.put(`user:${pinHashOut}`, newUser);
+          await this.state.storage.put(`userChats:${newUser.id}`, []);
+          await this.state.storage.put(`userById:${newUser.id}`, userByIdSnapshot(newUser));
+          await this.state.storage.put(`userIdToPinHash:${newUser.id}`, pinHashOut);
+          await this.state.storage.put(`emailIndex:${record.pendingSignupEmail}`, newUser.id);
+          await addUserToOrg(this.state.storage, record.pendingSignupOrgId, newUser.id);
+          userId = newUser.id;
+        }
+      }
+      if (!userId) return json({ error: 'invalid_or_expired_token' }, 400);
+
+      const pinHash = await this.state.storage.get(`userIdToPinHash:${userId}`);
+      const user = pinHash ? await this.state.storage.get(`user:${pinHash}`) : null;
+      if (!user) return json({ error: 'account_not_found' }, 404);
+      return json({ ok: true, pinHash });
     }
 
     if (request.method === 'POST' && url.pathname === '/org/invite') {
@@ -3191,7 +3459,48 @@ export default {
         if (!body.orgId) return json({ error: 'missing_org_id' }, 400);
         return registryStub.fetch('https://internal/org/update', {
           method: 'POST',
-          body: JSON.stringify({ pinHash, orgId: body.orgId, name: body.name, logoUrl: body.logoUrl }),
+          body: JSON.stringify({ pinHash, orgId: body.orgId, name: body.name, logoUrl: body.logoUrl, allowEmailAuth: body.allowEmailAuth, emailDomain: body.emailDomain }),
+        });
+      }
+
+      // Self-service: attach and verify an email address on the caller's
+      // own account (not org-scoped, this is a property of the account).
+      if (request.method === 'POST' && url.pathname === '/api/account/email/request-code') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/account/email/request-code', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, email: body.email }),
+        });
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/account/email/confirm-code') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/account/email/confirm-code', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, code: body.code }),
+        });
+      }
+
+      // Public: no pinHash exists yet at this point, obtaining one for the
+      // client is the entire point of this pair of endpoints.
+      if (request.method === 'POST' && url.pathname === '/api/auth/email/request') {
+        const body = await request.json().catch(() => ({}));
+        const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+        return registryStub.fetch('https://internal/auth/email/request', {
+          method: 'POST',
+          body: JSON.stringify({ email: body.email, ip, origin: url.origin }),
+        });
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/auth/email/confirm') {
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/auth/email/confirm', {
+          method: 'POST',
+          body: JSON.stringify({ token: body.token }),
         });
       }
 

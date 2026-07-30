@@ -873,6 +873,59 @@
 
   <div class="keypad" id="keypad"></div>
   <div id="lockReset">Reset local PIN</div>
+  <div id="emailSignInLink" style="text-align:center; margin-top:14px; font-size:12px; color:var(--text-mid); cursor:pointer; text-decoration:underline;">Sign in with email instead</div>
+</div>
+
+<!-- ============ EMAIL MAGIC-LINK SIGN-IN ============ -->
+<div class="overlay" id="emailSignInOverlay">
+  <div class="modal">
+    <h3>Sign in with email</h3>
+    <div class="hint" id="emailSignInHint">Enter your work email. If it's verified on an existing account, or matches a workspace that allows email sign-in, we'll send you a link to sign in.</div>
+    <div id="emailSignInFormStep">
+      <input type="text" id="emailSignInInput" placeholder="you@company.com" autocomplete="email">
+      <div class="hint" id="emailSignInError" style="display:none; color:#ff6a6a;"></div>
+    </div>
+    <div id="emailSignInSentStep" style="display:none; text-align:center; padding:8px 0;">
+      Check your email for a sign-in link. It expires in 15 minutes.
+    </div>
+    <div class="modal-actions">
+      <div class="btn" id="emailSignInSendBtn">Send link</div>
+      <div class="btn" onclick="closeModal('emailSignInOverlay')">Close</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ EMAIL MAGIC-LINK CONFIRM (landing state while exchanging a token from an emailed link) ============ -->
+<div class="overlay" id="emailConfirmOverlay">
+  <div class="modal" style="text-align:center;">
+    <h3>Signing you in…</h3>
+    <div class="hint" id="emailConfirmStatus">Confirming your sign-in link.</div>
+  </div>
+</div>
+
+<!-- ============ ACCOUNT EMAIL VERIFY (Settings) ============ -->
+<div class="overlay" id="accountEmailOverlay">
+  <div class="modal">
+    <h3>Email sign-in</h3>
+    <div class="hint">Verifying an email lets you sign in with a link instead of your PIN, and (if your workspace allows it) lets teammates with a matching company email join without an invite.</div>
+    <div id="accountEmailCurrentRow" style="display:none; margin-bottom:12px;">
+      <div class="settings-row"><span id="accountEmailCurrentText"></span><span>✓</span></div>
+    </div>
+    <div id="accountEmailStep1">
+      <input type="text" id="accountEmailInput" placeholder="you@company.com" autocomplete="email">
+      <div class="hint" id="accountEmailError1" style="display:none; color:#ff6a6a;"></div>
+    </div>
+    <div id="accountEmailStep2" style="display:none;">
+      <div class="hint">Enter the 6-digit code we sent.</div>
+      <input type="text" id="accountEmailCodeInput" placeholder="123456" inputmode="numeric" maxlength="6">
+      <div class="hint" id="accountEmailError2" style="display:none; color:#ff6a6a;"></div>
+    </div>
+    <div class="modal-actions">
+      <div class="btn" id="accountEmailStep1Btn">Send code</div>
+      <div class="btn" id="accountEmailStep2Btn" style="display:none;">Verify</div>
+      <div class="btn" onclick="closeModal('accountEmailOverlay')">Close</div>
+    </div>
+  </div>
 </div>
 
 <!-- ============ APP SHELL ============ -->
@@ -1174,6 +1227,12 @@
         </div>
         <div class="btn" id="workspaceBrandSaveBtn" style="flex-shrink:0;">Save</div>
       </div>
+      <label class="settings-row" style="margin-top:10px;">
+        <span>Allow email sign-in for this workspace</span>
+        <input type="checkbox" id="workspaceEmailAuthToggle">
+      </label>
+      <input type="text" id="workspaceEmailDomainInput" placeholder="Company email domain, e.g. greigtech.com" style="margin-top:8px;">
+      <div class="hint" id="workspaceEmailDomainHint" style="margin-top:4px;">Anyone with a matching company email can request a sign-in link and join automatically, no invite needed. Leave blank to only let existing verified members' emails work.</div>
     </div>
     <div class="contact-pick" id="workspaceMembersList"></div>
     <div id="workspaceInviteSection" style="display:none;">
@@ -1529,6 +1588,7 @@
       </section>
       <section class="admin-console-section">
         <h3>Account</h3>
+        <div class="settings-row settings-row-action" id="settingsEmailBtn"><span>Email sign-in</span><span id="settingsEmailStatus">Not set</span></div>
         <div class="settings-row settings-row-action" id="settingsShareBtn"><span>Share my PIN</span><span>▦</span></div>
         <div class="settings-row settings-row-action" id="settingsLockBtn"><span>Lock app now</span><span>🔒</span></div>
         <div class="settings-row settings-row-action" id="settingsAdminBtn" style="display:none;"><span>Admin console</span><span>👥</span></div>
@@ -1791,6 +1851,7 @@
   let myPinHash = null;
   let myUserId = null;
   let myDisplayName = null;
+  let myEmail = null;
   let myTrustedDeviceCount = 1;
   let userNameCache = {};
   let messagesByChat = {};
@@ -1960,9 +2021,13 @@
 
   let pendingPin = null; // held only in memory long enough to hash + bootstrap the session
 
-  async function initSession(pin){
+  // `precomputedHash`, when passed, skips deriving myPinHash from a typed
+  // PIN entirely, that's how email magic-link sign-in bootstraps a session:
+  // the server already knows this account's pinHash, we never asked the
+  // person to type any digits (see consumeMagicLinkToken below).
+  async function initSession(pin, precomputedHash){
     pendingPin = pin;
-    myPinHash = await sha256Hex(pin);
+    myPinHash = precomputedHash || await sha256Hex(pin);
     pendingPin = null;
     syncPinHashToServiceWorker(myPinHash);
 
@@ -1998,6 +2063,8 @@
     myDisplayName = r.body.displayName;
     myAvatarUrl = r.body.avatarUrl || null;
     myDepartment = r.body.department || null;
+    myEmail = r.body.email || null;
+    updateSettingsEmailStatus();
     iAmAdmin = !!r.body.isAdmin;
     myTrustedDeviceCount = r.body.trustedDeviceCount || 1;
     sessionChats = r.body.chats || [];
@@ -2452,6 +2519,79 @@
 
   setLockMessage();
   renderDots(false);
+
+  // ================= EMAIL MAGIC-LINK SIGN-IN =================
+  // A second way onto the lock screen's other side, alongside typing the
+  // PIN: prove control of a verified (or company-domain-eligible) email
+  // address instead. See /api/auth/email/request+confirm in worker.js.
+  document.getElementById('emailSignInLink').addEventListener('click', ()=>{
+    document.getElementById('emailSignInInput').value = '';
+    document.getElementById('emailSignInError').style.display = 'none';
+    document.getElementById('emailSignInFormStep').style.display = 'block';
+    document.getElementById('emailSignInSentStep').style.display = 'none';
+    document.getElementById('emailSignInSendBtn').style.display = 'inline-flex';
+    openModal('emailSignInOverlay');
+  });
+
+  document.getElementById('emailSignInSendBtn').addEventListener('click', async function(){
+    const errEl = document.getElementById('emailSignInError');
+    errEl.style.display = 'none';
+    const email = document.getElementById('emailSignInInput').value.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){
+      errEl.textContent = 'Enter a valid email address.';
+      errEl.style.display = 'block';
+      return;
+    }
+    this.disabled = true;
+    const r = await apiFetch('/auth/email/request', { method: 'POST', body: JSON.stringify({ email }) });
+    this.disabled = false;
+    if (!r.ok && r.body && r.body.error === 'rate_limited'){
+      errEl.textContent = `Too many attempts. Try again in ${formatRetryAfter(r.body.retryAfterMs)}.`;
+      errEl.style.display = 'block';
+      return;
+    }
+    // Deliberately the same confirmation regardless of whether the address
+    // actually matched anything, see the server-side comment on
+    // /auth/email/request, this avoids turning the form into a way to probe
+    // which emails have accounts.
+    document.getElementById('emailSignInFormStep').style.display = 'none';
+    document.getElementById('emailSignInSentStep').style.display = 'block';
+    document.getElementById('emailSignInSendBtn').style.display = 'none';
+  });
+
+  // Exchanges a token from an emailed sign-in link for this account's
+  // pinHash, then bootstraps the exact same session path a typed PIN would
+  // (see initSession's precomputedHash param). Always lands on the forced
+  // PIN-change screen afterward, regardless of mustChangePin, an email
+  // link is how the person just proved their identity, it makes sense for
+  // that same moment to be when they set a real device PIN they actually
+  // know, whether this is a brand-new account or an existing one that used
+  // this as a "forgot my PIN" recovery path.
+  async function consumeMagicLinkToken(token){
+    openModal('emailConfirmOverlay');
+    const statusEl = document.getElementById('emailConfirmStatus');
+    const r = await apiFetch('/auth/email/confirm', { method: 'POST', body: JSON.stringify({ token }) });
+    if (!r.ok || !r.body || !r.body.pinHash){
+      statusEl.textContent = "That link isn't valid anymore. Go back to the email and request a new one, or sign in with your PIN.";
+      return;
+    }
+    lockEl.style.display = 'none';
+    appEl.classList.add('show');
+    myRawPin = null;
+    await initSession(null, r.body.pinHash);
+    requestAnimationFrame(()=>moveNavActivePill('chats'));
+    closeModal('emailConfirmOverlay');
+    openModal('forcePinChangeOverlay');
+  }
+
+  (function(){
+    const params = new URLSearchParams(location.search);
+    const token = params.get('token');
+    if (token){
+      history.replaceState(null, '', location.pathname);
+      consumeMagicLinkToken(token);
+    }
+  })();
 
   // ================= APP RENDER =================
   const chatListEl = document.getElementById('chatList');
@@ -2936,6 +3076,8 @@
       document.getElementById('workspaceBrandNameInput').value = org.name;
       document.getElementById('workspaceBrandHint').textContent = 'Tap the logo to change it. Rename, then Save.';
       document.getElementById('workspaceBrandHint').style.color = '';
+      document.getElementById('workspaceEmailAuthToggle').checked = !!org.allowEmailAuth;
+      document.getElementById('workspaceEmailDomainInput').value = org.emailDomain || '';
     }
     document.getElementById('workspaceInviteError').style.display = 'none';
     document.getElementById('workspaceInvitePinInput').value = '';
@@ -3017,14 +3159,25 @@
     const hintEl = document.getElementById('workspaceBrandHint');
     const name = document.getElementById('workspaceBrandNameInput').value.trim();
     if (!name){ hintEl.textContent = 'Enter a name.'; hintEl.style.color = '#ff6a6a'; return; }
-    const r = await apiFetch('/org/update', { method: 'POST', body: JSON.stringify({ orgId: activeWorkspaceForMembers.id, name }) });
+    const allowEmailAuth = document.getElementById('workspaceEmailAuthToggle').checked;
+    const emailDomain = document.getElementById('workspaceEmailDomainInput').value.trim();
+    const r = await apiFetch('/org/update', { method: 'POST', body: JSON.stringify({ orgId: activeWorkspaceForMembers.id, name, allowEmailAuth, emailDomain }) });
     if (!r.ok || !r.body || !r.body.org){
-      hintEl.textContent = "Couldn't save. Try again."; hintEl.style.color = '#ff6a6a';
+      hintEl.textContent = r.body && r.body.error === 'domain_taken' ? 'That domain is already claimed by another workspace.'
+        : r.body && r.body.error === 'invalid_domain' ? 'Enter a valid domain, e.g. company.com.'
+        : "Couldn't save. Try again.";
+      hintEl.style.color = '#ff6a6a';
       return;
     }
     activeWorkspaceForMembers.name = r.body.org.name;
+    activeWorkspaceForMembers.allowEmailAuth = r.body.org.allowEmailAuth;
+    activeWorkspaceForMembers.emailDomain = r.body.org.emailDomain;
     const myOrg = myOrgs.find(o => o.id === activeWorkspaceForMembers.id);
-    if (myOrg) myOrg.name = r.body.org.name;
+    if (myOrg){
+      myOrg.name = r.body.org.name;
+      myOrg.allowEmailAuth = r.body.org.allowEmailAuth;
+      myOrg.emailDomain = r.body.org.emailDomain;
+    }
     document.getElementById('workspaceMembersTitle').textContent = r.body.org.name + ' members';
     updateWorkspaceBar();
     hintEl.textContent = 'Saved.'; hintEl.style.color = '#7ee08a';
@@ -3989,6 +4142,82 @@
   document.getElementById('settingsLockBtn').addEventListener('click', ()=>{
     closeModal('settingsOverlay');
     lockApp();
+  });
+
+  function updateSettingsEmailStatus(){
+    const el = document.getElementById('settingsEmailStatus');
+    if (el) el.textContent = myEmail || 'Not set';
+  }
+
+  document.getElementById('settingsEmailBtn').addEventListener('click', ()=>{
+    closeModal('settingsOverlay');
+    document.getElementById('accountEmailInput').value = '';
+    document.getElementById('accountEmailCodeInput').value = '';
+    document.getElementById('accountEmailError1').style.display = 'none';
+    document.getElementById('accountEmailError2').style.display = 'none';
+    document.getElementById('accountEmailStep1').style.display = 'block';
+    document.getElementById('accountEmailStep2').style.display = 'none';
+    document.getElementById('accountEmailStep1Btn').style.display = 'inline-flex';
+    document.getElementById('accountEmailStep2Btn').style.display = 'none';
+    const currentRow = document.getElementById('accountEmailCurrentRow');
+    if (myEmail){
+      document.getElementById('accountEmailCurrentText').textContent = `Verified: ${myEmail}`;
+      currentRow.style.display = 'block';
+    } else {
+      currentRow.style.display = 'none';
+    }
+    openModal('accountEmailOverlay');
+  });
+
+  document.getElementById('accountEmailStep1Btn').addEventListener('click', async function(){
+    const errEl = document.getElementById('accountEmailError1');
+    errEl.style.display = 'none';
+    const email = document.getElementById('accountEmailInput').value.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){
+      errEl.textContent = 'Enter a valid email address.';
+      errEl.style.display = 'block';
+      return;
+    }
+    this.disabled = true;
+    const r = await apiFetch('/account/email/request-code', { method: 'POST', body: JSON.stringify({ email }) });
+    this.disabled = false;
+    if (!r.ok){
+      errEl.textContent = r.body && r.body.error === 'email_taken' ? 'That email is already verified on another account.'
+        : r.body && r.body.error === 'rate_limited' ? `Too many attempts. Try again in ${formatRetryAfter(r.body.retryAfterMs)}.`
+        : 'Could not send a code. Try again.';
+      errEl.style.display = 'block';
+      return;
+    }
+    document.getElementById('accountEmailStep1').style.display = 'none';
+    document.getElementById('accountEmailStep2').style.display = 'block';
+    document.getElementById('accountEmailStep1Btn').style.display = 'none';
+    document.getElementById('accountEmailStep2Btn').style.display = 'inline-flex';
+  });
+
+  document.getElementById('accountEmailStep2Btn').addEventListener('click', async function(){
+    const errEl = document.getElementById('accountEmailError2');
+    errEl.style.display = 'none';
+    const code = document.getElementById('accountEmailCodeInput').value.trim();
+    if (!/^\d{6}$/.test(code)){
+      errEl.textContent = 'Enter the 6-digit code.';
+      errEl.style.display = 'block';
+      return;
+    }
+    this.disabled = true;
+    const r = await apiFetch('/account/email/confirm-code', { method: 'POST', body: JSON.stringify({ code }) });
+    this.disabled = false;
+    if (!r.ok){
+      errEl.textContent = r.body && r.body.error === 'code_expired' ? 'That code expired, request a new one.'
+        : r.body && r.body.error === 'invalid_code' ? "That code isn't right."
+        : r.body && r.body.error === 'email_taken' ? 'That email is already verified on another account.'
+        : r.body && r.body.error === 'rate_limited' ? `Too many attempts. Try again in ${formatRetryAfter(r.body.retryAfterMs)}.`
+        : 'Could not verify that code.';
+      errEl.style.display = 'block';
+      return;
+    }
+    myEmail = r.body.email;
+    updateSettingsEmailStatus();
+    closeModal('accountEmailOverlay');
   });
 
   document.getElementById('settingsShareBtn').addEventListener('click', async ()=>{
