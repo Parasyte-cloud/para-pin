@@ -1222,6 +1222,20 @@ export class Registry {
       if (oldPinHash === newPinHash) return json({ error: 'pin_unchanged' }, 400);
       const user = await this.state.storage.get(`user:${oldPinHash}`);
       if (!user) return json({ error: 'not_found' }, 404);
+
+      // The `pin_taken` check below is exactly the kind of oracle the
+      // /session, /contact, and /group rate limits exist to close off (it
+      // answers "does this PIN belong to someone" for any candidate you
+      // hand it), but this endpoint had no throttle of its own, so a signed-in
+      // account could hammer it with candidate newPinHash values to enumerate
+      // other people's PINs at full speed, no lockout, ever. Rate-limit it
+      // the same way, keyed by the caller's own account so switching accounts
+      // doesn't reset the budget.
+      const rl = await checkRateLimit(this.state.storage, `changepin:${user.id}`, {
+        maxAttempts: 10, windowMs: 10 * 60 * 1000, lockoutMs: 30 * 60 * 1000,
+      });
+      if (!rl.allowed) return json({ error: 'rate_limited', retryAfterMs: rl.retryAfterMs }, 429);
+
       const clash = await this.state.storage.get(`user:${newPinHash}`);
       if (clash) return json({ error: 'pin_taken' }, 409);
 
@@ -1283,10 +1297,33 @@ export class Registry {
     if (request.method === 'POST' && url.pathname === '/device-link/approve') {
       // Called from an ALREADY-trusted device, pinHash here is that
       // device's own (current, working) credential, not the new device's.
-      const { pinHash, code } = await request.json();
-      if (!pinHash || !code) return json({ error: 'missing_fields' }, 400);
+      //
+      // CRITICAL: pinHash alone does NOT prove that. Every device signed
+      // into an account shares the exact same pinHash (it's derived from the
+      // shared PIN, not per-device), so without also checking deviceId here,
+      // the untrusted device that just called /device-link/request could
+      // immediately call THIS endpoint itself with the code it was handed
+      // back in that same response, self-approving with zero involvement
+      // from any real trusted device. That defeats the entire point of
+      // device-lock ("protect against someone who merely knows the PIN").
+      // deviceId is a random UUID generated once and kept only in that
+      // device's own localStorage, it's never sent to any other device or
+      // included in the push payload, so requiring it here (and checking
+      // it's already trusted) actually ties this call to a specific,
+      // previously-approved browser instead of just "whoever knows the PIN".
+      const { pinHash, code, deviceId } = await request.json();
+      if (!pinHash || !code || !deviceId) return json({ error: 'missing_fields' }, 400);
       const user = await this.state.storage.get(`user:${pinHash}`);
       if (!user) return json({ error: 'not_found' }, 404);
+      if (!Array.isArray(user.deviceIds) || !user.deviceIds.includes(deviceId)) {
+        return json({ error: 'not_a_trusted_device' }, 403);
+      }
+      // Defense in depth on top of the trusted-device check above: the code
+      // is only 6 digits (~900k values), no reason to allow unlimited guesses.
+      const dlrl = await checkRateLimit(this.state.storage, `devicelink:${user.id}`, {
+        maxAttempts: 10, windowMs: 10 * 60 * 1000, lockoutMs: 30 * 60 * 1000,
+      });
+      if (!dlrl.allowed) return json({ error: 'rate_limited', retryAfterMs: dlrl.retryAfterMs }, 429);
       const pending = user.pendingDeviceLink;
       if (!pending) return json({ error: 'no_pending_request' }, 400);
       if (Date.now() - pending.requestedAt > 10 * 60 * 1000) {
@@ -2133,6 +2170,15 @@ export default {
       if (request.method === 'POST' && url.pathname === '/api/upload') {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        // The comment above claims "auth required so randoms can't fill your
+        // bucket", but authHash() only reads whatever string the caller sent,
+        // it was never actually checked against a real account. That left
+        // this endpoint uploading (up to 20MB, R2-billed) for literally any
+        // request with a non-empty header, registered or not. Actually enforce
+        // the claim: the hash has to belong to a real, already-registered user.
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
         if (!env.MEDIA) return json({ error: 'media_not_configured' }, 501);
 
         let contentType = request.headers.get('content-type') || 'application/octet-stream';
@@ -2226,10 +2272,10 @@ export default {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
         const body = await request.json().catch(() => ({}));
-        if (!body.code) return json({ error: 'missing_fields' }, 400);
+        if (!body.code || !body.deviceId) return json({ error: 'missing_fields' }, 400);
         return registryStub.fetch('https://internal/device-link/approve', {
           method: 'POST',
-          body: JSON.stringify({ pinHash, code: body.code }),
+          body: JSON.stringify({ pinHash, code: body.code, deviceId: body.deviceId }),
         });
       }
 
@@ -2353,6 +2399,13 @@ export default {
       if (request.method === 'GET' && url.pathname === '/api/presence') {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        // Every other per-user lookup in this file confirms the hash belongs
+        // to a real account before answering; this one didn't, so anyone who
+        // knew (or guessed) a userId could poll their online/offline status
+        // with no account of their own at all.
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
         const userId = url.searchParams.get('userId');
         if (!userId) return json({ error: 'missing_user_id' }, 400);
         const channelStub = env.USER_CHANNEL.get(env.USER_CHANNEL.idFromName(userId));
@@ -2651,6 +2704,16 @@ export default {
       }
 
       if (request.method === 'GET' && url.pathname === '/api/users') {
+        // Same gap as /api/presence: this had no auth check at all, so
+        // anyone who knew a userId could pull their display name, avatar,
+        // and E2EE public keys with no account of their own. The client
+        // always sends the pin hash header once logged in, so requiring it
+        // here doesn't change legitimate behavior.
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
         const ids = url.searchParams.get('ids') || '';
         const res = await registryStub.fetch(`https://internal/users?ids=${encodeURIComponent(ids)}`);
         return res;

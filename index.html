@@ -406,7 +406,7 @@
     flex-shrink:0; margin-top:0; background:transparent;
     /* Bumped top padding so the credit line sits with real breathing room
        below the floating nav instead of crowding right up against it. */
-    padding:14px 0 calc(6px + env(safe-area-inset-bottom, 0px));
+    padding:26px 0 calc(6px + env(safe-area-inset-bottom, 0px));
   }
 
   /* ---------- conversation ---------- */
@@ -737,7 +737,7 @@
   /* Tap to switch which space (Personal or a real workspace) the chat list
      and new-chat/new-group actions operate in, see switchWorkspace(). */
   .workspace-bar{
-    margin:0 16px 10px; padding:10px 16px; border-radius:999px; cursor:pointer;
+    margin:14px 16px 10px; padding:10px 16px; border-radius:999px; cursor:pointer;
     display:flex; align-items:center; justify-content:space-between; gap:8px;
     background:rgba(var(--tint-rgb),0.05); border:1px solid var(--glass-brd);
     font-size:12.5px; font-weight:600; color:var(--text-hi);
@@ -990,7 +990,7 @@
         <div class="nav-tab-badge" id="navCallsBadge" style="display:none;"></div>
       </div>
       <div class="nav-tab" data-nav-tab="video">
-        <div class="nav-tab-icon">🎥</div>
+        <div class="nav-tab-icon"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-0.15em;"><rect x="2" y="6" width="14" height="12" rx="2.5"/><path d="M16 10.2 22 7v10l-6-3.2"/></svg></div>
         <span>Video</span>
       </div>
       <div class="nav-tab active" data-nav-tab="chats">
@@ -1448,7 +1448,7 @@
   </div>
   <div class="video-call-controls">
     <div class="video-call-btn" id="videoCallMuteBtn" title="Mute">🎙️</div>
-    <div class="video-call-btn" id="videoCallCameraBtn" title="Turn camera off">🎥</div>
+    <div class="video-call-btn" id="videoCallCameraBtn" title="Turn camera off"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-0.15em;"><rect x="2" y="6" width="14" height="12" rx="2.5"/><path d="M16 10.2 22 7v10l-6-3.2"/></svg></div>
     <div class="video-call-btn" id="videoCallSwitchBtn" title="Switch camera">🔄</div>
     <div class="video-call-btn video-call-end-btn" id="videoCallEndBtn" title="End call">📞</div>
   </div>
@@ -1481,7 +1481,7 @@
   <div class="meeting-tiles-grid" id="meetingTilesGrid"></div>
   <div class="video-call-controls">
     <div class="video-call-btn" id="meetingMuteBtn" title="Mute">🎙️</div>
-    <div class="video-call-btn" id="meetingCameraBtn" title="Turn camera off">🎥</div>
+    <div class="video-call-btn" id="meetingCameraBtn" title="Turn camera off"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-0.15em;"><rect x="2" y="6" width="14" height="12" rx="2.5"/><path d="M16 10.2 22 7v10l-6-3.2"/></svg></div>
     <div class="video-call-btn video-call-end-btn" id="meetingLeaveBtn" title="Leave meeting">📞</div>
   </div>
 </div>
@@ -1647,6 +1647,12 @@
   // just localStorage, same as e.g. the theme choice.
   let myOrgs = [{ id: null, name: 'Personal' }];
   let activeOrgId = localStorage.getItem('parapin_active_org') || null;
+  // Real vector icons for the video-call surfaces (nav tab + in-call camera
+  // toggle + recent-calls list), replacing the 🎥 emoji, which rendered as a
+  // whole different (and inconsistently sized/colored) glyph per platform
+  // font instead of matching the rest of the UI's line-icon style.
+  const ICON_VIDEO_ON = '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-0.15em;"><rect x="2" y="6" width="14" height="12" rx="2.5"/><path d="M16 10.2 22 7v10l-6-3.2"/></svg>';
+  const ICON_VIDEO_OFF = '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-0.15em;"><path d="M16 8.5V7a2 2 0 0 0-2-2H8m-4 0h-.5A1.5 1.5 0 0 0 2 6.5v11A1.5 1.5 0 0 0 3.5 19H14a2 2 0 0 0 2-2v-1.5"/><path d="M16 10.2 22 7v10l-6-3.2"/><line x1="2" y1="2" x2="22" y2="22"/></svg>';
   let activeChatId = null;
   // True right after the user taps Back to the mobile chat list.
   // `activeChatId` deliberately stays set (still needed for read state etc.)
@@ -1968,7 +1974,11 @@
       return;
     }
     btn.disabled = true;
-    const r = await apiFetch('/device-link/approve', { method: 'POST', body: JSON.stringify({ code }) });
+    // deviceId is what lets the server confirm THIS device is one already
+    // on the trusted list, not just that whoever's calling knows the PIN,
+    // see the server-side comment on /device-link/approve for why that
+    // distinction matters.
+    const r = await apiFetch('/device-link/approve', { method: 'POST', body: JSON.stringify({ code, deviceId: myDeviceId }) });
     btn.disabled = false;
     if (r.ok){
       msgEl.style.color = '#7ee08a';
@@ -1978,7 +1988,11 @@
       setTimeout(()=>closeModal('approveDeviceOverlay'), 1200);
     } else {
       msgEl.style.color = '#ff6a6a';
-      msgEl.textContent = r.body && r.body.error === 'wrong_code' ? "That code doesn't match." : r.body && r.body.error === 'expired' ? 'That code expired.' : "Couldn't approve that device. Try again.";
+      msgEl.textContent = r.body && r.body.error === 'wrong_code' ? "That code doesn't match."
+        : r.body && r.body.error === 'expired' ? 'That code expired.'
+        : r.body && r.body.error === 'not_a_trusted_device' ? "This device isn't trusted yet, so it can't approve others."
+        : r.body && r.body.error === 'rate_limited' ? `Too many attempts. Try again in ${formatRetryAfter(r.body.retryAfterMs)}.`
+        : "Couldn't approve that device. Try again.";
       msgEl.style.display = 'block';
     }
   });
@@ -2041,7 +2055,9 @@
     const r = await apiFetch('/change-pin', { method: 'POST', body: JSON.stringify({ newPinHash, deviceId: myDeviceId }) });
     btn.disabled = false;
     if (!r.ok){
-      errEl.textContent = r.body && r.body.error === 'pin_taken' ? 'That PIN is already in use. Pick a different one.' : 'Could not save that. Try again.';
+      errEl.textContent = r.body && r.body.error === 'pin_taken' ? 'That PIN is already in use. Pick a different one.'
+        : r.body && r.body.error === 'rate_limited' ? `Too many attempts. Try again in ${formatRetryAfter(r.body.retryAfterMs)}.`
+        : 'Could not save that. Try again.';
       errEl.style.display = 'block';
       return;
     }
@@ -3746,7 +3762,7 @@
       muteBtn.textContent = callMuted ? '🔇' : '🎙️';
       const camBtn = document.getElementById('videoCallCameraBtn');
       camBtn.classList.toggle('active', cameraOff);
-      camBtn.textContent = cameraOff ? '📷' : '🎥';
+      camBtn.innerHTML = cameraOff ? ICON_VIDEO_OFF : ICON_VIDEO_ON;
     } else if (ringingOrConnected){
       videoScreen.classList.remove('show');
       renderAvatar(document.getElementById('activeCallBarAvatar'), activeCallPeerName, false, activeCallPeerAvatar);
@@ -3794,7 +3810,7 @@
     localAudioStream.getVideoTracks().forEach(t=>{ t.enabled = !cameraOff; });
     const camBtn = document.getElementById('videoCallCameraBtn');
     camBtn.classList.toggle('active', cameraOff);
-    camBtn.textContent = cameraOff ? '📷' : '🎥';
+    camBtn.innerHTML = cameraOff ? ICON_VIDEO_OFF : ICON_VIDEO_ON;
   }
 
   // Swaps the physical camera mid-call, WebRTC has no "just change
@@ -3868,7 +3884,7 @@
       const name = userNameCache[otherId] || 'PArA PIN user';
       const row = document.createElement('div');
       row.className = 'settings-row settings-row-action';
-      row.innerHTML = `<span style="display:flex;align-items:center;gap:10px;min-width:0;"><span class="avatar" style="width:32px;height:32px;font-size:12px;flex-shrink:0;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(name)}</span></span><span>${videoMode ? '🎥' : '📞'}</span>`;
+      row.innerHTML = `<span style="display:flex;align-items:center;gap:10px;min-width:0;"><span class="avatar" style="width:32px;height:32px;font-size:12px;flex-shrink:0;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(name)}</span></span><span>${videoMode ? ICON_VIDEO_ON : '📞'}</span>`;
       renderAvatar(row.querySelector('.avatar'), name, false, userAvatarCache[otherId]);
       row.addEventListener('click', ()=>{
         closeModal(videoMode ? 'videoOverlay' : 'callsOverlay');
@@ -3896,7 +3912,7 @@
       const dirIcon = entry.direction === 'outgoing' ? '↗' : '↙';
       const outcomeLabel = entry.outcome === 'missed' ? 'Missed' : entry.outcome === 'declined' ? 'Declined' : entry.outcome === 'busy' ? 'Busy' : fmtDuration(entry.durationSec);
       const color = (entry.outcome === 'missed' || entry.outcome === 'declined') ? 'color:#ff6a6a;' : 'color:var(--text-low);';
-      row.innerHTML = `<span style="display:flex;align-items:center;gap:10px;min-width:0;"><span class="avatar" style="width:32px;height:32px;font-size:12px;flex-shrink:0;"></span><span style="overflow:hidden;"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(entry.withName)}</div><div class="hint" style="margin:0;${color}">${dirIcon} ${outcomeLabel} · ${fmtDay(entry.ts)}</div></span></span><span>${videoMode ? '🎥' : '📞'}</span>`;
+      row.innerHTML = `<span style="display:flex;align-items:center;gap:10px;min-width:0;"><span class="avatar" style="width:32px;height:32px;font-size:12px;flex-shrink:0;"></span><span style="overflow:hidden;"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(entry.withName)}</div><div class="hint" style="margin:0;${color}">${dirIcon} ${outcomeLabel} · ${fmtDay(entry.ts)}</div></span></span><span>${videoMode ? ICON_VIDEO_ON : '📞'}</span>`;
       renderAvatar(row.querySelector('.avatar'), entry.withName, false, entry.withAvatarUrl);
       row.addEventListener('click', ()=>{
         closeModal(videoMode ? 'videoOverlay' : 'callsOverlay');
@@ -4165,7 +4181,7 @@
     document.getElementById('meetingCallStatus').textContent = 'Connecting…';
     document.getElementById('meetingTilesGrid').innerHTML = '';
     document.getElementById('meetingMuteBtn').textContent = '🎙️';
-    document.getElementById('meetingCameraBtn').textContent = '🎥';
+    document.getElementById('meetingCameraBtn').innerHTML = ICON_VIDEO_ON;
     document.getElementById('meetingCallScreen').classList.add('show');
 
     try {
@@ -4325,7 +4341,7 @@
     if (!meetingLocalStream) return;
     meetingCameraOff = !meetingCameraOff;
     meetingLocalStream.getVideoTracks().forEach(t => t.enabled = !meetingCameraOff);
-    document.getElementById('meetingCameraBtn').textContent = meetingCameraOff ? '📷' : '🎥';
+    document.getElementById('meetingCameraBtn').innerHTML = meetingCameraOff ? ICON_VIDEO_OFF : ICON_VIDEO_ON;
     document.getElementById('meetingCameraBtn').classList.toggle('active', meetingCameraOff);
   });
 
