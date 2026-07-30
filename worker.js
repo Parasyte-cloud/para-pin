@@ -507,7 +507,7 @@ export class Registry {
       const orgs = [{ id: null, name: 'Personal' }];
       for (const oid of myOrgIds) {
         const org = await this.state.storage.get(`org:${oid}`);
-        if (org) orgs.push({ id: org.id, name: org.name, isAdmin: await isOrgAdmin(this.state.storage, org.id, user.id) });
+        if (org) orgs.push({ id: org.id, name: org.name, logoUrl: org.logoUrl || null, isAdmin: await isOrgAdmin(this.state.storage, org.id, user.id) });
       }
 
       return json({
@@ -879,9 +879,28 @@ export class Registry {
       if (!name || !name.trim()) return json({ error: 'missing_name' }, 400);
 
       const orgId = crypto.randomUUID();
-      const org = { id: orgId, name: name.trim().slice(0, 60), createdAt: Date.now(), createdBy: me.id, admins: [me.id] };
+      const org = { id: orgId, name: name.trim().slice(0, 60), logoUrl: null, createdAt: Date.now(), createdBy: me.id, admins: [me.id] };
       await this.state.storage.put(`org:${orgId}`, org);
       await addUserToOrg(this.state.storage, orgId, me.id);
+      return json({ org });
+    }
+
+    // Org-admin-only branding: rename the workspace and/or set its logo.
+    // logoUrl goes through the same sanitizer as profile/group avatars (must
+    // be exactly this app's own /api/media/<uuid> shape), since it gets
+    // interpolated client-side into a CSS url("...") the same way those do.
+    if (request.method === 'POST' && url.pathname === '/org/update') {
+      const { pinHash, orgId, name, logoUrl } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgAdmin(this.state.storage, orgId, me.id))) {
+        return json({ error: 'forbidden' }, 403);
+      }
+      const org = await this.state.storage.get(`org:${orgId}`);
+      if (!org) return json({ error: 'not_found' }, 404);
+      if (typeof name === 'string' && name.trim()) org.name = name.trim().slice(0, 60);
+      if (logoUrl !== undefined) org.logoUrl = sanitizeAvatarUrl(logoUrl);
+      await this.state.storage.put(`org:${orgId}`, org);
       return json({ org });
     }
 
@@ -2778,6 +2797,20 @@ export default {
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
         const orgId = url.searchParams.get('orgId') || '';
         return registryStub.fetch(`https://internal/org/members?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}`);
+      }
+
+      // Org-admin-only: rename the workspace and/or set its logo (uploaded
+      // separately via the existing /api/upload, this just points the org
+      // record at the resulting /api/media/<uuid> URL).
+      if (request.method === 'POST' && url.pathname === '/api/org/update') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        if (!body.orgId) return json({ error: 'missing_org_id' }, 400);
+        return registryStub.fetch('https://internal/org/update', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, orgId: body.orgId, name: body.name, logoUrl: body.logoUrl }),
+        });
       }
 
       if (request.method === 'POST' && url.pathname === '/api/org/leave') {

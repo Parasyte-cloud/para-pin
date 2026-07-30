@@ -744,7 +744,7 @@
   }
   .workspace-bar:hover{ background:rgba(var(--tint-rgb),0.08); }
   .workspace-bar-chevron{ color:var(--text-low); font-size:11px; }
-  .workspace-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px; border-radius:10px; cursor:pointer; }
+  .workspace-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:12px 16px; border-radius:999px; cursor:pointer; margin-bottom:6px; }
   .workspace-row:hover{ background:rgba(var(--tint-rgb),0.04); }
   .workspace-row.active{ background:rgba(0,212,255,0.08); border:1px solid rgba(0,212,255,0.25); }
   .workspace-row-name{ font-weight:600; font-size:13.5px; }
@@ -855,7 +855,10 @@
         </div>
       </div>
       <div class="workspace-bar" id="workspaceBar">
-        <span id="workspaceBarLabel">Personal</span>
+        <span style="display:flex; align-items:center; gap:8px; min-width:0; overflow:hidden;">
+          <span class="avatar" id="workspaceBarLogo" style="width:20px; height:20px; font-size:9px; flex-shrink:0; display:none;"></span>
+          <span id="workspaceBarLabel" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">Personal</span>
+        </span>
         <span class="workspace-bar-chevron">▾</span>
       </div>
       <div id="sessionBanner" style="display:none;margin:0 16px 10px;padding:10px 12px;border-radius:12px;background:rgba(255,80,80,0.08);border:1px solid rgba(255,80,80,0.25);font-size:12px;color:#ff9a9a;">
@@ -1121,6 +1124,16 @@
 <div class="overlay" id="workspaceMembersOverlay">
   <div class="modal lg">
     <h3 id="workspaceMembersTitle">Members</h3>
+    <div id="workspaceBrandSection" style="display:none;">
+      <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px;">
+        <div class="avatar" id="workspaceBrandAvatar" style="width:52px; height:52px; font-size:18px; cursor:pointer; flex-shrink:0;" title="Tap to change logo"></div>
+        <div style="flex:1; min-width:0;">
+          <input type="text" id="workspaceBrandNameInput" placeholder="Workspace name" maxlength="60">
+          <div class="hint" id="workspaceBrandHint" style="margin-top:4px;">Tap the logo to change it. Rename, then Save.</div>
+        </div>
+        <div class="btn" id="workspaceBrandSaveBtn" style="flex-shrink:0;">Save</div>
+      </div>
+    </div>
     <div class="contact-pick" id="workspaceMembersList"></div>
     <div id="workspaceInviteSection" style="display:none;">
       <div class="hint">Invite by PIN (they must already have a PArA PIN account), or invite someone brand new by name/email.</div>
@@ -2627,6 +2640,15 @@
   function updateWorkspaceBar(){
     const org = currentOrg();
     document.getElementById('workspaceBarLabel').textContent = org ? org.name : 'Personal';
+    // Personal has no logo (it isn't a real org), so the little avatar next
+    // to the label only ever shows up once a workspace has branded itself.
+    const logoEl = document.getElementById('workspaceBarLogo');
+    if (org && org.id && org.logoUrl){
+      logoEl.style.display = '';
+      renderAvatar(logoEl, org.name, false, org.logoUrl);
+    } else {
+      logoEl.style.display = 'none';
+    }
   }
 
   function renderWorkspaceList(){
@@ -2636,8 +2658,17 @@
       const row = document.createElement('div');
       row.className = 'workspace-row' + ((org.id || null) === (activeOrgId || null) ? ' active' : '');
       const left = document.createElement('div');
-      left.innerHTML = `<div class="workspace-row-name">${escapeHtml(org.name)}</div>` +
+      left.style.display = 'flex'; left.style.alignItems = 'center'; left.style.gap = '10px'; left.style.minWidth = '0';
+      const logoAv = document.createElement('div');
+      logoAv.className = 'avatar';
+      logoAv.style.width = '32px'; logoAv.style.height = '32px'; logoAv.style.fontSize = '12px'; logoAv.style.flexShrink = '0';
+      renderAvatar(logoAv, org.name, false, org.id ? org.logoUrl : null);
+      const textWrap = document.createElement('div');
+      textWrap.style.minWidth = '0';
+      textWrap.innerHTML = `<div class="workspace-row-name">${escapeHtml(org.name)}</div>` +
         (org.id ? `<div class="workspace-row-admin">${org.isAdmin ? 'Admin' : 'Member'}</div>` : '<div class="workspace-row-admin">Your own space</div>');
+      left.appendChild(logoAv);
+      left.appendChild(textWrap);
       row.appendChild(left);
       if (org.id){
         const manageBtn = document.createElement('div');
@@ -2697,6 +2728,16 @@
     activeWorkspaceForMembers = org;
     document.getElementById('workspaceMembersTitle').textContent = org.name + ' members';
     document.getElementById('workspaceInviteSection').style.display = org.isAdmin ? 'block' : 'none';
+    // Branding (logo + rename) is org-admin-only, same gate as invites,
+    // Personal isn't a real org (id: null) so it never gets this section.
+    const brandSection = document.getElementById('workspaceBrandSection');
+    brandSection.style.display = (org.id && org.isAdmin) ? 'block' : 'none';
+    if (org.id && org.isAdmin){
+      renderAvatar(document.getElementById('workspaceBrandAvatar'), org.name, false, org.logoUrl);
+      document.getElementById('workspaceBrandNameInput').value = org.name;
+      document.getElementById('workspaceBrandHint').textContent = 'Tap the logo to change it. Rename, then Save.';
+      document.getElementById('workspaceBrandHint').style.color = '';
+    }
     document.getElementById('workspaceInviteError').style.display = 'none';
     document.getElementById('workspaceInvitePinInput').value = '';
     document.getElementById('workspaceInviteNameInput').value = '';
@@ -2728,6 +2769,67 @@
       list.appendChild(row);
     });
   }
+
+  // Org logo upload, reuses the same /api/upload endpoint group/profile
+  // photos already go through; org/update just points the org record at
+  // whatever /api/media/<uuid> URL comes back.
+  let workspaceLogoFileInput = null;
+  document.getElementById('workspaceBrandAvatar').addEventListener('click', ()=>{
+    if (!activeWorkspaceForMembers || !activeWorkspaceForMembers.isAdmin) return;
+    if (!workspaceLogoFileInput){
+      workspaceLogoFileInput = document.createElement('input');
+      workspaceLogoFileInput.type = 'file';
+      workspaceLogoFileInput.accept = 'image/*';
+      workspaceLogoFileInput.style.display = 'none';
+      document.body.appendChild(workspaceLogoFileInput);
+      workspaceLogoFileInput.addEventListener('change', async ()=>{
+        const file = workspaceLogoFileInput.files && workspaceLogoFileInput.files[0];
+        workspaceLogoFileInput.value = '';
+        if (!file || !activeWorkspaceForMembers) return;
+        const hintEl = document.getElementById('workspaceBrandHint');
+        hintEl.textContent = 'Uploading…'; hintEl.style.color = '';
+        const up = await apiFetch('/upload', {
+          method: 'POST',
+          headers: { 'content-type': file.type || 'image/jpeg', 'x-file-name': encodeURIComponent(file.name || 'logo.jpg') },
+          body: file,
+        });
+        if (!up.ok || !up.body || !up.body.url){
+          hintEl.textContent = "Couldn't upload that image. Try again."; hintEl.style.color = '#ff6a6a';
+          return;
+        }
+        const saveRes = await apiFetch('/org/update', { method: 'POST', body: JSON.stringify({ orgId: activeWorkspaceForMembers.id, logoUrl: up.body.url }) });
+        if (!saveRes.ok || !saveRes.body || !saveRes.body.org){
+          hintEl.textContent = "Couldn't save the logo. Try again."; hintEl.style.color = '#ff6a6a';
+          return;
+        }
+        activeWorkspaceForMembers.logoUrl = saveRes.body.org.logoUrl;
+        const myOrg = myOrgs.find(o => o.id === activeWorkspaceForMembers.id);
+        if (myOrg) myOrg.logoUrl = saveRes.body.org.logoUrl;
+        renderAvatar(document.getElementById('workspaceBrandAvatar'), activeWorkspaceForMembers.name, false, activeWorkspaceForMembers.logoUrl);
+        updateWorkspaceBar();
+        hintEl.textContent = 'Logo updated.'; hintEl.style.color = '#7ee08a';
+      });
+    }
+    workspaceLogoFileInput.click();
+  });
+
+  document.getElementById('workspaceBrandSaveBtn').addEventListener('click', async ()=>{
+    if (!activeWorkspaceForMembers) return;
+    const hintEl = document.getElementById('workspaceBrandHint');
+    const name = document.getElementById('workspaceBrandNameInput').value.trim();
+    if (!name){ hintEl.textContent = 'Enter a name.'; hintEl.style.color = '#ff6a6a'; return; }
+    const r = await apiFetch('/org/update', { method: 'POST', body: JSON.stringify({ orgId: activeWorkspaceForMembers.id, name }) });
+    if (!r.ok || !r.body || !r.body.org){
+      hintEl.textContent = "Couldn't save. Try again."; hintEl.style.color = '#ff6a6a';
+      return;
+    }
+    activeWorkspaceForMembers.name = r.body.org.name;
+    const myOrg = myOrgs.find(o => o.id === activeWorkspaceForMembers.id);
+    if (myOrg) myOrg.name = r.body.org.name;
+    document.getElementById('workspaceMembersTitle').textContent = r.body.org.name + ' members';
+    updateWorkspaceBar();
+    hintEl.textContent = 'Saved.'; hintEl.style.color = '#7ee08a';
+  });
 
   document.getElementById('workspaceInvitePinBtn').addEventListener('click', async ()=>{
     const errEl = document.getElementById('workspaceInviteError');
@@ -3873,7 +3975,10 @@
   function renderContactListInto(containerId, videoMode){
     const list = document.getElementById(containerId);
     list.innerHTML = '';
-    const dmChats = sessionChats.filter(c => c.type === 'dm');
+    // Scoped to the active workspace, same reasoning as the chat list and
+    // Meeting Room picker: a workspace is a separate space, calling someone
+    // from a different one shouldn't be offered from inside this one.
+    const dmChats = sessionChats.filter(c => c.type === 'dm' && (c.orgId || null) === (activeOrgId || null));
     if (dmChats.length === 0){
       list.innerHTML = '<div class="hint">No contacts yet. Start a DM first.</div>';
       return;
@@ -4355,7 +4460,11 @@
     const pick = document.getElementById('meetingContactPick');
     const startBtn = document.getElementById('meetingStartBtn');
     pick.innerHTML = '';
-    const dmChats = sessionChats.filter(c => c.type === 'dm');
+    // Scoped to the active workspace like renderChatList() already is, a
+    // workspace is a genuinely separate space (per the earlier design
+    // decision), so starting a meeting from inside one shouldn't offer to
+    // pull in a contact from a totally different workspace or from Personal.
+    const dmChats = sessionChats.filter(c => c.type === 'dm' && (c.orgId || null) === (activeOrgId || null));
     if (dmChats.length === 0){
       pick.innerHTML = '<div class="hint">No contacts yet. Start a DM first.</div>';
     }
@@ -7063,7 +7172,11 @@
     selectedContacts = new Set();
     await ensureNamesLoaded();
     contactPick.innerHTML = '';
-    const dmChats = sessionChats.filter(c => c.type === 'dm');
+    // Scoped to the active workspace, same reasoning as elsewhere: adding
+    // someone from a different workspace would just get flagged/rejected
+    // server-side anyway (groups enforce org membership), better not to
+    // offer them here in the first place.
+    const dmChats = sessionChats.filter(c => c.type === 'dm' && (c.orgId || null) === (activeOrgId || null));
     if (dmChats.length === 0){
       contactPick.innerHTML = '<div class="hint">No contacts yet, add someone by PIN below, or start a DM first.</div>';
     }
