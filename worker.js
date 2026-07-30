@@ -225,7 +225,25 @@ async function sendWebPush(subscription, payloadObj, env) {
   const body = await encryptWebPushPayload(payloadBytes, subscription.keys.p256dh, subscription.keys.auth);
   const endpointUrl = new URL(subscription.endpoint);
   const audience = `${endpointUrl.protocol}//${endpointUrl.host}`;
-  const privateKeyJwk = JSON.parse(env.VAPID_PRIVATE_KEY_JWK);
+
+  // The secret has to be the JWK object's JSON text, e.g. {"kty":"EC",...}.
+  // If whatever generated it JSON-stringified it TWICE (a string containing
+  // escaped JSON, rather than the object itself), one JSON.parse only undoes
+  // one layer and leaves privateKeyJwk as a plain string, importKey then
+  // fails with an opaque "parameter 2 is not of type JsonWebKey" that gives
+  // no hint why. Auto-unwrapping a second layer recovers from that common
+  // copy/paste mistake instead of silently failing every single push.
+  let privateKeyJwk;
+  try {
+    privateKeyJwk = JSON.parse(env.VAPID_PRIVATE_KEY_JWK);
+    if (typeof privateKeyJwk === 'string') privateKeyJwk = JSON.parse(privateKeyJwk);
+  } catch (e) {
+    return { ok: false, status: 0, error: 'vapid_key_not_valid_json' };
+  }
+  if (!privateKeyJwk || typeof privateKeyJwk !== 'object' || !privateKeyJwk.d) {
+    return { ok: false, status: 0, error: 'vapid_key_missing_private_component' };
+  }
+
   const jwt = await signVapidJWT(privateKeyJwk, audience, env.VAPID_SUBJECT || 'mailto:admin@example.com');
 
   const res = await fetch(subscription.endpoint, {
@@ -1863,12 +1881,21 @@ export class ChatRoom {
     }
 
     if (request.method === 'POST' && url.pathname === '/read') {
-      const { userId, upToTs } = await request.json();
+      const { userId, upToTs, silent } = await request.json();
       if (!userId) return json({ error: 'missing_user' }, 400);
       const ts = Number(upToTs) || Date.now();
       const prev = (await this.state.storage.get(`lastRead:${userId}`)) || 0;
+      // lastRead is what unread counts/badges are computed from (see
+      // /summary), it has to advance every time someone actually reads a
+      // chat, independent of whether read receipts are turned on. `silent`
+      // is what actually implements the privacy setting: it's the ONLY
+      // thing that's conditional, so the sender's client (which listens for
+      // this broadcast to light up the blue ticks) never finds out, while
+      // the reader's own unread count still correctly clears.
       if (ts > prev) await this.state.storage.put(`lastRead:${userId}`, ts);
-      this.broadcast(JSON.stringify({ type: 'read_receipt', userId, upToTs: Math.max(ts, prev) }), null);
+      if (!silent) {
+        this.broadcast(JSON.stringify({ type: 'read_receipt', userId, upToTs: Math.max(ts, prev) }), null);
+      }
       return json({ ok: true });
     }
 
@@ -2926,10 +2953,10 @@ export default {
         }
 
         if (action === 'read' && request.method === 'POST') {
-          const { upToTs } = await request.json().catch(() => ({}));
+          const { upToTs, silent } = await request.json().catch(() => ({}));
           const res = await roomStub.fetch('https://internal/read', {
             method: 'POST',
-            body: JSON.stringify({ userId: verify.userId, upToTs: upToTs || Date.now() }),
+            body: JSON.stringify({ userId: verify.userId, upToTs: upToTs || Date.now(), silent: !!silent }),
           });
           return res;
         }
