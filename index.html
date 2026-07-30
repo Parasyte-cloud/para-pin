@@ -737,7 +737,7 @@
   /* Tap to switch which space (Personal or a real workspace) the chat list
      and new-chat/new-group actions operate in, see switchWorkspace(). */
   .workspace-bar{
-    margin:0 16px 10px; padding:8px 12px; border-radius:12px; cursor:pointer;
+    margin:0 16px 10px; padding:10px 16px; border-radius:999px; cursor:pointer;
     display:flex; align-items:center; justify-content:space-between; gap:8px;
     background:rgba(var(--tint-rgb),0.05); border:1px solid var(--glass-brd);
     font-size:12.5px; font-weight:600; color:var(--text-hi);
@@ -4244,6 +4244,18 @@
           err === 'sfu_not_configured'
             ? 'Meeting server not set up yet (missing CF_REALTIME_APP_ID / CF_REALTIME_APP_SECRET).'
             : 'Could not start the meeting: ' + err;
+        // The mic/camera were already grabbed (to show the local preview
+        // tile) before this request ever went out. Leaving them running
+        // with no working connection to use them for is exactly how the
+        // OS's "microphone in use" indicator gets stuck on indefinitely,
+        // this failure is terminal too (no retry fixes a bad credential),
+        // so release them immediately rather than waiting for the person
+        // to notice and tap Leave. The error text above stays up either way.
+        if (meetingPc){ try { meetingPc.close(); } catch(e){} meetingPc = null; }
+        if (meetingLocalStream){ meetingLocalStream.getTracks().forEach(t=>t.stop()); meetingLocalStream = null; }
+        if (meetingWsPingInterval){ clearInterval(meetingWsPingInterval); meetingWsPingInterval = null; }
+        meetingLeavingIntentionally = true;
+        if (meetingWs){ try { meetingWs.close(); } catch(e){} meetingWs = null; }
         return;
       }
       meetingSfuSessionId = r.body.sessionId;
