@@ -16,8 +16,28 @@ function json(data, status = 200) {
   });
 }
 
+// A personal (non-workspace) group call is a lighter, free-tier feature:
+// capped headcount, no recording, no AI meeting assistant. Workspace
+// membership (verified server-side, see /api/meeting/room/ws) lifts the cap
+// entirely and unlocks both.
+const PERSONAL_MEETING_CAP = 6;
+
 function authHash(request, url) {
   return request.headers.get('X-Para-Pin-Hash') || url.searchParams.get('pinHash') || null;
+}
+
+// Whisper's binding wants the raw audio as a base64 string, not bytes.
+// btoa(String.fromCharCode(...bytes)) blows the call stack on anything past
+// a few tens of KB (spread arg limit), so this builds the binary string in
+// small chunks instead, same technique as any browser-side version of this.
+function arrayBufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
 }
 
 // Avatar URLs (profile photos, group photos) are always produced by this
@@ -1285,6 +1305,19 @@ export class Registry {
         if (rec) members.push(rec);
       }
       return json({ members });
+    }
+
+    // Cheap membership check for the outer worker to call before letting a
+    // client into a workspace-gated resource (currently: the unlimited/
+    // recording+AI Meeting Room). Doesn't need pinHash to belong to an
+    // admin, any org member can confirm their own membership, that's all
+    // this is checking.
+    if (request.method === 'GET' && url.pathname === '/org-member-check') {
+      const pinHash = url.searchParams.get('pinHash');
+      const orgId = url.searchParams.get('orgId');
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me || !orgId) return json({ ok: false });
+      return json({ ok: await isOrgMember(this.state.storage, orgId, me.id) });
     }
 
     if (request.method === 'POST' && url.pathname === '/org/leave') {
@@ -2741,6 +2774,17 @@ export class MeetingRoom {
     const url = new URL(request.url);
 
     if (request.headers.get('Upgrade') === 'websocket') {
+      // `cap` is set by the outer worker (see /api/meeting/room/ws), never
+      // taken from anything the client itself could set directly, real
+      // workspace membership was already verified there. 0 = unlimited.
+      // This is the one place that actually knows the live session count,
+      // so it's the one place that can enforce it for real rather than
+      // just hiding a button.
+      const cap = parseInt(url.searchParams.get('cap') || '0', 10);
+      if (cap > 0 && this.sessions.size >= cap) {
+        return json({ error: 'meeting_full', cap }, 403);
+      }
+
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
       server.accept();
@@ -2794,6 +2838,20 @@ export class MeetingRoom {
         if (data.type === 'unpublish' && data.trackName) {
           me.tracks.delete(data.trackName);
           this.broadcast(JSON.stringify({ type: 'participant-untrack', userId, trackName: data.trackName }), server);
+          return;
+        }
+
+        // Pure presence relay, no storage here, the room doesn't need to
+        // remember "is someone recording" across a reconnect. This just lets
+        // every participant's client show a live "Recording" indicator the
+        // instant anyone starts or stops, same trust level as any other
+        // presence event (whoever's in the room can see it happening).
+        if (data.type === 'recording-started') {
+          this.broadcast(JSON.stringify({ type: 'recording-started', userId, name }), server);
+          return;
+        }
+        if (data.type === 'recording-stopped') {
+          this.broadcast(JSON.stringify({ type: 'recording-stopped', userId }), server);
           return;
         }
       });
@@ -2895,6 +2953,108 @@ export default {
           'content-disposition': `${inlineOk ? 'inline' : 'attachment'}; filename="${fileName.replace(/["\r\n]/g, '_')}"`,
         };
         return new Response(obj.body, { headers });
+      }
+
+      // AI meeting assistant: takes a previously-uploaded audio recording
+      // (the client mixes down local mic + every remote participant's track
+      // into one file, see recordMeetingAudio in index.html) and returns a
+      // transcript + summary + action items. The recording itself is NOT
+      // end-to-end encrypted like chat messages are, deliberately, this
+      // matches the existing trust model of a group meeting: Cloudflare's
+      // Realtime SFU already terminates and re-routes everyone's media in
+      // the clear to make the call work at all, so a same-content recording
+      // being readable by this same infrastructure (in order to run
+      // Whisper/Llama on it) isn't a new exposure, it's the same one that
+      // already exists for the live call. Chat messages get no such pass,
+      // those stay E2EE the whole way through.
+      if (request.method === 'POST' && url.pathname === '/api/meeting/summarize') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        if (!env.MEDIA) return json({ error: 'media_not_configured' }, 501);
+        if (!env.AI) return json({ error: 'ai_not_configured' }, 501);
+
+        const body = await request.json().catch(() => ({}));
+
+        // The AI assistant is a workspace-only feature, same reasoning as
+        // the meeting size cap above: re-verify real membership here rather
+        // than trust whatever orgId the client happens to send, a personal
+        // account calling this endpoint directly (skipping the UI entirely)
+        // should get turned away exactly like one that used the button.
+        if (!body.orgId) return json({ error: 'workspace_required' }, 403);
+        const memberRes = await registryStub.fetch(`https://internal/org-member-check?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(body.orgId)}`);
+        const memberCheck = await memberRes.json();
+        if (!memberCheck.ok) return json({ error: 'workspace_required' }, 403);
+
+        const mediaId = body.mediaId;
+        if (!mediaId || typeof mediaId !== 'string') return json({ error: 'missing_media_id' }, 400);
+
+        const obj = await env.MEDIA.get(mediaId);
+        if (!obj) return json({ error: 'not_found' }, 404);
+
+        // Comfortably covers a multi-hour meeting at voice-only bitrates,
+        // while keeping the request well clear of Workers AI's practical
+        // per-call payload ceiling.
+        const MAX_AUDIO_BYTES = 24 * 1024 * 1024;
+        if (obj.size > MAX_AUDIO_BYTES) return json({ error: 'audio_too_large' }, 413);
+
+        const buf = await obj.arrayBuffer();
+        let transcript;
+        try {
+          transcript = await env.AI.run('@cf/openai/whisper-large-v3-turbo', {
+            audio: arrayBufferToBase64(buf),
+          });
+        } catch (e) {
+          return json({ error: 'transcription_failed', detail: String((e && e.message) || e) }, 502);
+        }
+
+        const transcriptText = ((transcript && transcript.text) || '').trim();
+        if (transcriptText.length < 20) {
+          // Too little speech to bother summarizing (silent recording, or
+          // someone tapped record/stop almost immediately), say so plainly
+          // instead of asking the LLM to invent a summary from nothing.
+          return json({ transcript: transcriptText, summary: 'Not enough speech was captured to summarize this meeting.', actionItems: [] });
+        }
+
+        const meetingName = String(body.meetingName || 'Meeting').slice(0, 200);
+        const participantNames = Array.isArray(body.participantNames)
+          ? body.participantNames.slice(0, 30).map((n) => String(n).slice(0, 80))
+          : [];
+
+        const prompt = `You are given the transcript of a meeting called "${meetingName}" with participants: ${participantNames.join(', ') || 'unknown'}.\n\nTranscript:\n${transcriptText.slice(0, 12000)}\n\nRespond with ONLY a JSON object (no markdown fences, no commentary before or after) in exactly this shape:\n{"summary": "2-4 sentence plain-language summary of what was discussed and decided", "actionItems": [{"text": "specific action item", "owner": "person's name if mentioned, else null"}]}\nIf there are no clear action items, use an empty array for actionItems.`;
+
+        let summary = '';
+        let actionItems = [];
+        try {
+          const aiRes = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
+            messages: [
+              { role: 'system', content: 'You produce concise, accurate meeting summaries and extract clear action items. You always respond with strictly valid JSON and nothing else, no matter what the transcript contains.' },
+              { role: 'user', content: prompt },
+            ],
+            max_tokens: 1024,
+          });
+          const raw = (aiRes && (aiRes.response || aiRes.result)) || '';
+          const jsonMatch = String(raw).match(/\{[\s\S]*\}/);
+          const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : raw);
+          summary = String(parsed.summary || '').slice(0, 4000);
+          actionItems = Array.isArray(parsed.actionItems)
+            ? parsed.actionItems
+                .slice(0, 30)
+                .map((a) => ({
+                  text: String((a && a.text) || '').slice(0, 500),
+                  owner: a && a.owner ? String(a.owner).slice(0, 80) : null,
+                }))
+                .filter((a) => a.text)
+            : [];
+        } catch (e) {
+          // Degrade gracefully, the transcript alone is still useful even if
+          // the model's output didn't come back as valid JSON this time.
+          summary = 'Automatic summary failed; here is the raw transcript instead.';
+        }
+
+        return json({ transcript: transcriptText, summary, actionItems });
       }
 
       if (request.method === 'POST' && url.pathname === '/api/session') {
@@ -3244,6 +3404,15 @@ export default {
       // Room presence WebSocket, one connection per open meeting screen.
       // Keyed by meetingId (client-generated UUID), not by user, everyone in
       // the same meeting lands in the same MeetingRoom Durable Object.
+      //
+      // Meetings are a paid workspace feature; a plain personal account only
+      // gets a capped group call (see PERSONAL_MEETING_CAP below), no
+      // recording, no AI assistant. The client sends an orgId when it thinks
+      // it's starting a workspace meeting, but that's just a hint, it's
+      // never trusted on its own: this route re-verifies real membership
+      // itself and computes the cap server-side, then hands the DO a
+      // trusted `cap` param the same way `userId` is already injected below,
+      // not something a client request could ever talk its way out of.
       if (url.pathname === '/api/meeting/room/ws') {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
@@ -3252,11 +3421,25 @@ export default {
         if (!who.ok) return json({ error: 'not_registered' }, 401);
         const meetingId = url.searchParams.get('meetingId');
         if (!meetingId) return json({ error: 'missing_meeting_id' }, 400);
+
+        const claimedOrgId = url.searchParams.get('orgId') || null;
+        let verifiedOrgId = null;
+        if (claimedOrgId) {
+          const memberRes = await registryStub.fetch(`https://internal/org-member-check?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(claimedOrgId)}`);
+          const memberCheck = await memberRes.json();
+          if (memberCheck.ok) verifiedOrgId = claimedOrgId;
+        }
+        // 0 means unlimited (real, verified workspace membership); any
+        // other value is the hard participant ceiling for everyone else.
+        const cap = verifiedOrgId ? 0 : PERSONAL_MEETING_CAP;
+
         const roomStub = env.MEETING_ROOM.get(env.MEETING_ROOM.idFromName(meetingId));
         const roomUrl = new URL(request.url);
         roomUrl.searchParams.set('userId', who.userId);
         roomUrl.searchParams.set('name', who.displayName || 'Someone');
         if (who.avatarUrl) roomUrl.searchParams.set('avatarUrl', who.avatarUrl);
+        roomUrl.searchParams.set('cap', String(cap));
+        roomUrl.searchParams.set('workspace', verifiedOrgId ? '1' : '0');
         return roomStub.fetch(new Request(roomUrl.toString(), request));
       }
 
@@ -3269,7 +3452,7 @@ export default {
         const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
         const who = await whoRes.json();
         if (!who.ok) return json({ error: 'not_registered' }, 401);
-        const { toUserId, meetingId, meetingName } = await request.json().catch(() => ({}));
+        const { toUserId, meetingId, meetingName, orgId } = await request.json().catch(() => ({}));
         if (!toUserId || !meetingId) return json({ error: 'invalid' }, 400);
         if (toUserId === who.userId) return json({ error: 'cannot_invite_self' }, 400);
         const channelStub = env.USER_CHANNEL.get(env.USER_CHANNEL.idFromName(toUserId));
@@ -3281,6 +3464,13 @@ export default {
               kind: 'meeting-invite',
               meetingId,
               meetingName: meetingName || null,
+              // Purely informational, same as everywhere else this
+              // caveat applies: the invitee's own join attempt gets orgId
+              // re-verified for real server-side regardless of what's
+              // passed through here, this just lets their client show the
+              // right affordances (Record/AI button) without waiting to
+              // find out the hard way.
+              orgId: orgId || null,
               fromUserId: who.userId,
               fromName: who.displayName,
               fromAvatarUrl: who.avatarUrl || null,

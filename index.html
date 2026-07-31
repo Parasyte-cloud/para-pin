@@ -303,6 +303,39 @@
   }
   .video-call-name{ font-size:16px; font-weight:700; }
   .video-call-status{ font-size:12px; opacity:.85; }
+  .meeting-minimize-btn{
+    position:absolute; top:calc(12px + env(safe-area-inset-top,0px)); left:14px; z-index:3;
+    width:32px; height:32px; border-radius:50%; background:rgba(255,255,255,0.16); color:#fff;
+    border:none; text-shadow:none;
+  }
+  .meeting-minimize-btn:hover{ background:rgba(255,255,255,0.28); }
+
+  /* ---------- minimized call PiP ---------- */
+  #meetingPip{
+    position:fixed; z-index:900; right:14px;
+    bottom:calc(96px + env(safe-area-inset-bottom, 0px));
+    width:172px; display:flex; align-items:center; gap:8px;
+    background:rgba(20,20,24,0.92); backdrop-filter:blur(10px);
+    border:1px solid rgba(255,255,255,0.12); border-radius:16px;
+    padding:6px; box-shadow:0 6px 24px rgba(0,0,0,0.35); cursor:pointer;
+  }
+  #meetingPipVideoWrap{
+    position:relative; width:44px; height:44px; border-radius:10px; overflow:hidden;
+    background:#161616; flex-shrink:0;
+  }
+  #meetingPipVideo{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+  #meetingPipAvatar{ position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); width:28px; height:28px; font-size:11px; }
+  #meetingPipSpeakingRing{
+    position:absolute; inset:0; border-radius:10px; border:2px solid var(--ok, #3ddc84);
+    opacity:0; transition:opacity .15s ease;
+  }
+  #meetingPip.speaking #meetingPipSpeakingRing{ opacity:1; }
+  #meetingPipInfo{ flex:1; min-width:0; }
+  #meetingPipName{ font-size:11.5px; font-weight:700; color:#fff; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #meetingPipSub{ font-size:10px; color:rgba(255,255,255,0.6); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+  /* Active-speaker highlight, reused in both the full grid and the PiP ring above */
+  .meeting-tile.speaking{ box-shadow:inset 0 0 0 2px var(--ok, #3ddc84); }
   .video-call-controls{
     position:relative; z-index:2; margin-top:auto; display:flex; justify-content:center; gap:18px;
     padding:0 16px calc(28px + env(safe-area-inset-bottom,0px));
@@ -314,6 +347,11 @@
   .video-call-btn.active{ background:rgba(255,255,255,0.35); }
   .video-call-btn.video-call-end-btn{ background:#ff4d4d; transform:rotate(135deg); }
   .video-call-btn.video-call-end-btn:hover{ background:#ff2d2d; }
+  .video-call-btn.recording{ color:#ff4d4d; background:rgba(255,77,77,0.28); animation: recordPulse 1s ease-in-out infinite; }
+  .meeting-rec-badge{
+    display:flex; align-items:center; gap:6px; margin-top:4px; font-size:12px; font-weight:700;
+    color:#ff8080; background:rgba(255,77,77,0.14); border-radius:20px; padding:3px 10px; width:fit-content;
+  }
 
   /* ================= MEETING ROOM (group calls) =================
      A simple auto-fitting grid, one tile per participant (including a
@@ -1744,14 +1782,66 @@
 <!-- ============ MEETING ROOM CALL SCREEN (fullscreen, group) ============ -->
 <div class="video-call-screen" id="meetingCallScreen">
   <div class="video-call-topbar">
+    <div class="icon-btn meeting-minimize-btn" id="meetingMinimizeBtn" title="Minimize" style="align-self:flex-start;"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
     <div class="video-call-name" id="meetingCallName">Meeting</div>
     <div class="video-call-status" id="meetingCallStatus"></div>
+    <div class="meeting-rec-badge" id="meetingRecBadge" style="display:none;"><span class="recording-dot"></span><span id="meetingRecBadgeText">Recording</span></div>
   </div>
   <div class="meeting-tiles-grid" id="meetingTilesGrid"></div>
   <div class="video-call-controls">
     <div class="video-call-btn" id="meetingMuteBtn" title="Mute">🎙️</div>
     <div class="video-call-btn" id="meetingCameraBtn" title="Turn camera off"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-0.15em;"><rect x="2" y="6" width="14" height="12" rx="2.5"/><path d="M16 10.2 22 7v10l-6-3.2"/></svg></div>
+    <div class="video-call-btn" id="meetingRecordBtn" title="Record meeting (transcript + AI summary)"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="7"/></svg></div>
     <div class="video-call-btn video-call-end-btn" id="meetingLeaveBtn" title="Leave meeting">📞</div>
+  </div>
+</div>
+
+<!-- ============ Minimized meeting/call PiP: swipe or tap-minimize lands here ============ -->
+<!-- Sits at body level (not inside meetingCallScreen) so it keeps floating over
+     every other screen in the app while the call stays connected in the background. -->
+<div id="meetingPip" style="display:none;" title="Tap to return to the call">
+  <div id="meetingPipVideoWrap">
+    <video id="meetingPipVideo" autoplay playsinline muted></video>
+    <div class="avatar" id="meetingPipAvatar" style="display:none;"></div>
+    <div id="meetingPipSpeakingRing"></div>
+  </div>
+  <div id="meetingPipInfo">
+    <div id="meetingPipName">Meeting</div>
+    <div id="meetingPipSub"></div>
+  </div>
+  <div class="video-call-btn video-call-end-btn" id="meetingPipLeaveBtn" title="Leave" style="width:34px;height:34px;font-size:15px;">📞</div>
+</div>
+
+<!-- ============ AI MEETING ASSISTANT: review/post summary ============ -->
+<div class="overlay" id="meetingSummaryOverlay">
+  <div class="modal lg" style="max-height:82vh; display:flex; flex-direction:column;">
+    <h3>Meeting summary</h3>
+    <div style="overflow-y:auto; flex:1; margin:0 -22px; padding:0 22px;">
+      <div id="meetingSummaryLoading" style="display:flex; flex-direction:column; align-items:center; gap:12px; padding:36px 0;">
+        <div class="recording-waveform"><i></i><i></i><i></i><i></i><i></i></div>
+        <div class="hint" style="margin:0;">Transcribing and summarizing the recording…</div>
+      </div>
+      <div id="meetingSummaryResults" style="display:none;">
+        <div class="hint" style="margin:0 0 4px;">Summary</div>
+        <div id="meetingSummaryText" style="font-size:14px; line-height:1.5; margin-bottom:16px;"></div>
+        <div class="hint" style="margin:0 0 4px;">Action items</div>
+        <div id="meetingActionItemsList" style="margin-bottom:16px;"></div>
+        <div id="meetingSummaryEmpty" class="hint" style="display:none;">No clear action items were mentioned.</div>
+        <details style="margin-bottom:16px;">
+          <summary class="hint" style="cursor:pointer;">Full transcript</summary>
+          <div id="meetingTranscriptText" style="font-size:12.5px; line-height:1.5; color:var(--text-low); white-space:pre-wrap; margin-top:8px; max-height:200px; overflow-y:auto;"></div>
+        </details>
+        <div id="meetingSummaryChatPicker" style="display:none; margin-top:10px; border-top:1px solid var(--glass-brd); padding-top:12px;">
+          <div class="hint" style="margin:0 0 8px;">Post to which chat?</div>
+          <div id="meetingSummaryChatList"></div>
+        </div>
+      </div>
+      <div id="meetingSummaryError" class="hint" style="display:none; color:#ff6a6a;"></div>
+    </div>
+    <div class="modal-actions" style="margin-top:14px;">
+      <div class="btn" id="meetingSummaryCloseBtn" onclick="closeModal('meetingSummaryOverlay')">Close</div>
+      <div class="btn" id="meetingSummaryPostBtn" style="display:none;">Post to chat…</div>
+    </div>
   </div>
 </div>
 
@@ -3708,7 +3798,14 @@
     if (!forceStayOnList) appEl.classList.add('show-chat');
     renderAvatar(convAvatar, name, chat.type==='group', chatAvatarUrl(chat));
     convTitle.textContent = name;
-    document.getElementById('chatCallBtn').style.display = chat.type === 'dm' ? 'flex' : 'none';
+    // DMs always get the 1:1 call button. A group chat only gets a call
+    // button here when it's personal (no orgId), that's the new capped
+    // group-call feature; a workspace group's calling still goes through
+    // the full Meeting Room tab instead (unlimited size, recording, AI).
+    const showCallBtn = chat.type === 'dm' || (chat.type === 'group' && (chat.orgId || null) === null);
+    const callBtnEl = document.getElementById('chatCallBtn');
+    callBtnEl.style.display = showCallBtn ? 'flex' : 'none';
+    callBtnEl.title = chat.type === 'group' ? 'Start group call (up to 6 people)' : 'Voice call';
     applyWallpaper(chat.id);
 
     const typing = typingUsers[chat.id];
@@ -3861,6 +3958,15 @@
         replyBtn.dataset.id = m.id;
         bubble.appendChild(replyBtn);
 
+        if (m.text && !m.protected){
+          const copyBtn = document.createElement('div');
+          copyBtn.className = 'msg-action-btn msg-copy';
+          copyBtn.title = 'Copy text';
+          copyBtn.textContent = '⧉';
+          copyBtn.dataset.id = m.id;
+          actions.appendChild(copyBtn);
+        }
+
         bubble.appendChild(actions);
 
         const reactBtn = document.createElement('div');
@@ -3945,8 +4051,15 @@
   // A tap that was actually a peek badge click also reveals, no need to
   // wait out a long-press when the collapsed indicator is right there.
   (function wireMessageReactionReveal(){
+    // `a` (a plain-text URL auto-linked by renderTextWithMentions) has to be
+    // excluded here too, otherwise long-pressing a link in a message
+    // hijacks the gesture into "reveal reactions" instead of letting the
+    // browser show its native "Copy Link" menu, and right-clicking one on
+    // desktop gets its contextmenu eaten by the unconditional
+    // preventDefault() below, same result. That's exactly what broke
+    // copying a link someone sent (or sent yourself) out of a chat message.
     const isOtherInteractive = (target) => target.closest(
-      '.msg-image, .voice-note, .reply-quote, .msg-action-btn, .msg-react-btn, .react-option, .reaction-pill, .file-card, .msg-video, .attachment-dl-btn'
+      'a, .msg-image, .voice-note, .reply-quote, .msg-action-btn, .msg-react-btn, .react-option, .reaction-pill, .file-card, .msg-video, .attachment-dl-btn'
     );
     let pressTimer = null;
     let longPressed = false;
@@ -4058,6 +4171,20 @@
         targetRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
         targetRow.classList.add('jump-highlight');
         setTimeout(()=> targetRow.classList.remove('jump-highlight'), 1200);
+      }
+      return;
+    }
+
+    const copyBtn = e.target.closest('.msg-copy');
+    if (copyBtn){
+      const msgs = messagesByChat[chatId];
+      const m = msgs && msgs.find(mm => mm.id === copyBtn.dataset.id);
+      if (!m || !m.text) return;
+      const done = ()=>{ const prev = copyBtn.textContent; copyBtn.textContent = '✓'; setTimeout(()=>{ copyBtn.textContent = prev; }, 1000); };
+      if (navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(m.text).then(done).catch(done);
+      } else {
+        done();
       }
       return;
     }
@@ -4209,7 +4336,7 @@
   // Coming soon) closes back to the Chats tab; failing that, an open
   // conversation (mobile single-pane view) closes back to the chat list.
   // At the root already, it's a no-op, nothing further to go back to.
-  const NAV_OVERLAY_IDS = ['rosterOverlay','settingsOverlay','comingSoonOverlay','callsOverlay','videoOverlay','profileOverlay','meetingRoomOverlay','hrOverlay'];
+  const NAV_OVERLAY_IDS = ['rosterOverlay','settingsOverlay','comingSoonOverlay','callsOverlay','videoOverlay','profileOverlay','meetingRoomOverlay','hrOverlay','meetingSummaryOverlay'];
   function goBack(){
     // A live call or meeting deliberately isn't "backable", swiping out of a
     // call you're actually in would be a nasty surprise, those screens have
@@ -4880,11 +5007,34 @@
   document.getElementById('videoCallSwitchBtn').addEventListener('click', switchCamera);
   document.getElementById('chatCallBtn').addEventListener('click', ()=>{
     const chat = getChat(activeChatId);
-    if (!chat || chat.type !== 'dm') return;
-    const otherId = otherMemberId(chat);
-    if (!otherId) return;
-    startOutgoingCall(otherId, userNameCache[otherId] || chatDisplayName(chat), userAvatarCache[otherId]);
+    if (!chat) return;
+    if (chat.type === 'dm'){
+      const otherId = otherMemberId(chat);
+      if (!otherId) return;
+      startOutgoingCall(otherId, userNameCache[otherId] || chatDisplayName(chat), userAvatarCache[otherId]);
+      return;
+    }
+    if (chat.type === 'group') startPersonalGroupCall(chat);
   });
+
+  // Personal (non-workspace) group chats get a lighter calling feature
+  // instead of the full Meeting Room: no contact picker (everyone in the
+  // chat is invited automatically), capped headcount, no recording/AI, see
+  // PERSONAL_MEETING_CAP in worker.js for the actual enforcement, this cap
+  // number is just for the confirm prompt/messaging.
+  const PERSONAL_MEETING_CAP_CLIENT = 6;
+  function startPersonalGroupCall(chat){
+    if (!chat || chat.type !== 'group') return;
+    if ((chat.orgId || null) !== null) return; // workspace groups use Meeting Room instead
+    const others = (chat.memberIds || []).filter(id => id !== myUserId);
+    if (others.length === 0) return;
+    const invitable = others.slice(0, PERSONAL_MEETING_CAP_CLIENT - 1);
+    if (others.length > invitable.length){
+      if (!confirm(`Group calls are limited to ${PERSONAL_MEETING_CAP_CLIENT} people. Only the first ${invitable.length} other members will be invited. Continue?`)) return;
+    }
+    const newMeetingId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
+    joinMeetingRoom(newMeetingId, chat.name || 'Group call', invitable, { orgId: null });
+  }
 
   async function openCallsOverlay(){
     callsOverlayOpen = true;
@@ -4978,6 +5128,28 @@
   let meetingWs = null;
   let meetingPc = null;
   let meetingSfuSessionId = null;
+  // The workspace this meeting belongs to, or null for a personal (free
+  // tier) capped group call. Purely a client-side UI hint (show/hide the
+  // Record button, which orgId to send to /meeting/summarize) - the actual
+  // cap and the AI-assistant gate are re-verified for real on the server
+  // regardless of what this says, see /api/meeting/room/ws and
+  // /api/meeting/summarize in worker.js.
+  let meetingOrgId = null;
+  // Counts consecutive failed-to-open attempts (first join or reconnect),
+  // reset to 0 the moment any attempt actually opens. See onDrop in
+  // connectMeetingWs for why this exists: a rejected upgrade (room full)
+  // and a real network blip look identical from the client's side.
+  let meetingConnectAttempts = 0;
+  // Minimized-to-PiP state, plus everything active-speaker detection needs.
+  // The call itself (meetingPc/meetingWs) is completely untouched by
+  // minimizing, only which screen is showing changes, that's the whole
+  // point: swipe away and stay connected.
+  let meetingMinimized = false;
+  let meetingAnalyserCtx = null;
+  let meetingAnalysers = new Map(); // userId -> { analyser, data }
+  let meetingSpeakerScores = new Map(); // userId -> consecutive loud-tick count
+  let meetingActiveSpeakerId = null;
+  let meetingSpeakerSamplerTimer = null;
   let meetingLocalStream = null;
   let meetingMuted = false;
   let meetingCameraOff = false;
@@ -5038,6 +5210,12 @@
         tile.appendChild(audioEl);
       }
       if (audioEl.srcObject !== stream){ audioEl.srcObject = stream; audioEl.play().catch(()=>{}); }
+      // A recording already in progress needs every subsequently-arriving
+      // remote track mixed in too, not just whoever was already publishing
+      // when Record was tapped, otherwise someone joining mid-meeting would
+      // be silently missing from the transcript.
+      if (meetingRecording) meetingWireAudioIntoRecording(audioEl, stream);
+      meetingWireSpeakerAnalyser(userId, stream);
     }
   }
 
@@ -5048,10 +5226,110 @@
     for (const [trackName, info] of Object.entries(meetingMidToTrack)){
       if (info.userId === userId) delete meetingMidToTrack[trackName];
     }
+    meetingAnalysers.delete(userId);
+    meetingSpeakerScores.delete(userId);
+    if (meetingActiveSpeakerId === userId) meetingActiveSpeakerId = null;
+  }
+
+  // ================= Active speaker detection =================
+  // One AudioContext for the whole meeting (separate from the recording
+  // mixdown one, which only exists while actively recording), tapping every
+  // participant's audio into its own AnalyserNode purely for level
+  // metering, none of these connect to a destination, so nothing here
+  // changes what's actually audible, the real playback is still each
+  // participant's own <audio>/<video> element.
+  function meetingWireSpeakerAnalyser(userId, stream){
+    if (!meetingAnalyserCtx || meetingAnalysers.has(userId) || !stream.getAudioTracks().length) return;
+    try {
+      const analyser = meetingAnalyserCtx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.6;
+      meetingAnalyserCtx.createMediaStreamSource(stream).connect(analyser);
+      meetingAnalysers.set(userId, { analyser, data: new Uint8Array(analyser.frequencyBinCount) });
+    } catch(e){}
+  }
+
+  // Average absolute deviation from the silent midpoint (128) of the raw
+  // waveform, a cheap stand-in for RMS loudness that's plenty good enough
+  // for "who's talking right now" rather than any real audio metering.
+  function meetingReadLevel(entry){
+    entry.analyser.getByteTimeDomainData(entry.data);
+    let sum = 0;
+    for (let i = 0; i < entry.data.length; i++) sum += Math.abs(entry.data[i] - 128);
+    return sum / entry.data.length;
+  }
+
+  function meetingUpdateSpeakingHighlight(userId){
+    document.querySelectorAll('.meeting-tile.speaking').forEach(t => t.classList.remove('speaking'));
+    if (userId){
+      const tile = document.getElementById('meetingTile_' + userId);
+      if (tile) tile.classList.add('speaking');
+    }
+    if (meetingMinimized) meetingUpdatePipTile();
+  }
+
+  function startMeetingSpeakerSampler(){
+    if (meetingSpeakerSamplerTimer) return;
+    const NOISE_FLOOR = 6; // below this, treat as silence, not "quiet talking"
+    const LEADER_TICKS_TO_SWITCH = 2; // ~600ms of clearly being loudest before it takes over, avoids flicker on a cough/pause
+    meetingSpeakerSamplerTimer = setInterval(()=>{
+      if (!meetingAnalyserCtx || meetingAnalyserCtx.state !== 'running') return;
+      let loudestId = null, loudestLevel = NOISE_FLOOR;
+      for (const [userId, entry] of meetingAnalysers){
+        const level = meetingReadLevel(entry);
+        if (level > loudestLevel){ loudestLevel = level; loudestId = userId; }
+      }
+      // Decay everyone's streak, then bump only today's loudest.
+      for (const [userId, score] of meetingSpeakerScores){
+        if (userId !== loudestId) meetingSpeakerScores.set(userId, 0);
+      }
+      if (loudestId){
+        const next = (meetingSpeakerScores.get(loudestId) || 0) + 1;
+        meetingSpeakerScores.set(loudestId, next);
+        if (next >= LEADER_TICKS_TO_SWITCH && meetingActiveSpeakerId !== loudestId){
+          meetingActiveSpeakerId = loudestId;
+          meetingUpdateSpeakingHighlight(loudestId);
+        }
+      } else if (meetingActiveSpeakerId){
+        // Nobody's above the noise floor right now, drop the highlight
+        // rather than leave it stuck on whoever spoke last.
+        meetingActiveSpeakerId = null;
+        meetingUpdateSpeakingHighlight(null);
+      }
+      // Keep the PiP's video source fresh every tick (not just on a speaker
+      // change), a tile's video can start/stop independent of who's
+      // talking, e.g. someone toggling their camera off mid-sentence.
+      if (meetingMinimized) meetingUpdatePipTile();
+    }, 300);
+  }
+
+  function stopMeetingSpeakerSampler(){
+    if (meetingSpeakerSamplerTimer){ clearInterval(meetingSpeakerSamplerTimer); meetingSpeakerSamplerTimer = null; }
+    meetingAnalysers = new Map();
+    meetingSpeakerScores = new Map();
+    meetingActiveSpeakerId = null;
+    if (meetingAnalyserCtx){ try { meetingAnalyserCtx.close(); } catch(e){} meetingAnalyserCtx = null; }
   }
 
   async function meetingSfuFetch(path, opts){
-    return apiFetch('/meeting/sfu/' + path, opts);
+    // Bounded, deliberately. Every pull and every publish shares the one
+    // meetingNegotiationQueue below (WebRTC only allows one offer/answer in
+    // flight at a time), so a single request that hangs instead of failing
+    // (a stalled connection to Cloudflare's Realtime API, a dropped wifi
+    // handoff mid-negotiation) previously parked that queue forever, every
+    // pull/publish still waiting behind it never ran. That's exactly what
+    // "some people show, some don't" looks like: whoever got pulled in
+    // before the stall is visible, everyone queued behind it never
+    // connects, and nothing ever times out to unstick it. apiFetch's own
+    // try/catch already turns an aborted fetch into a normal {ok:false}
+    // result, so an AbortController is all this needs.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    try {
+      return await apiFetch('/meeting/sfu/' + path, { ...opts, signal: controller.signal });
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
 
   // WebRTC allows exactly one offer/answer exchange in flight at a time per
@@ -5093,12 +5371,22 @@
         meetingPulledTracks.delete(dedupeKey);
         return;
       }
-      const r = await meetingSfuFetch(`sessions/${meetingSfuSessionId}/tracks/new`, {
+      const pullOnce = () => meetingSfuFetch(`sessions/${meetingSfuSessionId}/tracks/new`, {
         method: 'POST',
         body: JSON.stringify({ tracks: [{ location: 'remote', sessionId: remoteSessionId, trackName }] }),
       });
+      let r = await pullOnce();
+      // One bounded retry (same pattern as sendWebPushWithRetry server-side)
+      // instead of just giving up: previously a single transient failure
+      // here depended entirely on some LATER roster/participant-track event
+      // to ever retry it, which might not come again for the rest of the
+      // meeting, that person would just never show up for anyone already in
+      // the room.
       if (!r.ok || !r.body){
-        // Let a later roster/participant-track event retry this one.
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        r = await pullOnce();
+      }
+      if (!r.ok || !r.body){
         meetingPulledTracks.delete(dedupeKey);
         return;
       }
@@ -5172,6 +5460,22 @@
       }
       return;
     }
+    // Someone else started/stopped recording. My own recording state (if
+    // I'm the one recording) always wins the badge, this is only shown when
+    // I'm not already showing my own "Recording" indicator.
+    if (data.type === 'recording-started'){
+      if (data.userId !== myUserId && !meetingRecording){
+        document.getElementById('meetingRecBadgeText').textContent = (data.name || 'Someone') + ' is recording';
+        document.getElementById('meetingRecBadge').style.display = 'flex';
+      }
+      return;
+    }
+    if (data.type === 'recording-stopped'){
+      if (data.userId !== myUserId && !meetingRecording){
+        document.getElementById('meetingRecBadge').style.display = 'none';
+      }
+      return;
+    }
   }
 
   // Publishes one local track (mic or camera) to the SFU and tells the room
@@ -5190,10 +5494,19 @@
       .filter(t => t.sender && t.sender.track)
       .map(t => ({ location: 'local', mid: t.mid, trackName: (t.sender.track.kind === 'video' ? 'video-' : 'audio-') + myUserId }));
     if (tracksPayload.length === 0) return;
-    const r = await meetingSfuFetch(`sessions/${meetingSfuSessionId}/tracks/new`, {
+    const publishOnce = () => meetingSfuFetch(`sessions/${meetingSfuSessionId}/tracks/new`, {
       method: 'POST',
       body: JSON.stringify({ sessionDescription: { type: offer.type, sdp: offer.sdp }, tracks: tracksPayload }),
     });
+    let r = await publishOnce();
+    // A failed PUBLISH is worse than a failed pull, a silent failure here
+    // means nobody else in the meeting ever sees or hears this participant
+    // at all, not just one missing track. Same bounded retry as the pull
+    // side rather than leaving it to chance.
+    if (!r.ok || !r.body || !r.body.sessionDescription){
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      r = await publishOnce();
+    }
     if (!r.ok || !r.body || !r.body.sessionDescription){
       return;
     }
@@ -5202,7 +5515,7 @@
     });
   }
 
-  async function joinMeetingRoom(id, meetingName, inviteUserIds){
+  async function joinMeetingRoom(id, meetingName, inviteUserIds, opts){
     // Joining while already in a meeting (an invite arriving mid-call, a
     // stray double-tap, rejoining after a drop) previously leaked the old
     // WebSocket, RTCPeerConnection, and camera/mic stream, since nothing
@@ -5211,6 +5524,12 @@
     if (meetingId || meetingPc || meetingWs) leaveMeeting();
 
     meetingId = id;
+    // Null means a personal (free-tier) capped group call, no Record/AI
+    // button, no unlimited headcount, see the comment on the declaration
+    // above. This is only a UI hint; the server independently re-verifies
+    // real workspace membership before granting either.
+    meetingOrgId = (opts && opts.orgId) || null;
+    meetingConnectAttempts = 0;
     meetingParticipants = {};
     meetingMidToTrack = {};
     meetingMuted = false;
@@ -5222,6 +5541,10 @@
     document.getElementById('meetingMuteBtn').textContent = '🎙️';
     document.getElementById('meetingCameraBtn').innerHTML = ICON_VIDEO_ON;
     document.getElementById('meetingCallScreen').classList.add('show');
+    // Record/AI summary is a workspace-only feature, see the endpoint gate
+    // in worker.js; hide the affordance entirely rather than let someone
+    // tap it and get a 403 mid-meeting.
+    document.getElementById('meetingRecordBtn').style.display = meetingOrgId ? 'flex' : 'none';
 
     try {
       meetingLocalStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: { facingMode: 'user' } });
@@ -5238,6 +5561,18 @@
     myVideoEl.srcObject = meetingLocalStream;
     myVideoEl.play().catch(()=>{});
     myTile.insertBefore(myVideoEl, myTile.firstChild);
+
+    // Active-speaker metering for the whole meeting, independent of the
+    // separate recording mixdown context (that one only exists while
+    // actively recording). Created here, right after the mic is granted,
+    // so "me" can be the active speaker too, not just remote participants.
+    stopMeetingSpeakerSampler(); // paranoia: guarantees a clean slate even if teardown above missed something
+    const AnalyserCtx = window.AudioContext || window.webkitAudioContext;
+    if (AnalyserCtx){
+      meetingAnalyserCtx = new AnalyserCtx();
+      meetingWireSpeakerAnalyser(myUserId, meetingLocalStream);
+      startMeetingSpeakerSampler();
+    }
 
     const iceServers = await getIceServers();
     meetingPc = new RTCPeerConnection({ iceServers });
@@ -5261,13 +5596,21 @@
   // "who's here" picks this participant back up.
   function connectMeetingWs(inviteUserIds, meetingName, isReconnect){
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    meetingWs = new WebSocket(`${proto}://${location.host}/api/meeting/room/ws?meetingId=${encodeURIComponent(meetingId)}&pinHash=${encodeURIComponent(myPinHash)}`);
+    const orgParam = meetingOrgId ? `&orgId=${encodeURIComponent(meetingOrgId)}` : '';
+    meetingWs = new WebSocket(`${proto}://${location.host}/api/meeting/room/ws?meetingId=${encodeURIComponent(meetingId)}&pinHash=${encodeURIComponent(myPinHash)}${orgParam}`);
     meetingWs.addEventListener('message', (ev)=>{
       let data; try { data = JSON.parse(ev.data); } catch(e){ return; }
       if (data.type === 'pong') return;
       meetingHandleWsMessage(data);
     });
     meetingWs.addEventListener('open', async ()=>{
+      // The WS actually opened, so whatever this attempt was (first join or
+      // a reconnect), it wasn't rejected. Reset here rather than only in
+      // the first-join branch below, otherwise a handful of ordinary
+      // transient drops spread across a long meeting (each one reconnecting
+      // fine) could still add up past the give-up threshold in onDrop even
+      // though every single one actually succeeded.
+      meetingConnectAttempts = 0;
       if (meetingWsPingInterval) clearInterval(meetingWsPingInterval);
       meetingWsPingInterval = setInterval(()=>meetingWsSend({ type: 'ping' }), 20000);
 
@@ -5322,11 +5665,12 @@
         return;
       }
       meetingSfuSessionId = r.body.sessionId;
+      meetingConnectAttempts = 0; // a real session came up, stop counting this as "still trying to get in"
       meetingWsSend({ type: 'set-session', sfuSessionId: meetingSfuSessionId });
       await meetingPublishLocalTracks();
       updateMeetingStatus();
       (inviteUserIds || []).forEach(uid=>{
-        apiFetch('/meeting/invite', { method: 'POST', body: JSON.stringify({ toUserId: uid, meetingId, meetingName: meetingName || null }) }).catch(()=>{});
+        apiFetch('/meeting/invite', { method: 'POST', body: JSON.stringify({ toUserId: uid, meetingId, meetingName: meetingName || null, orgId: meetingOrgId }) }).catch(()=>{});
       });
     });
     const onDrop = ()=>{
@@ -5334,6 +5678,20 @@
       // Only reconnect if we're still supposed to be in this meeting, not
       // when this fired because leaveMeeting() itself closed the socket.
       if (meetingLeavingIntentionally || !meetingId) return;
+      // A rejected upgrade (room full, see PERSONAL_MEETING_CAP server-side)
+      // looks identical to a network blip from here, the browser's
+      // WebSocket API doesn't expose the HTTP status/body of a failed
+      // handshake at all. Retrying a few times covers the real blip case;
+      // capping it is what keeps a genuinely-full room from just retrying
+      // forever with "Connecting…" stuck on screen and no explanation.
+      meetingConnectAttempts++;
+      if (meetingConnectAttempts > 4){
+        document.getElementById('meetingCallStatus').textContent = "Couldn't join this call. It may be full, or the connection failed.";
+        meetingLeavingIntentionally = true;
+        if (meetingPc){ try { meetingPc.close(); } catch(e){} meetingPc = null; }
+        if (meetingLocalStream){ meetingLocalStream.getTracks().forEach(t=>t.stop()); meetingLocalStream = null; }
+        return;
+      }
       if (meetingWsReconnectTimer) clearTimeout(meetingWsReconnectTimer);
       meetingWsReconnectTimer = setTimeout(()=>{
         if (!meetingLeavingIntentionally && meetingId) connectMeetingWs(inviteUserIds, meetingName, true);
@@ -5344,15 +5702,26 @@
   }
 
   function leaveMeeting(){
+    // Fire-and-forget: this kicks off recorder.stop() synchronously (see
+    // stopMeetingRecordingAndCollect below) before any of the teardown below
+    // runs, then finishes asynchronously (upload + summarize) well after
+    // this function has returned. Not awaited because leaveMeeting() is
+    // called from plenty of places that can't be async (button handlers,
+    // the panic button's best-effort try/catch, a fresh join tearing down
+    // a stale session first).
+    if (meetingRecording) stopMeetingRecording();
     meetingLeavingIntentionally = true;
     if (meetingWsReconnectTimer){ clearTimeout(meetingWsReconnectTimer); meetingWsReconnectTimer = null; }
     if (meetingWsPingInterval){ clearInterval(meetingWsPingInterval); meetingWsPingInterval = null; }
     if (meetingWs){ try { meetingWs.close(); } catch(e){} meetingWs = null; }
     if (meetingPc){ try { meetingPc.close(); } catch(e){} meetingPc = null; }
     if (meetingLocalStream){ meetingLocalStream.getTracks().forEach(t=>t.stop()); meetingLocalStream = null; }
+    stopMeetingSpeakerSampler();
+    meetingMinimizeSet(false); // drop back to the full screen state and hide the PiP, whichever was showing
     document.getElementById('meetingCallScreen').classList.remove('show');
     document.getElementById('meetingTilesGrid').innerHTML = '';
     meetingId = null;
+    meetingOrgId = null;
     meetingSfuSessionId = null;
     meetingParticipants = {};
     meetingMidToTrack = {};
@@ -5361,6 +5730,88 @@
     // fresh join doesn't inherit stale work pointing at a dead session.
     meetingNegotiationQueue = Promise.resolve();
   }
+
+  // ================= Minimize to PiP =================
+  // Swiping (or tapping the chevron) away from the call doesn't leave it,
+  // meetingPc/meetingWs are completely untouched, only which element is
+  // visible changes. The PiP lives at body level (see the HTML), so it
+  // keeps floating over chats, settings, anything else in the app.
+  function meetingMinimizeSet(minimized){
+    meetingMinimized = minimized;
+    const pip = document.getElementById('meetingPip');
+    if (!meetingId){
+      pip.style.display = 'none';
+      pip.classList.remove('speaking');
+      return;
+    }
+    document.getElementById('meetingCallScreen').classList.toggle('show', !minimized);
+    pip.style.display = minimized ? 'flex' : 'none';
+    if (minimized){
+      document.getElementById('meetingPipName').textContent = document.getElementById('meetingCallName').textContent || 'Meeting';
+      meetingUpdatePipTile();
+    }
+  }
+
+  // Picks whoever's actively talking, falling back to "me" when nobody
+  // clearly is (silence, or just started), rather than showing a blank tile.
+  function meetingUpdatePipTile(){
+    const pip = document.getElementById('meetingPip');
+    pip.classList.toggle('speaking', !!meetingActiveSpeakerId);
+    const speakerId = meetingActiveSpeakerId || myUserId;
+    const isMe = speakerId === myUserId;
+    const p = isMe ? null : meetingParticipants[speakerId];
+    const name = isMe ? (myDisplayName || 'You') : (p && p.name) || 'Someone';
+    const avatarUrl = isMe ? myAvatarUrl : (p && p.avatarUrl);
+    const n = Object.keys(meetingParticipants).length + 1;
+    document.getElementById('meetingPipSub').textContent = meetingActiveSpeakerId
+      ? `${name} speaking`
+      : (n === 1 ? 'Waiting for others…' : `${n} in the call`);
+
+    const sourceTile = document.getElementById('meetingTile_' + speakerId);
+    const sourceVideo = sourceTile && sourceTile.querySelector('video');
+    const pipVideo = document.getElementById('meetingPipVideo');
+    const pipAvatar = document.getElementById('meetingPipAvatar');
+    if (sourceVideo && sourceVideo.srcObject){
+      if (pipVideo.srcObject !== sourceVideo.srcObject) pipVideo.srcObject = sourceVideo.srcObject;
+      pipVideo.style.display = 'block';
+      pipAvatar.style.display = 'none';
+    } else {
+      pipVideo.style.display = 'none';
+      pipAvatar.style.display = 'flex';
+      renderAvatar(pipAvatar, name, false, avatarUrl || null);
+    }
+  }
+
+  document.getElementById('meetingMinimizeBtn').addEventListener('click', ()=> meetingMinimizeSet(true));
+  document.getElementById('meetingPip').addEventListener('click', ()=> meetingMinimizeSet(false));
+  document.getElementById('meetingPipLeaveBtn').addEventListener('click', (e)=>{
+    e.stopPropagation(); // otherwise the click bubbles to the PiP itself and re-expands right as the meeting ends
+    leaveMeeting();
+  });
+
+  // Swipe down anywhere on the call screen (except its own controls) to
+  // minimize, same gesture users already expect from every other
+  // full-screen call UI. Deliberately separate from the app-wide
+  // swipe-to-go-back system (NAV_OVERLAY_IDS), this screen was never part
+  // of that, minimizing is a different action from closing.
+  (function wireMeetingSwipeMinimize(){
+    const screen = document.getElementById('meetingCallScreen');
+    let startY = null, startX = null;
+    screen.addEventListener('touchstart', (e)=>{
+      if (e.target.closest('.video-call-btn, .meeting-minimize-btn')) { startY = null; return; }
+      startY = e.touches[0].clientY;
+      startX = e.touches[0].clientX;
+    }, { passive:true });
+    screen.addEventListener('touchend', (e)=>{
+      if (startY == null) return;
+      const dy = (e.changedTouches[0].clientY) - startY;
+      const dx = Math.abs((e.changedTouches[0].clientX) - startX);
+      startY = null;
+      // Mostly-vertical, mostly-downward, and far enough that it clearly
+      // wasn't just a tap or a scroll attempt inside the tile grid.
+      if (dy > 90 && dx < 80) meetingMinimizeSet(true);
+    });
+  })();
 
   document.getElementById('meetingLeaveBtn').addEventListener('click', leaveMeeting);
   document.getElementById('meetingMuteBtn').addEventListener('click', ()=>{
@@ -5391,6 +5842,228 @@
     document.getElementById('meetingCameraBtn').innerHTML = meetingCameraOff ? ICON_VIDEO_OFF : ICON_VIDEO_ON;
     document.getElementById('meetingCameraBtn').classList.toggle('active', meetingCameraOff);
   });
+
+  // ================= AI meeting assistant (record -> transcribe -> summarize) =================
+  // Everyone's audio is mixed down into one track client-side via the Web
+  // Audio API (one MediaStreamAudioSourceNode per participant's live <audio>/
+  // <video> element, plus our own mic, all feeding a single
+  // MediaStreamAudioDestinationNode), then MediaRecorder captures that mixed
+  // stream. This is what actually lets a single Whisper call transcribe
+  // everyone, not just whoever tapped Record.
+  let meetingRecording = false;
+  let meetingAudioCtx = null;
+  let meetingRecDest = null;
+  let meetingRecSources = new Map(); // key (element or 'me') -> MediaStreamAudioSourceNode
+  let meetingRecorder = null;
+  let meetingRecChunks = [];
+  let meetingSummaryPendingData = null;
+
+  function meetingWireAudioIntoRecording(key, stream){
+    if (!meetingAudioCtx || !meetingRecDest || !stream || meetingRecSources.has(key)) return;
+    if (!stream.getAudioTracks().length) return;
+    try {
+      const src = meetingAudioCtx.createMediaStreamSource(stream);
+      src.connect(meetingRecDest);
+      meetingRecSources.set(key, src);
+    } catch(e){}
+  }
+
+  function updateMeetingRecordingUi(){
+    const btn = document.getElementById('meetingRecordBtn');
+    btn.classList.toggle('recording', meetingRecording);
+    btn.title = meetingRecording ? 'Stop recording' : 'Record meeting (transcript + AI summary)';
+    if (meetingRecording) document.getElementById('meetingRecBadgeText').textContent = 'Recording';
+    document.getElementById('meetingRecBadge').style.display = meetingRecording ? 'flex' : 'none';
+  }
+
+  function startMeetingRecording(){
+    if (meetingRecording || !meetingLocalStream) return;
+    // Defense in depth: the button itself is hidden for a personal (no
+    // orgId) call, this just makes sure nothing else can trigger recording
+    // for one either, since /api/meeting/summarize would reject it
+    // server-side anyway (see worker.js), better to say so up front than
+    // let someone record a whole call and then hit a wall at the end.
+    if (!meetingOrgId){
+      showSessionBanner('Recording and AI summaries are a workspace feature.');
+      return;
+    }
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx || !window.MediaRecorder){
+      showSessionBanner("This browser can't record meetings.");
+      return;
+    }
+    meetingAudioCtx = new Ctx();
+    meetingRecDest = meetingAudioCtx.createMediaStreamDestination();
+    meetingRecSources = new Map();
+    meetingWireAudioIntoRecording('me', meetingLocalStream);
+    // Pick up everyone already publishing before Record was tapped, late
+    // joiners get wired in as they arrive (see meetingAttachTrack).
+    document.querySelectorAll('#meetingTilesGrid audio').forEach(audioEl=>{
+      if (audioEl.srcObject) meetingWireAudioIntoRecording(audioEl, audioEl.srcObject);
+    });
+
+    let mimeType = 'audio/webm';
+    if (MediaRecorder.isTypeSupported && !MediaRecorder.isTypeSupported(mimeType)){
+      mimeType = MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : '';
+    }
+    meetingRecChunks = [];
+    try {
+      meetingRecorder = mimeType ? new MediaRecorder(meetingRecDest.stream, { mimeType }) : new MediaRecorder(meetingRecDest.stream);
+    } catch(e){
+      meetingRecorder = new MediaRecorder(meetingRecDest.stream);
+    }
+    meetingRecorder.addEventListener('dataavailable', (ev)=>{ if (ev.data && ev.data.size) meetingRecChunks.push(ev.data); });
+    meetingRecorder.start(1000);
+    meetingRecording = true;
+    meetingWsSend({ type: 'recording-started' });
+    updateMeetingRecordingUi();
+  }
+
+  function meetingRecorderStopAndCollect(){
+    return new Promise((resolve)=>{
+      if (!meetingRecorder){ resolve(null); return; }
+      meetingRecorder.addEventListener('stop', ()=>{
+        const blob = meetingRecChunks.length ? new Blob(meetingRecChunks, { type: meetingRecorder.mimeType || 'audio/webm' }) : null;
+        meetingRecChunks = [];
+        resolve(blob);
+      }, { once: true });
+      try { meetingRecorder.stop(); } catch(e){ resolve(null); }
+    });
+  }
+
+  async function stopMeetingRecording(){
+    if (!meetingRecording) return;
+    meetingRecording = false;
+    meetingWsSend({ type: 'recording-stopped' });
+    updateMeetingRecordingUi();
+    const meetingNameSnapshot = document.getElementById('meetingCallName').textContent || 'Meeting';
+    const participantNames = Object.values(meetingParticipants).map(p=>p.name).filter(Boolean);
+    participantNames.push(myDisplayName || 'You');
+    // Snapshotted now, not read inside processMeetingRecording later:
+    // leaveMeeting() (which is what triggers this when someone hits Leave
+    // instead of Stop first) resets meetingOrgId to null moments after this
+    // function returns, well before the upload+summarize round trip below
+    // even starts.
+    const orgIdSnapshot = meetingOrgId;
+
+    const blob = await meetingRecorderStopAndCollect();
+    meetingRecSources.forEach(src=>{ try { src.disconnect(); } catch(e){} });
+    meetingRecSources = new Map();
+    if (meetingAudioCtx){ try { meetingAudioCtx.close(); } catch(e){} meetingAudioCtx = null; }
+    meetingRecDest = null;
+    meetingRecorder = null;
+
+    if (blob && blob.size > 0) processMeetingRecording(blob, meetingNameSnapshot, participantNames, orgIdSnapshot);
+  }
+
+  document.getElementById('meetingRecordBtn').addEventListener('click', ()=>{
+    if (meetingRecording) stopMeetingRecording(); else startMeetingRecording();
+  });
+
+  async function processMeetingRecording(blob, meetingNameSnapshot, participantNames, orgIdSnapshot){
+    openModal('meetingSummaryOverlay');
+    document.getElementById('meetingSummaryLoading').style.display = 'flex';
+    document.getElementById('meetingSummaryResults').style.display = 'none';
+    document.getElementById('meetingSummaryError').style.display = 'none';
+    document.getElementById('meetingSummaryPostBtn').style.display = 'none';
+    document.getElementById('meetingSummaryChatPicker').style.display = 'none';
+
+    try {
+      const mime = blob.type || 'audio/webm';
+      const ext = mime.includes('mp4') ? 'm4a' : 'webm';
+      const uploadRes = await apiFetch('/upload', {
+        method: 'POST',
+        headers: { 'content-type': mime, 'x-file-name': encodeURIComponent('meeting-audio.' + ext) },
+        body: blob,
+      });
+      if (!uploadRes.ok || !uploadRes.body || !uploadRes.body.id) throw new Error('upload_failed');
+
+      const sumRes = await apiFetch('/meeting/summarize', {
+        method: 'POST',
+        body: JSON.stringify({ mediaId: uploadRes.body.id, meetingName: meetingNameSnapshot, participantNames, orgId: orgIdSnapshot }),
+      });
+      if (!sumRes.ok || !sumRes.body) throw new Error((sumRes.body && sumRes.body.error) || 'summarize_failed');
+
+      renderMeetingSummaryResult(sumRes.body);
+    } catch(e){
+      document.getElementById('meetingSummaryLoading').style.display = 'none';
+      const err = document.getElementById('meetingSummaryError');
+      err.style.display = 'block';
+      err.textContent = "Couldn't generate a summary for this recording.";
+    }
+  }
+
+  function renderMeetingSummaryResult(data){
+    document.getElementById('meetingSummaryLoading').style.display = 'none';
+    document.getElementById('meetingSummaryResults').style.display = 'block';
+    document.getElementById('meetingSummaryText').textContent = data.summary || '(no summary)';
+    document.getElementById('meetingTranscriptText').textContent = data.transcript || '(empty)';
+    const list = document.getElementById('meetingActionItemsList');
+    list.innerHTML = '';
+    const items = data.actionItems || [];
+    document.getElementById('meetingSummaryEmpty').style.display = items.length ? 'none' : 'block';
+    items.forEach(item=>{
+      const row = document.createElement('div');
+      row.style.cssText = 'padding:8px 0; border-bottom:1px solid var(--glass-brd); font-size:13.5px;';
+      row.innerHTML = `<div>${escapeHtml(item.text)}</div>` + (item.owner ? `<div class="hint" style="margin:2px 0 0;">${escapeHtml(item.owner)}</div>` : '');
+      list.appendChild(row);
+    });
+    meetingSummaryPendingData = data;
+    document.getElementById('meetingSummaryPostBtn').style.display = '';
+  }
+
+  document.getElementById('meetingSummaryPostBtn').addEventListener('click', ()=>{
+    const picker = document.getElementById('meetingSummaryChatPicker');
+    if (picker.style.display !== 'none'){ picker.style.display = 'none'; return; }
+    const list = document.getElementById('meetingSummaryChatList');
+    list.innerHTML = '';
+    const chats = sessionChats.filter(c => (c.orgId || null) === (activeOrgId || null));
+    if (chats.length === 0){
+      list.innerHTML = '<div class="hint">No chats yet.</div>';
+    } else {
+      chats.forEach(chat=>{
+        const name = chatDisplayName(chat);
+        const row = document.createElement('div');
+        row.className = 'settings-row settings-row-action';
+        row.innerHTML = `<span style="display:flex;align-items:center;gap:10px;min-width:0;"><span class="avatar" style="width:28px;height:28px;font-size:11px;flex-shrink:0;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(name)}</span></span>`;
+        renderAvatar(row.querySelector('.avatar'), name, chat.type === 'group', chatAvatarUrl(chat));
+        row.addEventListener('click', ()=> postMeetingSummaryToChat(chat.id));
+        list.appendChild(row);
+      });
+    }
+    picker.style.display = 'block';
+  });
+
+  async function postMeetingSummaryToChat(chatId){
+    const data = meetingSummaryPendingData;
+    if (!data) return;
+    const chat = getChat(chatId);
+    if (!chat) return;
+    const key = await ensureChatKey(chat);
+    if (!key){
+      showSessionBanner("Encryption isn't ready for this chat yet. Try again shortly.");
+      return;
+    }
+    let text = '📋 Meeting summary\n\n' + (data.summary || '');
+    if (data.actionItems && data.actionItems.length){
+      text += '\n\nAction items:\n' + data.actionItems.map(a => '• ' + a.text + (a.owner ? ' (' + a.owner + ')' : '')).join('\n');
+    }
+    const enc = await e2eeEncryptString(key, text);
+    const r = await apiFetch(`/chats/${chatId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ ciphertext: enc.ciphertext, iv: enc.iv, alg: chat.type === 'group' ? 'group' : 'dm' }),
+    });
+    if (r.ok && r.body.message){
+      r.body.message.text = text;
+      r.body.message._e2eeDone = true;
+      await mergeMessages(chatId, [r.body.message]);
+      if (activeChatId === chatId) renderConv();
+      renderChatList();
+      closeModal('meetingSummaryOverlay');
+    } else {
+      showSessionBanner("Couldn't post the summary. Try again.");
+    }
+  }
 
   // ---- Meeting Room tab: pick contacts, start a meeting ----
   let meetingSelectedContacts = new Set();
@@ -5443,7 +6116,7 @@
     const inviteIds = [...meetingSelectedContacts];
     closeModal('meetingRoomOverlay');
     const newMeetingId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
-    joinMeetingRoom(newMeetingId, myDisplayName ? `${myDisplayName}'s meeting` : 'Meeting', inviteIds);
+    joinMeetingRoom(newMeetingId, myDisplayName ? `${myDisplayName}'s meeting` : 'Meeting', inviteIds, { orgId: activeOrgId });
   });
 
   // ---- Incoming meeting invite (arrives over the same call-signal pipe) ----
@@ -5478,7 +6151,7 @@
     const signal = pendingMeetingInvite;
     pendingMeetingInvite = null;
     closeModal('meetingInviteOverlay');
-    joinMeetingRoom(signal.meetingId, signal.meetingName, []);
+    joinMeetingRoom(signal.meetingId, signal.meetingName, [], { orgId: signal.orgId || null });
   });
   document.getElementById('meetingInviteDeclineBtn').addEventListener('click', ()=>{
     pendingMeetingInvite = null;
@@ -5787,6 +6460,17 @@
         return;
       }
       if (name === 'meetingroom'){
+        // Meeting Room (unlimited size, recording, AI summaries) is a paid
+        // workspace feature now. Personal accounts get a lighter capped
+        // group call instead, started from inside a group chat itself
+        // (see the call button in the chat header), not from this tab.
+        if (!activeOrgId){
+          document.getElementById('comingSoonTitle').textContent = 'Workspace feature';
+          document.getElementById('comingSoonIcon').textContent = '🏢';
+          document.getElementById('comingSoonBody').textContent = 'Meeting Room (unlimited participants, recording, and AI meeting summaries) is available inside a workspace. For a personal chat, start a group call from that chat\'s header instead, up to 6 people.';
+          openModal('comingSoonOverlay');
+          return;
+        }
         openMeetingRoomOverlay();
         return;
       }
@@ -7126,20 +7810,27 @@
     // actually drives the ding/badge for chats you're not currently looking
     // at, so a socket that looks open but is really dead means total silence
     // with no error anywhere to notice.
+    // Tightened from 20s/40s: a silently-dead socket previously could sit
+    // undetected for up to 40s before the next ping even noticed, then
+    // however long the reconnect backoff added on top, that whole window is
+    // exactly what "notifications lagging" looks like from the outside for
+    // whatever message happened to arrive during it. Faster detection can't
+    // fix a push that never left the server, but it does stop the in-app/
+    // live-socket path from being the slow one.
     notifyHeartbeatTimer = setInterval(()=>{
       if (ws.readyState !== WebSocket.OPEN) return;
-      if (Date.now() - notifySocketLastActivityAt > 40000){
+      if (Date.now() - notifySocketLastActivityAt > 25000){
         try { ws.close(); } catch(e){}
         return;
       }
       try { ws.send(JSON.stringify({ type: 'ping' })); } catch(e){}
-    }, 20000);
+    }, 12000);
   }
 
   function scheduleNotifyReconnect(){
     if (notifyReconnectTimer) return;
     notifyReconnectAttempts = Math.min(notifyReconnectAttempts + 1, 5);
-    const delay = Math.min(1000 * notifyReconnectAttempts, 8000);
+    const delay = Math.min(800 * notifyReconnectAttempts, 4000);
     notifyReconnectTimer = setTimeout(()=>{
       notifyReconnectTimer = null;
       if (myPinHash) connectNotifySocket();
