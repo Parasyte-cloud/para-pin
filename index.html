@@ -884,6 +884,15 @@
 
   /* ================= MOBILE ================= */
   @media (max-width: 760px){
+    /* Overlays center their modal in the full viewport by default, which on
+       a phone means a modal's own bottom edge (and whatever action row lives
+       there) can land right at, or under, the floating nav (nav sits at
+       z-index:30, above overlays' z-index:20, on purpose, see .nav-wrap's
+       comment). Reserving this much bottom padding on every overlay shifts
+       the centering point up so there's guaranteed breathing room above the
+       nav for every modal, not just the tall ones that used to actually
+       overlap it. */
+    .overlay{ padding-bottom:calc(120px + env(safe-area-inset-bottom, 0px)); box-sizing:border-box; }
     .shell{ padding:0; gap:0; position:relative; overflow:hidden; }
     .sidebar, .conv{
       width:100%; min-width:0; border-radius:0; position:absolute; inset:0;
@@ -1551,7 +1560,7 @@
 
 <!-- ============ WORKSPACE MEMBERS / INVITE MODAL ============ -->
 <div class="overlay" id="workspaceMembersOverlay">
-  <div class="modal lg" style="max-height:calc(100vh - 150px - env(safe-area-inset-bottom, 0px)); display:flex; flex-direction:column;">
+  <div class="modal lg" style="max-height:85vh; display:flex; flex-direction:column;">
     <h3 id="workspaceMembersTitle" style="flex-shrink:0;">Members</h3>
     <div style="overflow-y:auto; flex:1; min-height:0; margin:0 -22px; padding:0 22px;">
       <div id="workspaceBrandSection" style="display:none; margin-top:10px; padding-bottom:16px; margin-bottom:12px; border-bottom:1px solid var(--glass-brd);">
