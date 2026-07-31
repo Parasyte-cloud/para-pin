@@ -541,11 +541,16 @@
   }
   .msg-react-btn:hover, .msg-react-btn:active{ opacity:1; color:var(--ice); border-color:var(--glass-brd-hi); }
 
+  /* A sibling row under bubble-row (not a flex item inside it), sized to
+     fit its content and pinned to whichever side the message sits on, so
+     opening it can never squeeze or overlap the message bubble itself. */
   .react-picker{
-    align-self:flex-end; display:flex; gap:4px; background:rgba(10,13,18,0.92); border:1px solid var(--glass-brd-hi);
-    border-radius:16px; padding:6px 8px; margin-bottom:2px; backdrop-filter:blur(12px);
-    flex-shrink:0; white-space:nowrap;
+    display:flex; gap:4px; background:rgba(10,13,18,0.92); border:1px solid var(--glass-brd-hi);
+    border-radius:16px; padding:6px 8px; margin:-4px 0 2px; backdrop-filter:blur(12px);
+    width:fit-content; max-width:calc(100% - 8px); flex-shrink:0; white-space:nowrap;
   }
+  .react-picker.me{ align-self:flex-end; }
+  .react-picker:not(.me){ align-self:flex-start; }
   .react-option{ font-size:16px; cursor:pointer; transition:transform .1s ease; line-height:1; flex-shrink:0; }
   .react-option:hover{ transform:scale(1.25); }
 
@@ -4058,25 +4063,28 @@
         reactBtn.textContent = '☺';
         reactBtn.dataset.id = m.id;
         row.appendChild(reactBtn);
-
-        if (openReactPickerFor === m.id){
-          const picker = document.createElement('div');
-          picker.className = 'react-picker';
-          picker.dataset.id = m.id;
-          QUICK_REACTIONS.forEach(em=>{
-            const opt = document.createElement('div');
-            opt.className = 'react-option';
-            opt.textContent = em;
-            opt.dataset.id = m.id;
-            opt.dataset.emoji = em;
-            picker.appendChild(opt);
-          });
-          row.appendChild(picker);
-        }
       }
 
       row.appendChild(bubble);
       messagesEl.appendChild(row);
+
+      // Rendered as its own full-width row under the bubble (not as a flex
+      // sibling inside bubble-row), so picking a reaction doesn't squeeze the
+      // message bubble sideways or overlap its text, see .react-picker CSS.
+      if (!m.deleted && openReactPickerFor === m.id){
+        const picker = document.createElement('div');
+        picker.className = 'react-picker' + (isMe ? ' me' : '');
+        picker.dataset.id = m.id;
+        QUICK_REACTIONS.forEach(em=>{
+          const opt = document.createElement('div');
+          opt.className = 'react-option';
+          opt.textContent = em;
+          opt.dataset.id = m.id;
+          opt.dataset.emoji = em;
+          picker.appendChild(opt);
+        });
+        messagesEl.appendChild(picker);
+      }
 
       const reactionEntries = m.reactions ? Object.entries(m.reactions).filter(([, ids]) => ids.length) : [];
       if (reactionEntries.length){
