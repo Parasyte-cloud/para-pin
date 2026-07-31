@@ -204,10 +204,17 @@
      genuinely floats above every page instead of living inside one. */
   #bottomNavWrap{
     position:fixed; z-index:30; display:flex; justify-content:center;
+    /* Off on the wrapper so the empty margin either side of the pill (it's
+       centered in a wider invisible box) doesn't eat taps meant for
+       whatever's underneath; the pill itself switches it back on below.
+       This got dropped by accident in an earlier pass and silently made
+       the ENTIRE nav unclickable, nothing under #bottomNav could receive
+       a tap without it. */
     pointer-events:none;
   }
   #bottomNav{
     position:relative; display:flex; align-items:stretch; justify-content:center; gap:2px;
+    pointer-events:auto;
     background:rgba(22,24,30,0.5);
     -webkit-backdrop-filter:blur(24px) saturate(180%);
     backdrop-filter:blur(24px) saturate(180%);
@@ -215,6 +222,12 @@
     border-radius:999px; padding:5px 8px; width:100%; max-width:440px;
     box-shadow:0 8px 24px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.16), inset 0 -1px 0 rgba(0,0,0,0.18);
   }
+  /* Hidden until the app itself is actually showing (post-unlock), a plain
+     sibling selector off #app's own .show class, no separate JS state to
+     keep in sync. Without this the nav (now a sibling of #app rather than
+     nested inside it, see the comment above) rendered even over the PIN
+     lock screen, where there's nothing yet to navigate to. */
+  #app:not(.show) ~ #bottomNavWrap{ display:none; }
   /* Desktop: roughly the same footprint the nav used to occupy sitting
      inline at the bottom of the sidebar column, just floating now instead
      of in-flow, so it survives full-page overlays there too. */
@@ -269,6 +282,41 @@
     border-radius:999px; background:linear-gradient(135deg, var(--ice), var(--fire)); color:#0a0d12;
     font-size:9.5px; font-weight:700; display:flex; align-items:center; justify-content:center;
     box-shadow:0 0 0 2px rgba(8,10,14,0.7);
+  }
+  /* Center medallion: sits between the two tab pairs and pops up out of the
+     pill rather than sitting flush inside it, the raised chrome-badge look
+     from the reference mockup. It's a fixed circle (not a .nav-tab, never
+     matched by moveNavActivePill's data-nav-tab lookup, so the sliding
+     highlight capsule can never land on it) whose own tap locks the app
+     instead of switching tabs. */
+  .nav-lock-btn{
+    position:relative; z-index:2; align-self:center; flex:0 0 auto;
+    width:50px; height:50px; margin:-15px 1px 0;
+    border-radius:50%; display:flex; align-items:center; justify-content:center;
+    cursor:pointer;
+    background:
+      linear-gradient(160deg, rgba(255,255,255,0.28) 0%, rgba(255,255,255,0.03) 45%, rgba(0,0,0,0.2) 100%),
+      radial-gradient(circle at 32% 26%, rgba(var(--tint-rgb),0.4), rgba(20,22,28,0.94) 72%);
+    border:1.5px solid rgba(255,255,255,0.3);
+    box-shadow:
+      0 10px 20px rgba(0,0,0,0.4),
+      0 2px 6px rgba(0,0,0,0.3),
+      inset 0 1.5px 1.5px rgba(255,255,255,0.4),
+      inset 0 -2px 4px rgba(0,0,0,0.35),
+      0 0 0 5px rgba(10,12,16,0.55);
+    transition:transform .15s cubic-bezier(.34,1.56,.64,1), box-shadow .15s ease;
+  }
+  /* Soft ice/fire glow ring behind the medallion, echoing the badge gradient
+     used elsewhere, purely decorative (::after so it never intercepts the tap). */
+  .nav-lock-btn::after{
+    content:''; position:absolute; inset:-5px; border-radius:50%; z-index:-1;
+    background:linear-gradient(135deg, var(--ice), var(--fire));
+    opacity:.32; filter:blur(7px);
+  }
+  .nav-lock-btn:active{ transform:scale(0.9); box-shadow:0 6px 14px rgba(0,0,0,0.4), inset 0 1.5px 1.5px rgba(255,255,255,0.4), inset 0 -2px 4px rgba(0,0,0,0.35), 0 0 0 5px rgba(10,12,16,0.55); }
+  .nav-lock-logo{
+    width:28px; height:28px; border-radius:50%; object-fit:cover; pointer-events:none;
+    box-shadow:0 0 0 1px rgba(255,255,255,0.12);
   }
   /* ================= INCOMING CALL ================= */
   #incomingCallOverlay{ z-index:60; background:rgba(4,5,8,0.92); backdrop-filter:blur(6px); }
@@ -1271,6 +1319,9 @@
       <span>Calls</span>
       <div class="nav-tab-badge" id="navCallsBadge" style="display:none;"></div>
     </div>
+    <div class="nav-lock-btn" id="navLockBtn" title="Lock">
+      <img class="nav-lock-logo" id="navLockLogo" alt="">
+    </div>
     <div class="nav-tab active" data-nav-tab="chats">
       <div class="nav-tab-icon">💬</div>
       <span>Chats</span>
@@ -1999,6 +2050,9 @@
 </div>
 <script>
   document.getElementById('splashLogo').src = document.querySelector('.app-icon').src;
+  // Same borrow-the-src trick for the nav's center medallion, it's already
+  // in the DOM by this point (the nav sits well above this script tag).
+  document.getElementById('navLockLogo').src = document.querySelector('.app-icon').src;
   setTimeout(()=>{
     const el = document.getElementById('splashScreen');
     if (el) el.remove();
@@ -7079,6 +7133,13 @@
   function hapticTap(){
     try { if (navigator.vibrate) navigator.vibrate(10); } catch (e) {}
   }
+
+  // Center medallion isn't a tab (never gets the sliding highlight, never
+  // opens an overlay), tapping it just locks straight back to the PIN screen.
+  document.getElementById('navLockBtn').addEventListener('click', ()=>{
+    hapticTap();
+    lockApp();
+  });
 
   document.querySelectorAll('#bottomNav .nav-tab').forEach(tab=>{
     tab.addEventListener('click', ()=>{
