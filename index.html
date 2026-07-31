@@ -295,14 +295,23 @@
      local self-view tile), each tile is its own little card with a video
      filling it and the name overlaid at the bottom, same visual language
      as a video call's fullscreen background just tiled instead of single. */
+  /* minmax's floor is the whole trick here: at typical phone widths (say
+     ~360-400px available after padding), 260px means only one column ever
+     fits, so tiles stack full-width/"horizontal" instead of the previous
+     140px floor letting two narrow portrait strips squeeze in side by
+     side. Wider viewports (tablet/desktop, or a phone in landscape) still
+     get multiple columns as more people join, same grid handles a normal
+     meeting size (a handful up to ~12) without any participant-count
+     branching, it's just auto-fit doing its job at a saner minimum. */
   .meeting-tiles-grid{
     position:relative; z-index:2; flex:1; min-height:0; display:grid;
-    grid-template-columns:repeat(auto-fit, minmax(140px, 1fr));
-    grid-auto-rows:1fr; gap:8px; padding:8px 12px;
+    grid-template-columns:repeat(auto-fit, minmax(260px, 1fr));
+    grid-auto-rows:minmax(120px, 1fr); gap:8px; padding:8px 12px;
+    overflow-y:auto;
   }
   .meeting-tile{
     position:relative; border-radius:14px; overflow:hidden; background:#161616;
-    min-height:100px;
+    min-height:120px;
   }
   .meeting-tile video{
     position:absolute; inset:0; width:100%; height:100%; object-fit:cover; z-index:1;
@@ -604,6 +613,13 @@
 
   .msg-image{ display:block; max-width:220px; max-height:280px; border-radius:12px; cursor:pointer; object-fit:cover; }
   .msg-video{ display:block; max-width:240px; max-height:320px; border-radius:12px; background:#000; }
+  .msg-video-wrap{ position:relative; display:inline-block; }
+  .attachment-dl-btn{
+    width:26px; height:26px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+    font-size:13px; cursor:pointer; flex-shrink:0; background:rgba(var(--tint-rgb),0.1); color:inherit;
+  }
+  .attachment-dl-btn:hover{ background:rgba(var(--tint-rgb),0.18); }
+  .video-dl{ position:absolute; top:8px; right:8px; background:rgba(0,0,0,0.55); color:#fff; }
   /* Live self-view while recording a video, sits just above the composer so
      you can see what you're capturing without covering the message list. */
   .video-record-wrap{
@@ -1377,7 +1393,10 @@
 
 <!-- ============ IMAGE LIGHTBOX ============ -->
 <div class="overlay" id="lightboxOverlay" style="background:rgba(0,0,0,0.9);">
-  <img id="lightboxImg" style="max-width:92vw;max-height:88vh;border-radius:10px;" src="" alt="">
+  <div style="position:relative;">
+    <img id="lightboxImg" style="max-width:92vw;max-height:88vh;border-radius:10px;display:block;" src="" alt="">
+    <div class="icon-btn" id="lightboxDownloadBtn" title="Download" style="position:absolute; top:10px; right:10px; background:rgba(0,0,0,0.55); border-color:rgba(255,255,255,0.25); color:#fff;">⬇</div>
+  </div>
 </div>
 
 <!-- ============ GROUP MEMBERS MODAL ============ -->
@@ -1597,6 +1616,8 @@
         <div class="settings-row settings-row-action" id="settingsShareBtn"><span>Share my PIN</span><span>▦</span></div>
         <div class="settings-row settings-row-action" id="settingsLockBtn"><span>Lock app now</span><span>🔒</span></div>
         <div class="settings-row settings-row-action" id="settingsAdminBtn" style="display:none;"><span>Admin console</span><span>👥</span></div>
+        <div class="settings-row settings-row-action" id="settingsPanicBtn" style="margin-top:10px; border-color:rgba(255,90,90,0.35); background:rgba(255,90,90,0.06);"><span style="color:#ff6a6a; font-weight:700;">Panic button</span><span>🆘</span></div>
+        <div class="hint" style="margin-top:-4px;">Instantly ends any active call or meeting and locks the app back to the PIN screen. No confirmation, one tap and you're out.</div>
       </section>
       <section class="admin-console-section">
         <h3>About</h3>
@@ -1779,6 +1800,29 @@
   function escapeHtml(s){
     return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
+
+  // Saves a photo/voice-note/video attachment to the device. Works the same
+  // way whether `url` is this app's own /api/media/<uuid> link or an
+  // already-decrypted blob: URL (E2EE attachments only ever reach this as
+  // a blob, decrypted client-side, by the time anything renders them), an
+  // <a download> triggered programmatically is the one approach that
+  // covers both without needing a server round-trip either way.
+  function triggerDownload(url, filename){
+    if (!url) return;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename || '';
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  document.getElementById('lightboxDownloadBtn').addEventListener('click', (e)=>{
+    e.stopPropagation();
+    const btn = e.currentTarget;
+    triggerDownload(btn.dataset.url, btn.dataset.filename);
+  });
 
   // ---------------- message search (within the open chat) ----------------
   let searchQuery = '';
@@ -3708,11 +3752,15 @@
                 + `<button class="voice-note-play" data-voice-id="${m.id}">▶</button>`
                 + `<div class="voice-note-bar"><div class="voice-note-bar-fill"></div></div>`
                 + `<div class="voice-note-dur">${fmtDuration(dur)}</div>`
+                + `<div class="attachment-dl-btn voice-note-dl" data-url="${escapeHtml(attUrl)}" data-filename="voice-message.webm" title="Download">⬇</div>`
                 + `</div>`);
           } else if (m.attachment.kind === 'video'){
             inner += stillDecrypting
               ? `<div class="att-decrypting">🔒 Decrypting video…</div>`
-              : `<video class="msg-video" src="${escapeHtml(attUrl)}" controls playsinline preload="metadata"></video>`;
+              : (`<div class="msg-video-wrap">`
+                + `<video class="msg-video" src="${escapeHtml(attUrl)}" controls playsinline preload="metadata"></video>`
+                + `<div class="attachment-dl-btn video-dl" data-url="${escapeHtml(attUrl)}" data-filename="video.mp4" title="Download">⬇</div>`
+                + `</div>`);
           } else {
             const fname = m.attachment.name || 'File';
             const fsize = m.attachment.size ? fmtFileSize(m.attachment.size) : '';
@@ -3852,7 +3900,7 @@
   // wait out a long-press when the collapsed indicator is right there.
   (function wireMessageReactionReveal(){
     const isOtherInteractive = (target) => target.closest(
-      '.msg-image, .voice-note, .reply-quote, .msg-action-btn, .msg-react-btn, .react-option, .reaction-pill, .file-card, .msg-video'
+      '.msg-image, .voice-note, .reply-quote, .msg-action-btn, .msg-react-btn, .react-option, .reaction-pill, .file-card, .msg-video, .attachment-dl-btn'
     );
     let pressTimer = null;
     let longPressed = false;
@@ -3887,9 +3935,17 @@
   })();
 
   messagesEl.addEventListener('click', async (e)=>{
+    const dlBtn = e.target.closest('.attachment-dl-btn');
+    if (dlBtn){
+      triggerDownload(dlBtn.dataset.url, dlBtn.dataset.filename);
+      return;
+    }
+
     const img = e.target.closest('.msg-image');
     if (img){
       document.getElementById('lightboxImg').src = img.dataset.full;
+      document.getElementById('lightboxDownloadBtn').dataset.url = img.dataset.full;
+      document.getElementById('lightboxDownloadBtn').dataset.filename = 'photo.jpg';
       openModal('lightboxOverlay');
       return;
     }
@@ -4114,6 +4170,17 @@
     // their own explicit End/Leave buttons.
     if (document.getElementById('meetingCallScreen').classList.contains('show')) return;
     if (callState !== 'idle') return;
+    // The lightbox sits on top of everything (often opened from inside an
+    // open conversation), it needs its own check ahead of NAV_OVERLAY_IDS:
+    // falling through to that list's logic would either no-op (it's not in
+    // there) or, worse, also close the conversation underneath via the
+    // show-chat branch below, when all a swipe here should do is dismiss
+    // the image.
+    const lightbox = document.getElementById('lightboxOverlay');
+    if (lightbox.classList.contains('show')){
+      lightbox.classList.remove('show');
+      return;
+    }
     const openOverlayId = NAV_OVERLAY_IDS.find(id => document.getElementById(id).classList.contains('show'));
     if (openOverlayId){
       closeModal(openOverlayId);
@@ -4146,6 +4213,21 @@
 
   document.getElementById('settingsLockBtn').addEventListener('click', ()=>{
     closeModal('settingsOverlay');
+    lockApp();
+  });
+
+  // ================= PANIC BUTTON =================
+  // Deliberately no confirmation dialog, that would defeat the point of a
+  // button meant for "I need out of this right now." Tears down whatever's
+  // live (a 1:1 call, a group meeting, both are safe to call unconditionally
+  // even if neither is active) before falling through to the same full
+  // teardown lockApp() already does for a normal manual lock: closes
+  // sockets, clears unread/typing/presence state, drops back to the PIN
+  // screen. Purely local, nothing is sent anywhere.
+  document.getElementById('settingsPanicBtn').addEventListener('click', ()=>{
+    closeModal('settingsOverlay');
+    try { endCall('hangup'); } catch(e){}
+    try { leaveMeeting(); } catch(e){}
     lockApp();
   });
 
@@ -5388,6 +5470,8 @@
     const url = (pendingProfilePhoto && pendingProfilePhoto.url) || myAvatarUrl;
     if (!url) return; // nothing but initials showing yet, nothing to view
     document.getElementById('lightboxImg').src = url;
+    document.getElementById('lightboxDownloadBtn').dataset.url = url;
+    document.getElementById('lightboxDownloadBtn').dataset.filename = 'profile-photo.jpg';
     openModal('lightboxOverlay');
   });
   profileNameInput.addEventListener('input', ()=>{ if (!pendingProfilePhoto && !myAvatarUrl) renderProfilePhotoPreview(null); });
