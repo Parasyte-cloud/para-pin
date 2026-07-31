@@ -642,30 +642,33 @@ async function verifyPaystackSignature(rawBody, signatureHeader, secretKey) {
   return diff === 0;
 }
 
-// Starts a Paystack transaction for the recurring Admin plan. `env.PAYSTACK_PLAN_CODE`
-// is a Plan created in the Paystack dashboard (that's where the actual price
-// and billing interval live, changeable there without touching this code).
-async function paystackInitTransaction(env, { email, orgId, purpose, callbackUrl }) {
+// Starts a Paystack transaction. Two shapes: a recurring Plan (workspace
+// subscriptions, and Premium's monthly option, `planCode` is a Plan created
+// in the Paystack dashboard, that's where the actual price/interval live,
+// changeable there without touching this code) or a one-time fixed `amount`
+// (Premium's lifetime unlock, no Plan/subscription involved at all, just a
+// single charge, Paystack never sends subscription.create/disable for these).
+// `amount` is in the smallest unit of whatever currency the Paystack account
+// is configured for (kobo for NGN, cents for USD, etc.), set via
+// PAYSTACK_PREMIUM_LIFETIME_AMOUNT to match that account's currency.
+async function paystackInitTransaction(env, { email, orgId, userId, purpose, callbackUrl, planCode, amount }) {
   if (!env.PAYSTACK_SECRET_KEY) return { ok: false, error: 'paystack_not_configured' };
-  if (!env.PAYSTACK_PLAN_CODE) return { ok: false, error: 'paystack_plan_not_configured' };
+  if (!planCode && !amount) return { ok: false, error: 'paystack_plan_not_configured' };
+  const body = { email, callback_url: callbackUrl, metadata: { orgId: orgId || null, userId: userId || null, purpose } };
+  if (planCode) body.plan = planCode; else body.amount = amount;
   const res = await fetch('https://api.paystack.co/transaction/initialize', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${env.PAYSTACK_SECRET_KEY}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      email,
-      plan: env.PAYSTACK_PLAN_CODE,
-      callback_url: callbackUrl,
-      metadata: { orgId, purpose },
-    }),
+    body: JSON.stringify(body),
   });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok || !body.status) {
-    return { ok: false, error: (body && body.message) || `status ${res.status}` };
+  const respBody = await res.json().catch(() => ({}));
+  if (!res.ok || !respBody.status) {
+    return { ok: false, error: (respBody && respBody.message) || `status ${res.status}` };
   }
-  return { ok: true, authorizationUrl: body.data.authorization_url, reference: body.data.reference };
+  return { ok: true, authorizationUrl: respBody.data.authorization_url, reference: respBody.data.reference };
 }
 
 export class Registry {
@@ -1284,7 +1287,7 @@ export class Registry {
       const user = await this.state.storage.get(`user:${pinHash}`);
       if (!user) return json({ ok: false });
       const admins = (await this.state.storage.get('admins')) || [];
-      return json({ ok: true, userId: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, isAdmin: admins.includes(user.id) });
+      return json({ ok: true, userId: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, isAdmin: admins.includes(user.id), premiumStatus: user.premiumStatus || 'none' });
     }
 
     // Per-user call history, each client writes its own side of a call
@@ -1422,6 +1425,71 @@ export class Registry {
       org.billingStatus = status === 'canceled' ? 'canceled' : 'past_due';
       await this.state.storage.put(`org:${orgId}`, org);
       return json({ ok: true, orgId });
+    }
+
+    // ---- Premium (per-user) billing ----
+    // Mirrors the workspace billing endpoints above almost exactly, just
+    // keyed by userId instead of orgId, and stored on the user record
+    // instead of the org record. Two purposes share this: 'premium_monthly'
+    // (a real subscription, gets subscription.create/disable events later)
+    // and 'premium_lifetime' (a single charge.success and nothing else ever
+    // follows it, no subscription exists to disable).
+    if (request.method === 'POST' && url.pathname === '/billing/premium/store-ref') {
+      const { reference, userId, purpose } = await request.json();
+      if (!reference || !userId) return json({ error: 'missing_fields' }, 400);
+      await this.state.storage.put(`premiumBillingRef:${reference}`, { userId, purpose: purpose || 'premium_monthly' });
+      return json({ ok: true });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/billing/premium/activate') {
+      const { reference, userId: directUserId, customerCode, subscriptionCode, lifetime } = await request.json();
+      let userId = directUserId || null;
+      if (!userId && reference) {
+        const ref = await this.state.storage.get(`premiumBillingRef:${reference}`);
+        userId = ref ? ref.userId : null;
+      }
+      if (!userId && customerCode) {
+        userId = await this.state.storage.get(`userByPremiumCustomerCode:${customerCode}`);
+      }
+      if (!userId) return json({ ok: false, error: 'unknown_reference' }, 404);
+      const pinHash = await this.state.storage.get(`userIdToPinHash:${userId}`);
+      if (!pinHash) return json({ ok: false, error: 'user_not_found' }, 404);
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ ok: false, error: 'user_not_found' }, 404);
+      user.premiumStatus = lifetime ? 'lifetime' : 'active';
+      user.premiumCustomerCode = customerCode || user.premiumCustomerCode || null;
+      if (subscriptionCode) user.premiumSubscriptionCode = subscriptionCode;
+      user.premiumActivatedAt = Date.now();
+      await this.state.storage.put(`user:${pinHash}`, user);
+      if (user.premiumCustomerCode) await this.state.storage.put(`userByPremiumCustomerCode:${user.premiumCustomerCode}`, userId);
+      if (user.premiumSubscriptionCode) await this.state.storage.put(`userByPremiumSubscriptionCode:${user.premiumSubscriptionCode}`, userId);
+      return json({ ok: true, userId });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/billing/premium/deactivate') {
+      const { customerCode, subscriptionCode, status } = await request.json();
+      let userId = null;
+      if (subscriptionCode) userId = await this.state.storage.get(`userByPremiumSubscriptionCode:${subscriptionCode}`);
+      if (!userId && customerCode) userId = await this.state.storage.get(`userByPremiumCustomerCode:${customerCode}`);
+      if (!userId) return json({ ok: false, error: 'unknown_subscription' }, 404);
+      const pinHash = await this.state.storage.get(`userIdToPinHash:${userId}`);
+      if (!pinHash) return json({ ok: false, error: 'user_not_found' }, 404);
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ ok: false, error: 'user_not_found' }, 404);
+      // A lifetime unlock has no subscription behind it to lapse, this only
+      // ever downgrades someone who was on the monthly plan.
+      if (user.premiumStatus !== 'lifetime') {
+        user.premiumStatus = status === 'canceled' ? 'none' : 'past_due';
+        await this.state.storage.put(`user:${pinHash}`, user);
+      }
+      return json({ ok: true, userId });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/billing/premium/status') {
+      const pinHash = url.searchParams.get('pinHash');
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      return json({ ok: true, premiumStatus: user.premiumStatus || 'none' });
     }
 
     // Client-facing status check, deliberately NOT gated by isOrgMember (that
@@ -3460,9 +3528,14 @@ export default {
         try { fileName = decodeURIComponent(fileNameHeader).slice(0, 200) || 'file'; } catch (e) {}
 
         const buf = await request.arrayBuffer();
-        const MAX_BYTES = 20 * 1024 * 1024; // 20MB ceiling
+        // PArA Premium's tangible perk today: a real bump in how big a
+        // single upload can be, everything else in the Premium column
+        // (cloud backup, AI, themes) is still just a status flag until those
+        // features actually exist to gate.
+        const isPremium = ['active', 'lifetime'].includes(who.premiumStatus);
+        const MAX_BYTES = (isPremium ? 100 : 20) * 1024 * 1024;
         if (buf.byteLength === 0) return json({ error: 'empty' }, 400);
-        if (buf.byteLength > MAX_BYTES) return json({ error: 'too_large' }, 413);
+        if (buf.byteLength > MAX_BYTES) return json({ error: 'too_large', maxBytes: MAX_BYTES }, 413);
 
         const key = crypto.randomUUID();
         await env.MEDIA.put(key, buf, {
@@ -4195,6 +4268,7 @@ export default {
           orgId,
           purpose: 'workspace_admin',
           callbackUrl: `${url.origin}/billing/callback`,
+          planCode: env.PAYSTACK_PLAN_CODE,
         });
         if (!pay.ok) return json({ error: pay.error || 'paystack_error' }, 502);
         await registryStub.fetch('https://internal/billing/store-ref', {
@@ -4223,6 +4297,7 @@ export default {
           orgId,
           purpose: 'workspace_renewal',
           callbackUrl: `${url.origin}/billing/callback`,
+          planCode: env.PAYSTACK_PLAN_CODE,
         });
         if (!pay.ok) return json({ error: pay.error || 'paystack_error' }, 502);
         await registryStub.fetch('https://internal/billing/store-ref', {
@@ -4230,6 +4305,66 @@ export default {
           body: JSON.stringify({ reference: pay.reference, orgId, purpose: 'workspace_renewal' }),
         });
         return json({ ok: true, orgId, authorizationUrl: pay.authorizationUrl });
+      }
+
+      // ---- Premium (per-user, not per-workspace) billing ----
+      // A personal upgrade: larger uploads today, cross-device sync/AI/themes
+      // as those actually ship. Two ways to buy it: recurring monthly (a
+      // Plan, same mechanism as workspace billing) or a one-time lifetime
+      // charge (a fixed amount, no Plan/subscription at all).
+      if (request.method === 'POST' && url.pathname === '/api/billing/premium/checkout-monthly') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const { email } = await request.json().catch(() => ({}));
+        if (!email) return json({ error: 'missing_email' }, 400);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        if (!env.PAYSTACK_PREMIUM_PLAN_CODE) return json({ error: 'paystack_plan_not_configured' }, 500);
+        const pay = await paystackInitTransaction(env, {
+          email,
+          userId: who.userId,
+          purpose: 'premium_monthly',
+          callbackUrl: `${url.origin}/billing/callback`,
+          planCode: env.PAYSTACK_PREMIUM_PLAN_CODE,
+        });
+        if (!pay.ok) return json({ error: pay.error || 'paystack_error' }, 502);
+        await registryStub.fetch('https://internal/billing/premium/store-ref', {
+          method: 'POST',
+          body: JSON.stringify({ reference: pay.reference, userId: who.userId, purpose: 'premium_monthly' }),
+        });
+        return json({ ok: true, authorizationUrl: pay.authorizationUrl });
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/billing/premium/checkout-lifetime') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const { email } = await request.json().catch(() => ({}));
+        if (!email) return json({ error: 'missing_email' }, 400);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const amount = parseInt(env.PAYSTACK_PREMIUM_LIFETIME_AMOUNT, 10);
+        if (!amount) return json({ error: 'paystack_plan_not_configured' }, 500);
+        const pay = await paystackInitTransaction(env, {
+          email,
+          userId: who.userId,
+          purpose: 'premium_lifetime',
+          callbackUrl: `${url.origin}/billing/callback`,
+          amount,
+        });
+        if (!pay.ok) return json({ error: pay.error || 'paystack_error' }, 502);
+        await registryStub.fetch('https://internal/billing/premium/store-ref', {
+          method: 'POST',
+          body: JSON.stringify({ reference: pay.reference, userId: who.userId, purpose: 'premium_lifetime' }),
+        });
+        return json({ ok: true, authorizationUrl: pay.authorizationUrl });
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/billing/premium/status') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        return registryStub.fetch(`https://internal/billing/premium/status?pinHash=${encodeURIComponent(pinHash)}`);
       }
 
       if (request.method === 'GET' && url.pathname === '/api/billing/status') {
@@ -4274,47 +4409,74 @@ export default {
         const data = (event && event.data) || {};
         try {
           if (type === 'charge.success') {
+            // charge.success is the one event that always carries the
+            // metadata this checkout was started with, so it's the only
+            // place that can tell workspace and premium purchases apart.
+            // Everything after this (subscription.create/disable) only ever
+            // carries Paystack's own customer/subscription codes, which is
+            // why those branches below try both lookups instead.
             const metadata = data.metadata || {};
-            const activateRes = await registryStub.fetch('https://internal/billing/activate', {
-              method: 'POST',
-              body: JSON.stringify({
-                reference: data.reference,
-                orgId: metadata.orgId || null,
-                customerCode: data.customer ? data.customer.customer_code : null,
-                payerEmail: data.customer ? data.customer.email : null,
-              }),
-            });
-            const activateBody = await activateRes.json();
-            if (activateRes.ok && activateBody.ok && activateBody.adminUserId) {
-              const to = (data.customer && data.customer.email) || activateBody.org.payerEmail;
-              if (to) {
-                await sendAdminWelcomeEmail(env, {
-                  to,
-                  name: activateBody.adminDisplayName,
-                  orgName: activateBody.org.name,
-                });
+            const isPremium = metadata.purpose === 'premium_monthly' || metadata.purpose === 'premium_lifetime';
+            if (isPremium) {
+              await registryStub.fetch('https://internal/billing/premium/activate', {
+                method: 'POST',
+                body: JSON.stringify({
+                  reference: data.reference,
+                  userId: metadata.userId || null,
+                  customerCode: data.customer ? data.customer.customer_code : null,
+                  lifetime: metadata.purpose === 'premium_lifetime',
+                }),
+              });
+            } else {
+              const activateRes = await registryStub.fetch('https://internal/billing/activate', {
+                method: 'POST',
+                body: JSON.stringify({
+                  reference: data.reference,
+                  orgId: metadata.orgId || null,
+                  customerCode: data.customer ? data.customer.customer_code : null,
+                  payerEmail: data.customer ? data.customer.email : null,
+                }),
+              });
+              const activateBody = await activateRes.json();
+              if (activateRes.ok && activateBody.ok && activateBody.adminUserId) {
+                const to = (data.customer && data.customer.email) || activateBody.org.payerEmail;
+                if (to) {
+                  await sendAdminWelcomeEmail(env, {
+                    to,
+                    name: activateBody.adminDisplayName,
+                    orgName: activateBody.org.name,
+                  });
+                }
               }
             }
           } else if (type === 'subscription.create') {
-            // Backfills the subscription code onto whichever org
-            // charge.success already activated moments earlier, see the
-            // customerCode fallback lookup in the Registry's /billing/activate.
-            await registryStub.fetch('https://internal/billing/activate', {
-              method: 'POST',
-              body: JSON.stringify({
-                customerCode: data.customer ? data.customer.customer_code : null,
-                subscriptionCode: data.subscription_code || null,
+            // Backfills the subscription code onto whichever org OR premium
+            // user charge.success already activated moments earlier via the
+            // customerCode index each one writes. No metadata on this event
+            // to tell which it was, so both are tried, whichever one's
+            // customerCode index actually matches is a no-op 404 on the other.
+            const customerCode = data.customer ? data.customer.customer_code : null;
+            const subscriptionCode = data.subscription_code || null;
+            await Promise.all([
+              registryStub.fetch('https://internal/billing/activate', {
+                method: 'POST', body: JSON.stringify({ customerCode, subscriptionCode }),
               }),
-            });
+              registryStub.fetch('https://internal/billing/premium/activate', {
+                method: 'POST', body: JSON.stringify({ customerCode, subscriptionCode }),
+              }),
+            ]);
           } else if (type === 'subscription.disable' || type === 'invoice.payment_failed') {
-            await registryStub.fetch('https://internal/billing/deactivate', {
-              method: 'POST',
-              body: JSON.stringify({
-                customerCode: data.customer ? data.customer.customer_code : null,
-                subscriptionCode: data.subscription_code || null,
-                status: type === 'subscription.disable' ? 'canceled' : 'past_due',
+            const customerCode = data.customer ? data.customer.customer_code : null;
+            const subscriptionCode = data.subscription_code || null;
+            const status = type === 'subscription.disable' ? 'canceled' : 'past_due';
+            await Promise.all([
+              registryStub.fetch('https://internal/billing/deactivate', {
+                method: 'POST', body: JSON.stringify({ customerCode, subscriptionCode, status }),
               }),
-            });
+              registryStub.fetch('https://internal/billing/premium/deactivate', {
+                method: 'POST', body: JSON.stringify({ customerCode, subscriptionCode, status }),
+              }),
+            ]);
           }
         } catch (e) {
           // Swallow, Paystack retries on non-2xx, and a webhook we can't
