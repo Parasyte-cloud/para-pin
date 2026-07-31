@@ -1656,8 +1656,19 @@
 </div>
 
 <!-- ============ WORKSPACE MEMBERS / INVITE MODAL ============ -->
+<!-- max-height was 85vh, a fixed fraction of the whole viewport that ignores
+     .overlay's own top/bottom padding (reserved for nav clearance, see that
+     rule's comment) — on a real phone viewport that's taller than the padded
+     space actually left over, so this modal overflowed both ends: its own
+     "Members" title got pushed up past the top (letting the workspace bar
+     bleed through the semi-transparent backdrop above it), and its fixed
+     footer with the People & HR / Close buttons got pushed down past the
+     bottom, off-screen. 100% resolves against the padded box itself instead
+     of the raw viewport, so the modal can never be taller than what's
+     actually visible — same underlying pattern as the admin-console-overlay
+     fix above, applied to a centered card instead of a full-bleed sheet. -->
 <div class="overlay" id="workspaceMembersOverlay">
-  <div class="modal lg" style="max-height:85vh; display:flex; flex-direction:column;">
+  <div class="modal lg" style="max-height:100%; display:flex; flex-direction:column;">
     <h3 id="workspaceMembersTitle" style="flex-shrink:0;">Members</h3>
     <div style="overflow-y:auto; flex:1; min-height:0; margin:0 -22px; padding:0 22px;">
       <div id="workspaceBrandSection" style="display:none; margin-top:10px; padding-bottom:16px; margin-bottom:12px; border-bottom:1px solid var(--glass-brd);">
@@ -2199,8 +2210,10 @@
 </div>
 
 <!-- ============ AI MEETING ASSISTANT: review/post summary ============ -->
+<!-- Same fixed-vh-vs-padding overflow bug as workspaceMembersOverlay above,
+     same fix. -->
 <div class="overlay" id="meetingSummaryOverlay">
-  <div class="modal lg" style="max-height:82vh; display:flex; flex-direction:column;">
+  <div class="modal lg" style="max-height:100%; display:flex; flex-direction:column;">
     <h3>Meeting summary</h3>
     <div style="overflow-y:auto; flex:1; margin:0 -22px; padding:0 22px;">
       <div id="meetingSummaryLoading" style="display:flex; flex-direction:column; align-items:center; gap:12px; padding:36px 0;">
