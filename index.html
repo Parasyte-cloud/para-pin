@@ -223,14 +223,33 @@
       rgba(30,33,40,0.36);
     -webkit-backdrop-filter:blur(26px) saturate(150%);
     backdrop-filter:blur(26px) saturate(150%);
-    border:1.75px solid rgba(255,255,255,0.62);
+    border:1px solid rgba(255,255,255,0.18);
     border-radius:999px; padding:6px 10px; width:100%; max-width:440px;
     box-shadow:
       0 10px 26px rgba(0,0,0,0.32),
       inset 0 1.5px 0 rgba(255,255,255,0.5),
       inset 0 -2px 6px rgba(0,0,0,0.16),
-      inset 0 0 0 3px rgba(255,255,255,0.07),
-      0 0 0 1px rgba(0,0,0,0.22);
+      inset 0 0 0 3px rgba(255,255,255,0.07);
+  }
+  /* Real metallic gradient ring instead of a flat-colour border, a solid
+     border can't carry a multi-stop gradient, so this cuts a thin band out
+     of a gradient-filled pseudo-element using the classic mask-composite
+     "ring" technique (padding sets the ring's thickness, the mask XORs the
+     padding-box against the content-box so only that thin band paints).
+     Slides slowly to read as a soft shimmer across the chrome. */
+  #bottomNav::before{
+    content:''; position:absolute; inset:0; border-radius:inherit; pointer-events:none;
+    padding:1.5px;
+    background:linear-gradient(135deg, #ffffff, #d8dadd 22%, #85898f 46%, #eef0f2 68%, #ffffff);
+    background-size:240% 240%;
+    -webkit-mask:linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite:xor;
+    mask-composite:exclude;
+    animation:chromeShimmer 8s ease-in-out infinite;
+  }
+  @keyframes chromeShimmer{
+    0%,100%{ background-position:0% 30%; }
+    50%{ background-position:100% 70%; }
   }
   /* Hidden until the app itself is actually showing (post-unlock), a plain
      sibling selector off #app's own .show class, no separate JS state to
@@ -322,18 +341,25 @@
       rgba(255,255,255,0.06);
     -webkit-backdrop-filter:blur(8px);
     backdrop-filter:blur(8px);
-    /* Chrome bezel built from a solid light border plus box-shadow rings, a
-       real gradient border on a circle tends to render as a warped rectangle
-       rather than a smooth ring, this layered-ring approach is what actually
-       looks right on a circle. */
-    border:2px solid rgba(255,255,255,0.8);
     box-shadow:
       0 4px 10px rgba(0,0,0,0.22),
       inset 0 1.5px 2px rgba(255,255,255,0.6),
-      inset 0 -2px 4px rgba(0,0,0,0.14),
-      0 0 0 2px rgba(0,0,0,0.1),
-      0 0 0 4px rgba(255,255,255,0.22);
+      inset 0 -2px 4px rgba(0,0,0,0.14);
     transition:transform .15s cubic-bezier(.34,1.56,.64,1), box-shadow .15s ease;
+  }
+  /* Same mask-composite gradient ring as the outer pill, sized for the
+     circle. This is the part that reads as genuine polished chrome rather
+     than a flat-tinted stroke, a plain `border` can't hold a multi-stop
+     gradient this way. */
+  .nav-lock-btn::before{
+    content:''; position:absolute; inset:0; border-radius:50%; pointer-events:none;
+    padding:1.75px;
+    background:linear-gradient(135deg, #ffffff, #d8dadd 22%, #85898f 46%, #eef0f2 68%, #ffffff);
+    background-size:240% 240%;
+    -webkit-mask:linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite:xor;
+    mask-composite:exclude;
+    animation:chromeShimmer 8s ease-in-out infinite;
   }
   .nav-lock-btn:active{ transform:scale(0.9); }
   .nav-lock-logo{
