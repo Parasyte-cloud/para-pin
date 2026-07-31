@@ -1023,7 +1023,20 @@
      "pages that aren't liquid glass" complaint was about. Going transparent
      here lets the same ambient wash + .lg blur read through, uniform with
      the rest of the app. */
-  .admin-console-overlay{ background:transparent; align-items:stretch; justify-content:stretch; }
+  /* This is a full-bleed sheet (.modal.admin-console below is width/height:100%
+     of the overlay's own content box), not a centered card, so it must stay
+     flush to all four edges — override the base .overlay's padding-top/
+     padding-bottom (added for the centered-card overlays' nav clearance,
+     see that rule's comment) back to 0 here. Leaving that padding in place
+     shrunk this sheet inward and left a real gap outside it at top and
+     bottom where .overlay's own background is transparent (by design, so
+     the sheet's .lg blur can sample the ambient wash behind it) — nothing
+     was covering or blurring #app there, so the workspace bar and brand
+     logo showed through completely crisp/undimmed, not just "peeking".
+     Nav clearance for THIS overlay type is handled inside .admin-console-body
+     instead (its own bottom padding), since that's the part that actually
+     scrolls. */
+  .admin-console-overlay{ background:transparent; align-items:stretch; justify-content:stretch; padding-top:0; padding-bottom:0; }
   .modal.admin-console{
     width:100%; max-width:100%; height:100%; max-height:100%; border-radius:0;
     padding:0; display:flex; flex-direction:column; overflow:hidden;
@@ -1040,7 +1053,11 @@
   }
   .admin-console-tab:hover{ color:var(--text-hi); }
   .admin-console-tab.active{ color:var(--text-hi); background:rgba(var(--tint-rgb),0.05); border-color:var(--glass-brd); }
-  .admin-console-body{ flex:1; overflow-y:auto; padding:20px 18px 40px; max-width:640px; width:100%; margin:0 auto; }
+  /* Bottom padding sized to clear the floating nav pill (bottom:52px +
+     safe-area, plus its own ~50px height) so the last row/button in any
+     tab isn't hidden behind it — this is the part that actually needs the
+     clearance, not the sheet itself (see .admin-console-overlay above). */
+  .admin-console-body{ flex:1; overflow-y:auto; padding:20px 18px calc(120px + env(safe-area-inset-bottom, 0px)); max-width:640px; width:100%; margin:0 auto; }
   .admin-console-section h3{ margin-top:0; }
 
   /* ---------- Calls / Video full pages ---------- */
