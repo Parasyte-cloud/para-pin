@@ -251,18 +251,33 @@ async function getEmployee(storage, orgId, userId) {
   };
 }
 
-// Annual leave: 20/year, pro-rated by whole months remaining in the hire
-// year, full 20 every Jan 1 after (per spec). Sick leave: flat 10/year, no
+// Defaults match the original Phase 1 spec exactly (20 annual/10 sick), so
+// an org that's never touched this setting behaves identically to before it
+// existed — same "grandfathered" pattern as org.billingStatus/country.
+const DEFAULT_LEAVE_ENTITLEMENTS = { annual: 20, sick: 10 };
+
+async function getOrgLeaveEntitlements(storage, orgId) {
+  const org = await storage.get(`org:${orgId}`);
+  const annual = org && Number.isFinite(org.annualEntitlement) ? org.annualEntitlement : DEFAULT_LEAVE_ENTITLEMENTS.annual;
+  const sick = org && Number.isFinite(org.sickEntitlement) ? org.sickEntitlement : DEFAULT_LEAVE_ENTITLEMENTS.sick;
+  return { annual, sick };
+}
+
+// Annual leave: pro-rated by whole months remaining in the hire year, full
+// entitlement every Jan 1 after (per spec). Sick leave: flat per year, no
 // proration, resets every calendar year (tracked as "used year-to-date").
-// Carryover/caps are deliberately out of scope for Phase 1.
-function entitlementForYear(hireDate, type, year) {
+// Carryover/caps are deliberately out of scope for Phase 1. `entitlements`
+// is this org's own {annual, sick} policy (see getOrgLeaveEntitlements),
+// not a hardcoded constant — every caller already needs one storage read
+// for orgId anyway, so this doesn't add a real extra cost.
+function entitlementForYear(hireDate, type, year, entitlements) {
   const hireYear = new Date(hireDate).getUTCFullYear();
-  if (type === 'sick') return year < hireYear ? 0 : 10;
+  if (type === 'sick') return year < hireYear ? 0 : entitlements.sick;
   if (year < hireYear) return 0;
-  if (year > hireYear) return 20;
+  if (year > hireYear) return entitlements.annual;
   const hireMonth = new Date(hireDate).getUTCMonth(); // 0-11
   const monthsRemaining = 12 - hireMonth;
-  return Math.round(20 * monthsRemaining / 12);
+  return Math.round(entitlements.annual * monthsRemaining / 12);
 }
 
 // Ledger rows are the ONLY source of truth for usage/adjustments (nothing is
@@ -276,11 +291,28 @@ async function appendLeaveLedger(storage, orgId, userId, entry) {
   ledger.push({ id: crypto.randomUUID(), ts: Date.now(), ...entry });
   await storage.put(`leaveLedger:${orgId}:${userId}`, ledger);
 }
+
+// ---- Admin audit log ----
+// Same append-only ledger shape as leave/billing history, one list per org,
+// newest last. Capped rather than unbounded: this is "who changed what
+// recently" for a live admin console, not a permanent compliance archive
+// (that's what the data export in task #26 is for) — an org that's been
+// live for years shouldn't carry an ever-growing list into every future
+// read of it. `actor` is null for system/webhook-driven entries (Paystack
+// activating/deactivating billing isn't any one person's action).
+const AUDIT_LOG_MAX_ENTRIES = 500;
+async function appendAuditLog(storage, orgId, entry) {
+  const key = `auditLog:${orgId}`;
+  const log = (await storage.get(key)) || [];
+  log.push({ id: crypto.randomUUID(), ts: Date.now(), ...entry });
+  if (log.length > AUDIT_LOG_MAX_ENTRIES) log.splice(0, log.length - AUDIT_LOG_MAX_ENTRIES);
+  await storage.put(key, log);
+}
 // Annual leave doesn't reset, so its balance nets the WHOLE ledger; sick
 // leave resets every calendar year, so only this year's rows count.
-function computeLeaveBalance(ledger, type, hireDate, now = Date.now()) {
+function computeLeaveBalance(ledger, type, hireDate, entitlements, now = Date.now()) {
   const year = new Date(now).getUTCFullYear();
-  const entitlement = entitlementForYear(hireDate, type, year);
+  const entitlement = entitlementForYear(hireDate, type, year, entitlements);
   const relevant = ledger.filter((e) => e.type === type && (type === 'annual' || new Date(e.ts).getUTCFullYear() === year));
   const net = relevant.reduce((sum, e) => sum + e.delta, 0);
   return Math.round((entitlement + net) * 100) / 100;
@@ -1400,6 +1432,12 @@ export class Registry {
       // still find its way back to this workspace.
       if (org.paystackCustomerCode) await this.state.storage.put(`orgByCustomerCode:${org.paystackCustomerCode}`, orgId);
       if (org.paystackSubscriptionCode) await this.state.storage.put(`orgBySubscriptionCode:${org.paystackSubscriptionCode}`, orgId);
+      // actorId null: this is Paystack's webhook telling us a payment
+      // cleared, not any person in the app clicking anything.
+      await appendAuditLog(this.state.storage, orgId, {
+        actorId: null, actorName: 'Paystack', action: 'billing_activated',
+        details: payerEmail ? `Billing activated (${payerEmail})` : 'Billing activated',
+      });
       const admins = Array.isArray(org.admins) ? org.admins : [];
       const adminUserId = admins[0] || org.createdBy;
       let adminPinHash = null, adminDisplayName = null;
@@ -1424,6 +1462,10 @@ export class Registry {
       if (!org) return json({ error: 'not_found' }, 404);
       org.billingStatus = status === 'canceled' ? 'canceled' : 'past_due';
       await this.state.storage.put(`org:${orgId}`, org);
+      await appendAuditLog(this.state.storage, orgId, {
+        actorId: null, actorName: 'Paystack', action: 'billing_deactivated',
+        details: `Billing status changed to ${org.billingStatus}`,
+      });
       return json({ ok: true, orgId });
     }
 
@@ -1558,6 +1600,16 @@ export class Registry {
         org.emailDomain = normalizedDomain;
       }
       await this.state.storage.put(`org:${orgId}`, org);
+      const changedFields = [
+        name !== undefined && 'name', logoUrl !== undefined && 'logo', allowEmailAuth !== undefined && 'email sign-in',
+        country !== undefined && 'country', emailDomain !== undefined && 'email domain',
+      ].filter(Boolean);
+      if (changedFields.length) {
+        await appendAuditLog(this.state.storage, orgId, {
+          actorId: me.id, actorName: me.displayName || 'Someone', action: 'workspace_settings_changed',
+          details: `Updated: ${changedFields.join(', ')}`,
+        });
+      }
       return json({ org });
     }
 
@@ -1866,7 +1918,28 @@ export class Registry {
       const key = `orgPermissions:${orgId}:${targetUserId}`;
       const current = (await this.state.storage.get(key)) || {};
       await this.state.storage.put(key, { ...current, [permission]: !!granted });
+      const targetRec = await this.state.storage.get(`userById:${targetUserId}`);
+      await appendAuditLog(this.state.storage, orgId, {
+        actorId: me.id, actorName: me.displayName || 'Someone', action: granted ? 'permission_granted' : 'permission_revoked',
+        details: `${permission} ${granted ? 'granted to' : 'revoked from'} ${targetRec ? targetRec.displayName : 'someone'}`,
+      });
       return json({ ok: true, permissions: await getEffectiveOrgPermissions(this.state.storage, orgId, targetUserId) });
+    }
+
+    // Real-admin-only, deliberately isOrgAdmin rather than any delegable
+    // permission — seeing every change across billing/roles/HR in one feed
+    // is a different, higher-trust thing than being allowed to make any one
+    // of those changes yourself (someone with just manage_hr shouldn't
+    // thereby also see every workspace-settings/permission change). Newest
+    // first, capped at AUDIT_LOG_MAX_ENTRIES total (see appendAuditLog).
+    if (request.method === 'GET' && url.pathname === '/org/audit-log') {
+      const pinHash = url.searchParams.get('pinHash');
+      const orgId = url.searchParams.get('orgId');
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgAdmin(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+      const log = (await this.state.storage.get(`auditLog:${orgId}`)) || [];
+      return json({ entries: log.slice().reverse() });
     }
 
     // Cheap membership check for the outer worker to call before letting a
@@ -2023,6 +2096,17 @@ export class Registry {
       }
       employee.updatedAt = Date.now();
       await this.state.storage.put(`employee:${orgId}:${uid}`, employee);
+      // Only log HR acting on someone ELSE's record — every employee editing
+      // their own contact details would flood this with routine self-service
+      // noise that isn't what an admin reviewing "who changed HR data"
+      // actually wants to see.
+      if (!editingSelf) {
+        const targetRec = await this.state.storage.get(`userById:${uid}`);
+        await appendAuditLog(this.state.storage, orgId, {
+          actorId: me.id, actorName: me.displayName || 'Someone', action: 'hr_profile_edited',
+          details: `Edited ${targetRec ? targetRec.displayName : 'someone'}'s HR profile${job && job.current ? ' (recorded a job change)' : ''}`,
+        });
+      }
       return json({ employee });
     }
 
@@ -2061,10 +2145,12 @@ export class Registry {
 
       const myEmployee = await getEmployee(this.state.storage, orgId, me.id);
       const myLedger = await getLeaveLedger(this.state.storage, orgId, me.id);
+      const entitlements = await getOrgLeaveEntitlements(this.state.storage, orgId);
       const balances = {
-        annual: computeLeaveBalance(myLedger, 'annual', myEmployee.hireDate),
-        sick: computeLeaveBalance(myLedger, 'sick', myEmployee.hireDate),
+        annual: computeLeaveBalance(myLedger, 'annual', myEmployee.hireDate, entitlements),
+        sick: computeLeaveBalance(myLedger, 'sick', myEmployee.hireDate, entitlements),
       };
+      const isHrAdmin = await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_hr');
 
       const memberIds = (await this.state.storage.get(`orgMembers:${orgId}`)) || [];
       const now = Date.now();
@@ -2118,7 +2204,36 @@ export class Registry {
       }
       myUpcoming.sort((a, b) => (a.startDate < b.startDate ? -1 : 1));
 
-      return json({ balances, celebrations, whosOut, newHires, myUpcoming: myUpcoming.slice(0, 5) });
+      return json({ balances, celebrations, whosOut, newHires, myUpcoming: myUpcoming.slice(0, 5), isHrAdmin, entitlements });
+    }
+
+    // Time-off policy config: how many annual/sick days a year this org
+    // grants, replacing what used to be a flat 20/10 hardcoded for every
+    // workspace (see DEFAULT_LEAVE_ENTITLEMENTS, still the default here for
+    // anyone who's never touched this). manage_hr-gated rather than folded
+    // into /org/update's manage_workspace gate — this is HR policy, not
+    // workspace branding, and the only UI for it lives inside People & HR.
+    if (request.method === 'POST' && url.pathname === '/org/hr/entitlements') {
+      const { pinHash, orgId, annual, sick } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_hr'))) {
+        return json({ error: 'forbidden' }, 403);
+      }
+      const org = await this.state.storage.get(`org:${orgId}`);
+      if (!org) return json({ error: 'not_found' }, 404);
+      const annualNum = Number(annual);
+      const sickNum = Number(sick);
+      if (!Number.isFinite(annualNum) || annualNum < 0 || annualNum > 365) return json({ error: 'invalid_annual' }, 400);
+      if (!Number.isFinite(sickNum) || sickNum < 0 || sickNum > 365) return json({ error: 'invalid_sick' }, 400);
+      org.annualEntitlement = annualNum;
+      org.sickEntitlement = sickNum;
+      await this.state.storage.put(`org:${orgId}`, org);
+      await appendAuditLog(this.state.storage, orgId, {
+        actorId: me.id, actorName: me.displayName || 'Someone', action: 'leave_policy_changed',
+        details: `Annual leave set to ${annualNum}/yr, sick leave set to ${sickNum}/yr`,
+      });
+      return json({ ok: true, entitlements: { annual: annualNum, sick: sickNum } });
     }
 
     if (request.method === 'POST' && url.pathname === '/org/hr/leave/request') {
@@ -2135,7 +2250,8 @@ export class Registry {
 
       const employee = await getEmployee(this.state.storage, orgId, me.id);
       const ledger = await getLeaveLedger(this.state.storage, orgId, me.id);
-      const currentBalance = computeLeaveBalance(ledger, type, employee.hireDate);
+      const entitlements = await getOrgLeaveEntitlements(this.state.storage, orgId);
+      const currentBalance = computeLeaveBalance(ledger, type, employee.hireDate, entitlements);
       if (days > currentBalance) return json({ error: 'insufficient_balance', balance: currentBalance }, 400);
 
       const id = crypto.randomUUID();
@@ -2226,6 +2342,14 @@ export class Registry {
           type: reqRec.type, delta: -reqRec.days, kind: 'used',
           note: `${reqRec.startDate} to ${reqRec.endDate}${reqRec.halfDay ? ' (half day)' : ''}`,
           requestId: reqRec.id,
+        });
+      }
+
+      {
+        const requesterRec = await this.state.storage.get(`userById:${reqRec.userId}`);
+        await appendAuditLog(this.state.storage, orgId, {
+          actorId: me.id, actorName: me.displayName || 'Someone', action: `leave_${reqRec.status}`,
+          details: `${reqRec.status === 'approved' ? 'Approved' : 'Declined'} ${requesterRec ? requesterRec.displayName : 'someone'}'s ${reqRec.type} leave (${reqRec.startDate} to ${reqRec.endDate})`,
         });
       }
 
@@ -4671,6 +4795,23 @@ export default {
         return registryStub.fetch('https://internal/org/hr/leave/request', {
           method: 'POST',
           body: JSON.stringify({ pinHash, orgId: body.orgId, type: body.type, startDate: body.startDate, endDate: body.endDate, halfDay: !!body.halfDay, reason: body.reason }),
+        });
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/org/audit-log') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const orgId = url.searchParams.get('orgId') || '';
+        return registryStub.fetch(`https://internal/org/audit-log?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}`);
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/org/hr/entitlements') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/org/hr/entitlements', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, orgId: body.orgId, annual: body.annual, sick: body.sick }),
         });
       }
 

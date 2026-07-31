@@ -1045,6 +1045,24 @@
   .hr-approval-row{ padding:10px; border-radius:12px; background:rgba(var(--tint-rgb),0.05); border:1px solid var(--glass-brd); margin-bottom:8px; }
   .hr-approval-actions{ display:flex; gap:8px; margin-top:8px; }
 
+  /* ---- Org chart: a plain indented tree, not a canvas/SVG diagram ---- */
+  /* Kept deliberately simple (nested divs + a left border for the "tree
+     line", not absolutely-positioned boxes/connectors) — this file's had
+     several rounds of layout bugs this session from more elaborate
+     positioning math not surviving real mobile viewports, and a chart that
+     might be 5 or 500 people deep needs to just reflow/wrap/scroll like any
+     other list rather than needing a fixed canvas size computed up front. */
+  .org-chart-node{ margin-bottom:2px; }
+  .org-chart-row{
+    display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:12px; cursor:pointer;
+  }
+  .org-chart-row:hover{ background:rgba(var(--tint-rgb),0.05); }
+  .org-chart-row .avatar{ width:32px; height:32px; font-size:12px; flex-shrink:0; }
+  .org-chart-children{
+    margin-left:20px; padding-left:14px; border-left:1.5px solid var(--glass-brd);
+    margin-top:2px;
+  }
+
   /* Tap to switch which space (Personal or a real workspace) the chat list
      and new-chat/new-group actions operate in, see switchWorkspace(). */
   .workspace-bar{
@@ -1709,9 +1727,29 @@
         <div class="hint" id="workspaceInviteError" style="display:none;color:#ff6a6a;"></div>
       </div>
     </div>
-    <div class="modal-actions" style="margin-bottom:14px; flex-shrink:0;">
+    <div class="modal-actions" style="margin-bottom:14px; flex-shrink:0; flex-wrap:wrap;">
+      <div class="btn" id="workspaceOpenAuditLogBtn" style="display:none;">Audit Log</div>
       <div class="btn" id="workspaceOpenHrBtn">People & HR</div>
       <div class="btn" onclick="closeModal('workspaceMembersOverlay')">Close</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ ADMIN AUDIT LOG ============ -->
+<div class="overlay" id="auditLogOverlay">
+  <!-- max-height:100% not a fixed vh, same reasoning as workspaceMembersOverlay
+       above (see that comment) — a fixed vh fraction ignores .overlay's own
+       nav-clearance padding and can push this modal's own Close button off
+       whichever end of the screen has less room. -->
+  <div class="modal lg" style="max-height:100%; display:flex; flex-direction:column;">
+    <h3 style="flex-shrink:0;">Audit Log</h3>
+    <div class="hint" style="flex-shrink:0; margin-bottom:10px;">Workspace settings, role, and HR changes for admins to review. Billing changes from Paystack show up here too.</div>
+    <div style="overflow-y:auto; flex:1; min-height:0; margin:0 -22px; padding:0 22px;">
+      <div id="auditLogList"></div>
+      <div id="auditLogEmpty" class="hint" style="display:none;">Nothing logged yet.</div>
+    </div>
+    <div class="modal-actions" style="flex-shrink:0;">
+      <div class="btn" onclick="closeModal('auditLogOverlay')">Close</div>
     </div>
   </div>
 </div>
@@ -1726,6 +1764,7 @@
       <div class="admin-console-tab active" data-tab="home">Home</div>
       <div class="admin-console-tab" data-tab="profile">My Profile</div>
       <div class="admin-console-tab" data-tab="directory">People</div>
+      <div class="admin-console-tab" data-tab="orgchart">Org Chart</div>
       <div class="admin-console-tab" data-tab="calendar">Calendar</div>
     </div>
     <div class="admin-console-body">
@@ -1738,6 +1777,18 @@
         <div class="hr-balance-cards" id="hrBalanceCards"></div>
         <div class="btn primary" id="hrRequestLeaveBtn" style="margin:10px 0 20px;">Request Time Off</div>
         <div id="hrUpcomingLeave"></div>
+        <!-- manage_hr-only, hidden for everyone else (see loadHrHome). Was a
+             flat 20 annual/10 sick for every workspace, now each org sets
+             its own — see getOrgLeaveEntitlements in worker.js. -->
+        <div id="hrEntitlementsSection" style="display:none; margin:14px 0 20px; padding:12px; border-radius:14px; background:rgba(var(--tint-rgb),0.05); border:1px solid var(--glass-brd);">
+          <div class="hint" style="margin-bottom:8px;">Time off policy (days per year)</div>
+          <div class="hr-field-grid">
+            <label>Annual leave<input type="number" id="hrEntitlementAnnualInput" min="0" max="365" step="1"></label>
+            <label>Sick leave<input type="number" id="hrEntitlementSickInput" min="0" max="365" step="1"></label>
+          </div>
+          <div class="btn" id="hrEntitlementSaveBtn" style="margin-top:8px;">Save policy</div>
+          <div class="hint" id="hrEntitlementHint" style="display:none; margin-top:6px;"></div>
+        </div>
         <h3>Celebrations</h3>
         <div id="hrCelebrations" class="hint">Nothing coming up in the next 30 days.</div>
         <h3 style="margin-top:20px;">Who's Out</h3>
@@ -1776,6 +1827,10 @@
       <section class="admin-console-section" data-section="directory" style="display:none;">
         <input type="text" id="hrDirectorySearch" placeholder="Search people…" style="width:100%; margin-bottom:10px;">
         <div class="contact-pick" id="hrDirectoryList" style="max-height:none;"></div>
+      </section>
+      <section class="admin-console-section" data-section="orgchart" style="display:none;">
+        <div id="orgChartEmpty" class="hint" style="display:none;">No one's job info is filled in yet, add job titles/managers from People to build this out.</div>
+        <div id="orgChartTree"></div>
       </section>
       <section class="admin-console-section" data-section="calendar" style="display:none;">
         <div id="hrCalendarNoCountry" class="hint" style="display:none;">
@@ -3903,6 +3958,11 @@
     }
 
     document.getElementById('workspaceInviteSection').style.display = canManageMembers ? 'block' : 'none';
+    // True admins only, not manage_workspace/manage_hr grantees — seeing
+    // every change across billing/roles/HR is a different, higher-trust
+    // thing than being allowed to make any one of those changes yourself
+    // (server enforces the same isOrgAdmin gate, see /org/audit-log).
+    document.getElementById('workspaceOpenAuditLogBtn').style.display = (org.id && org.isAdmin) ? 'inline-flex' : 'none';
     // Branding (logo + rename) needs manage_workspace (admins always have
     // it), Personal isn't a real org (id: null) so it never gets this section.
     const brandSection = document.getElementById('workspaceBrandSection');
@@ -4110,6 +4170,7 @@
       });
       if (target === 'directory') loadHrDirectory();
       if (target === 'profile' && !document.getElementById('hrProfileBackRow').dataset.other) loadHrProfile(null);
+      if (target === 'orgchart') loadOrgChart();
       if (target === 'calendar') loadHrCalendar();
     });
   });
@@ -4118,6 +4179,51 @@
     if (!activeWorkspaceForMembers || !activeWorkspaceForMembers.id) return;
     openHrOverlay(activeWorkspaceForMembers);
   });
+
+  document.getElementById('workspaceOpenAuditLogBtn').addEventListener('click', async ()=>{
+    if (!activeWorkspaceForMembers || !activeWorkspaceForMembers.id) return;
+    closeModal('workspaceMembersOverlay');
+    openModal('auditLogOverlay');
+    await loadAuditLog(activeWorkspaceForMembers.id);
+  });
+
+  function auditLogActionLabel(action){
+    // Falls back to the raw action string for anything not listed, so a
+    // future action type added on the server still shows *something*
+    // readable here instead of silently rendering blank.
+    const labels = {
+      workspace_settings_changed: 'Workspace settings', permission_granted: 'Permission granted',
+      permission_revoked: 'Permission revoked', leave_policy_changed: 'Leave policy changed',
+      leave_approved: 'Leave approved', leave_declined: 'Leave declined',
+      hr_profile_edited: 'HR profile edited', billing_activated: 'Billing activated', billing_deactivated: 'Billing deactivated',
+    };
+    return labels[action] || action;
+  }
+
+  async function loadAuditLog(orgId){
+    const listEl = document.getElementById('auditLogList');
+    const emptyEl = document.getElementById('auditLogEmpty');
+    listEl.innerHTML = '<div class="hint">Loading…</div>';
+    emptyEl.style.display = 'none';
+    const r = await apiFetch(`/org/audit-log?orgId=${encodeURIComponent(orgId)}`);
+    if (!r.ok || !r.body || !Array.isArray(r.body.entries)){
+      listEl.innerHTML = '<div class="hint">Could not load the audit log. Try again.</div>';
+      return;
+    }
+    const entries = r.body.entries;
+    if (!entries.length){
+      listEl.innerHTML = '';
+      emptyEl.style.display = 'block';
+      return;
+    }
+    listEl.innerHTML = entries.map(e => `
+      <div class="hr-approval-row">
+        <div class="hr-widget-row-name">${escapeHtml(auditLogActionLabel(e.action))}</div>
+        <div class="hr-widget-row-sub">${escapeHtml(e.details || '')}</div>
+        <div class="hr-widget-row-sub" style="margin-top:2px;">${escapeHtml(e.actorName || 'System')} · ${new Date(e.ts).toLocaleString()}</div>
+      </div>
+    `).join('');
+  }
 
   function openHrOverlay(org){
     hrActiveOrg = org;
@@ -4209,12 +4315,21 @@
       cards.innerHTML = '<div class="hint">Could not load this. Try again.</div>';
       return;
     }
-    const { balances, myUpcoming, celebrations, whosOut, newHires } = homeRes.body;
+    const { balances, myUpcoming, celebrations, whosOut, newHires, isHrAdmin, entitlements } = homeRes.body;
 
     cards.innerHTML = `
       <div class="hr-balance-card"><div class="hr-balance-num">${balances.annual}</div><div class="hr-balance-label">Annual Leave available</div></div>
       <div class="hr-balance-card"><div class="hr-balance-num">${balances.sick}</div><div class="hr-balance-label">Sick Leave available</div></div>
     `;
+
+    const entitlementsSection = document.getElementById('hrEntitlementsSection');
+    if (isHrAdmin && entitlements){
+      entitlementsSection.style.display = 'block';
+      document.getElementById('hrEntitlementAnnualInput').value = entitlements.annual;
+      document.getElementById('hrEntitlementSickInput').value = entitlements.sick;
+    } else {
+      entitlementsSection.style.display = 'none';
+    }
 
     upcomingEl.innerHTML = myUpcoming.length
       ? myUpcoming.map(u => `<div class="hr-widget-row"><div><div class="hr-widget-row-name">${u.type === 'sick' ? 'Sick' : 'Annual'} leave</div><div class="hr-widget-row-sub">${escapeHtml(u.startDate)} → ${escapeHtml(u.endDate)}</div></div></div>`).join('')
@@ -4455,6 +4570,25 @@
     loadHrProfile(hrProfileTargetUserId);
   });
 
+  document.getElementById('hrEntitlementSaveBtn').addEventListener('click', async ()=>{
+    const hintEl = document.getElementById('hrEntitlementHint');
+    const annual = document.getElementById('hrEntitlementAnnualInput').value;
+    const sick = document.getElementById('hrEntitlementSickInput').value;
+    const r = await apiFetch('/org/hr/entitlements', {
+      method: 'POST',
+      body: JSON.stringify({ orgId: hrActiveOrg.id, annual, sick }),
+    });
+    hintEl.style.display = 'block';
+    if (r.ok){
+      hintEl.textContent = 'Saved. Balances below reflect the new policy right away.';
+      hintEl.style.color = '#7ee08a';
+      loadHrHome();
+    } else {
+      hintEl.textContent = "Couldn't save. Check both are between 0 and 365.";
+      hintEl.style.color = '#ff6a6a';
+    }
+  });
+
   async function loadHrDirectory(){
     if (!hrActiveOrg) return;
     const list = document.getElementById('hrDirectoryList');
@@ -4500,6 +4634,79 @@
     });
   }
   document.getElementById('hrDirectorySearch').addEventListener('input', renderHrDirectoryList);
+
+  // ---- Org chart: reporting-line tree built purely from managerId, no
+  // separate endpoint needed since /org/hr/directory already returns it
+  // (see the Manager picker added to the Job editor above for how that
+  // field actually gets set). ----
+  async function loadOrgChart(){
+    if (!hrActiveOrg) return;
+    if (!hrDirectoryCache.length) await loadHrDirectory();
+    const treeEl = document.getElementById('orgChartTree');
+    const emptyEl = document.getElementById('orgChartEmpty');
+    const members = hrDirectoryCache;
+    if (!members.length){ treeEl.innerHTML = ''; emptyEl.style.display = 'block'; return; }
+    emptyEl.style.display = 'none';
+
+    const byId = new Map(members.map(m => [m.userId, m]));
+    const childrenOf = new Map();
+    const roots = [];
+    members.forEach(m=>{
+      const mgrId = m.managerId && byId.has(m.managerId) && m.managerId !== m.userId ? m.managerId : null;
+      if (mgrId){
+        if (!childrenOf.has(mgrId)) childrenOf.set(mgrId, []);
+        childrenOf.get(mgrId).push(m);
+      } else {
+        roots.push(m);
+      }
+    });
+    childrenOf.forEach(kids => kids.sort((a,b)=>(a.displayName||'').localeCompare(b.displayName||'')));
+
+    function renderNode(m, ancestry){
+      const wrapper = document.createElement('div');
+      wrapper.className = 'org-chart-node';
+      const row = document.createElement('div');
+      row.className = 'org-chart-row';
+      const av = document.createElement('div');
+      av.className = 'avatar';
+      renderAvatar(av, m.displayName || 'PArA PIN user', false, m.avatarUrl);
+      const info = document.createElement('div');
+      info.innerHTML = `<div class="hr-widget-row-name">${escapeHtml(m.displayName || 'PArA PIN user')}</div><div class="hr-widget-row-sub">${escapeHtml(m.jobTitle || 'No title set')}${m.department ? ' · ' + escapeHtml(m.department) : ''}</div>`;
+      row.appendChild(av); row.appendChild(info);
+      row.addEventListener('click', ()=>{
+        document.querySelectorAll('#hrOverlay .admin-console-tab').forEach(t=>t.classList.remove('active'));
+        document.querySelector('#hrOverlay .admin-console-tab[data-tab="profile"]').classList.add('active');
+        document.querySelectorAll('#hrOverlay .admin-console-section').forEach(sec=>{
+          sec.style.display = sec.dataset.section === 'profile' ? 'block' : 'none';
+        });
+        loadHrProfile(m.userId);
+      });
+      wrapper.appendChild(row);
+      // ancestry guards against a manager cycle (two people set as each
+      // other's manager, possible if two different admins assign them in
+      // either order): a node already on this branch's own path back to the
+      // root never recurses into itself again, it just renders as a leaf
+      // instead of hanging the tab in an infinite loop.
+      const kids = (childrenOf.get(m.userId) || []).filter(k => !ancestry.has(k.userId));
+      if (kids.length){
+        const childWrap = document.createElement('div');
+        childWrap.className = 'org-chart-children';
+        const nextAncestry = new Set(ancestry); nextAncestry.add(m.userId);
+        kids.forEach(k => childWrap.appendChild(renderNode(k, nextAncestry)));
+        wrapper.appendChild(childWrap);
+      }
+      return wrapper;
+    }
+
+    treeEl.innerHTML = '';
+    // roots.length === 0 only happens if literally every member is part of
+    // a manager cycle with no true top (e.g. two admins each set the other
+    // as their own manager) — falls back to a flat list rather than
+    // rendering nothing, since there's no single correct place to start.
+    const topLevel = roots.length ? roots : members;
+    topLevel.slice().sort((a,b)=>(a.displayName||'').localeCompare(b.displayName||''))
+      .forEach(m => treeEl.appendChild(renderNode(m, new Set())));
+  }
 
   // ---- Request Time Off ----
   document.getElementById('hrRequestLeaveBtn').addEventListener('click', ()=>{
