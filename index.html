@@ -249,6 +249,20 @@
   @media (min-width: 761px){
     .nav-wrap{ left:18px; width:340px; bottom:18px; }
   }
+  /* web.parasyte.cloud v1: same two-pane layout every desktop-width browser
+     already gets (see .sidebar/.conv/.shell above, this was never a
+     mobile-only view), just a bit roomier so it reads as a real desktop app
+     rather than a phone screen stretched wide. Gated on both the hostname
+     flag AND min-width so a narrow browser window on this same host still
+     falls back to the normal mobile layout instead of clipping. Deliberately
+     NOT touching .nav-wrap/.nav-pill positioning here — that pill has broken
+     three separate times already this project from exactly this kind of
+     change, a proper persistent left-rail nav for this host is a follow-up,
+     not bundled into this pass. */
+  @media (min-width: 900px){
+    html.desktop-app .sidebar{ width:380px; }
+    html.desktop-app .shell{ gap:22px; padding:22px; }
+  }
   /* The one moving piece that makes this read as "liquid" rather than a
      static bar, a single glass capsule that slides and resizes itself to
      whichever tab is active (see moveNavActivePill), instead of every tab
@@ -1135,6 +1149,13 @@
 </head>
 <body>
 <script>document.documentElement.dataset.theme = localStorage.getItem('parapin_theme') === 'light' ? 'light' : 'dark';</script>
+<!-- Same app, same backend, same device-approval auth — web.parasyte.cloud is
+     just this file served at a second hostname (added as a Custom Domain on
+     the same Worker in the Cloudflare dashboard, no routing code needed).
+     This flag is the one hook everything desktop-specific hangs off of, set
+     synchronously pre-paint like the theme flag above it so there's no flash
+     of mobile-styled layout before it applies. -->
+<script>if (location.hostname === 'web.parasyte.cloud') document.documentElement.classList.add('desktop-app');</script>
 
 <div id="bgfx"></div>
 <div class="grain"></div>
