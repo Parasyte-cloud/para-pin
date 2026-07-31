@@ -131,6 +131,67 @@ async function isOrgAdmin(storage, orgId, userId) {
   return appAdmins.includes(userId);
 }
 
+// ================= Workspace RBAC (per-feature permission grants) =================
+// A workspace admin already has every capability; these are narrower grants
+// an admin can hand to (or withhold from) a specific, otherwise-ordinary
+// member without making them a full admin. Deliberately a flat list of
+// feature toggles rather than named roles: no role CRUD to build, no "which
+// role am I" indirection, an admin just checks boxes per person in the
+// Members modal.
+//
+// manage_workspace - rename/rebrand the workspace, email-auth domain settings (/org/update)
+// manage_members   - invite existing users and onboard new ones (/org/invite, /org/roster)
+// manage_hr        - edit others' HR profile/job records, decide leave requests, view others' leave history
+// start_meetings   - start/join the unlimited workspace Meeting Room (recording + AI assistant)
+const ORG_PERMISSIONS = ['manage_workspace', 'manage_members', 'manage_hr', 'start_meetings'];
+
+// Whether an ordinary (non-admin) member has each permission before any
+// explicit admin override. manage_* default OFF, they were always
+// admin-only, this system only ever ADDS capability for them. start_meetings
+// defaults ON: every workspace member could already start/join a meeting
+// before this system existed, introducing per-feature toggles shouldn't
+// silently strip that from everyone who isn't individually re-granted, an
+// admin who wants to restrict it now has a way to (explicitly turn it off
+// per person), but nobody loses access just because this feature shipped.
+const ORG_PERMISSION_DEFAULTS = {
+  manage_workspace: false,
+  manage_members: false,
+  manage_hr: false,
+  start_meetings: true,
+};
+
+// Raw admin-set overrides for one member, `{ [permission]: true|false }`.
+// Only permissions someone has ever explicitly toggled appear here, anything
+// absent falls back to ORG_PERMISSION_DEFAULTS.
+async function getOrgPermissionOverrides(storage, orgId, userId) {
+  return (await storage.get(`orgPermissions:${orgId}:${userId}`)) || {};
+}
+
+// The full effective list (defaults + overrides applied) a non-admin member
+// currently has, used to seed the admin toggle UI and the member's own
+// self-check endpoint.
+async function getEffectiveOrgPermissions(storage, orgId, userId) {
+  const overrides = await getOrgPermissionOverrides(storage, orgId, userId);
+  return ORG_PERMISSIONS.filter((p) =>
+    Object.prototype.hasOwnProperty.call(overrides, p) ? overrides[p] : ORG_PERMISSION_DEFAULTS[p]
+  );
+}
+
+// The one check every gated route below should use instead of isOrgAdmin
+// directly: an admin passes unconditionally, anyone else falls through to
+// their effective grant (explicit override, or the feature's default).
+// Never used to gate /org/permissions/set itself, that stays isOrgAdmin-only
+// on purpose, otherwise a member holding one delegable permission could hand
+// out others (including to themselves), which defeats the point of a narrow
+// grant.
+async function hasOrgPermission(storage, orgId, userId, permission) {
+  if (await isOrgAdmin(storage, orgId, userId)) return true;
+  const overrides = await getOrgPermissionOverrides(storage, orgId, userId);
+  return Object.prototype.hasOwnProperty.call(overrides, permission)
+    ? !!overrides[permission]
+    : !!ORG_PERMISSION_DEFAULTS[permission];
+}
+
 // ==================== Arrivo People (HR module, Phase 1) ====================
 // Workspace-scoped like everything else org-related: Ride Arrivo's employee
 // data never crosses into another workspace or into Personal. Org admins
@@ -1059,7 +1120,7 @@ export class Registry {
       const { pinHash, orgId, name, logoUrl, allowEmailAuth, emailDomain } = await request.json();
       const me = await this.state.storage.get(`user:${pinHash}`);
       if (!me) return json({ error: 'not_registered' }, 401);
-      if (!orgId || !(await isOrgAdmin(this.state.storage, orgId, me.id))) {
+      if (!orgId || !(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_workspace'))) {
         return json({ error: 'forbidden' }, 403);
       }
       const org = await this.state.storage.get(`org:${orgId}`);
@@ -1273,7 +1334,7 @@ export class Registry {
       const { pinHash, orgId, targetPinHash } = await request.json();
       const me = await this.state.storage.get(`user:${pinHash}`);
       if (!me) return json({ error: 'not_registered' }, 401);
-      if (!orgId || !(await isOrgAdmin(this.state.storage, orgId, me.id))) {
+      if (!orgId || !(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_members'))) {
         return json({ error: 'forbidden' }, 403);
       }
 
@@ -1298,13 +1359,59 @@ export class Registry {
       if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) {
         return json({ error: 'forbidden' }, 403);
       }
+      // Only an admin needs (or gets) each member's permission grants, this
+      // is what feeds the toggle UI, a plain member doesn't need to see
+      // anyone else's grants just to render a member list.
+      const requesterIsAdmin = await isOrgAdmin(this.state.storage, orgId, me.id);
+      const org = requesterIsAdmin ? await this.state.storage.get(`org:${orgId}`) : null;
+      const orgAdmins = (org && org.admins) || [];
       const memberIds = (await this.state.storage.get(`orgMembers:${orgId}`)) || [];
       const members = [];
       for (const id of memberIds) {
         const rec = await this.state.storage.get(`userById:${id}`);
-        if (rec) members.push(rec);
+        if (!rec) continue;
+        if (requesterIsAdmin) {
+          members.push({ ...rec, isAdmin: orgAdmins.includes(id), permissions: await getEffectiveOrgPermissions(this.state.storage, orgId, id) });
+        } else {
+          members.push(rec);
+        }
       }
       return json({ members });
+    }
+
+    // The caller's own effective permissions in this workspace, used
+    // client-side to decide which admin-flavored UI (invite, HR editing,
+    // workspace settings, starting the unlimited meeting) to even show.
+    // Server-side routes never trust this, they each re-check
+    // hasOrgPermission for themselves, this is purely a UI convenience.
+    if (request.method === 'GET' && url.pathname === '/org/permissions') {
+      const pinHash = url.searchParams.get('pinHash');
+      const orgId = url.searchParams.get('orgId');
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+      const isAdmin = await isOrgAdmin(this.state.storage, orgId, me.id);
+      const permissions = isAdmin ? ORG_PERMISSIONS.slice() : await getEffectiveOrgPermissions(this.state.storage, orgId, me.id);
+      return json({ isAdmin, permissions });
+    }
+
+    // Admin-only: grant or revoke one specific permission for one member.
+    // Deliberately isOrgAdmin, not hasOrgPermission, a member holding a
+    // delegable permission still can't hand out permissions themselves
+    // (including to themselves), only a real admin controls the matrix.
+    if (request.method === 'POST' && url.pathname === '/org/permissions/set') {
+      const { pinHash, orgId, targetUserId, permission, granted } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgAdmin(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+      if (!ORG_PERMISSIONS.includes(permission)) return json({ error: 'unknown_permission' }, 400);
+      if (!targetUserId || !(await isOrgMember(this.state.storage, orgId, targetUserId))) {
+        return json({ error: 'not_a_member' }, 400);
+      }
+      const key = `orgPermissions:${orgId}:${targetUserId}`;
+      const current = (await this.state.storage.get(key)) || {};
+      await this.state.storage.put(key, { ...current, [permission]: !!granted });
+      return json({ ok: true, permissions: await getEffectiveOrgPermissions(this.state.storage, orgId, targetUserId) });
     }
 
     // Cheap membership check for the outer worker to call before letting a
@@ -1315,9 +1422,16 @@ export class Registry {
     if (request.method === 'GET' && url.pathname === '/org-member-check') {
       const pinHash = url.searchParams.get('pinHash');
       const orgId = url.searchParams.get('orgId');
+      const permission = url.searchParams.get('permission') || null;
       const me = await this.state.storage.get(`user:${pinHash}`);
       if (!me || !orgId) return json({ ok: false });
-      return json({ ok: await isOrgMember(this.state.storage, orgId, me.id) });
+      // With a `permission` param this checks a specific delegable grant
+      // (admins always pass), otherwise it's the plain "are they in this
+      // workspace at all" check other callers already relied on.
+      const ok = permission
+        ? await hasOrgPermission(this.state.storage, orgId, me.id, permission)
+        : await isOrgMember(this.state.storage, orgId, me.id);
+      return json({ ok });
     }
 
     if (request.method === 'POST' && url.pathname === '/org/leave') {
@@ -1335,7 +1449,7 @@ export class Registry {
       const { pinHash, orgId, name, department, email, force } = await request.json();
       const me = await this.state.storage.get(`user:${pinHash}`);
       if (!me) return json({ error: 'not_registered' }, 401);
-      if (!orgId || !(await isOrgAdmin(this.state.storage, orgId, me.id))) {
+      if (!orgId || !(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_members'))) {
         return json({ error: 'forbidden' }, 403);
       }
       if (!name || !name.trim()) return json({ error: 'missing_name' }, 400);
@@ -1396,7 +1510,7 @@ export class Registry {
       if (!me) return json({ error: 'not_registered' }, 401);
       if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
       const viewingSelf = !targetUserId || targetUserId === me.id;
-      const isAdmin = await isOrgAdmin(this.state.storage, orgId, me.id);
+      const isAdmin = await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_hr');
       // Anyone in the org can look someone up via the People directory (that's
       // the whole point of it), but a plain colleague only ever gets the
       // "public" fields the directory/org-chart are meant to show, not the
@@ -1425,7 +1539,7 @@ export class Registry {
       const me = await this.state.storage.get(`user:${pinHash}`);
       if (!me) return json({ error: 'not_registered' }, 401);
       if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
-      const isAdmin = await isOrgAdmin(this.state.storage, orgId, me.id);
+      const isAdmin = await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_hr');
       const uid = targetUserId || me.id;
       const editingSelf = uid === me.id;
       if (!editingSelf && !isAdmin) return json({ error: 'forbidden' }, 403);
@@ -1601,7 +1715,7 @@ export class Registry {
       const me = await this.state.storage.get(`user:${pinHash}`);
       if (!me) return json({ error: 'not_registered' }, 401);
       if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
-      const isAdmin = await isOrgAdmin(this.state.storage, orgId, me.id);
+      const isAdmin = await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_hr');
       const ids = (await this.state.storage.get(`leaveRequestIds:${orgId}`)) || [];
       const out = [];
       for (const rid of ids) {
@@ -1630,7 +1744,7 @@ export class Registry {
       if (!reqRec) return json({ error: 'not_found' }, 404);
       if (reqRec.status !== 'pending') return json({ error: 'already_decided' }, 400);
 
-      const isAdmin = await isOrgAdmin(this.state.storage, orgId, me.id);
+      const isAdmin = await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_hr');
       let allowed = isAdmin;
       if (!allowed) {
         const requesterEmployee = await getEmployee(this.state.storage, orgId, reqRec.userId);
@@ -1674,7 +1788,7 @@ export class Registry {
       if (!me) return json({ error: 'not_registered' }, 401);
       if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
       const uid = targetUserId || me.id;
-      if (uid !== me.id && !(await isOrgAdmin(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+      if (uid !== me.id && !(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_hr'))) return json({ error: 'forbidden' }, 403);
 
       const employee = await getEmployee(this.state.storage, orgId, uid);
       const ledger = (await getLeaveLedger(this.state.storage, orgId, uid)).slice().sort((a, b) => a.ts - b.ts);
@@ -2792,13 +2906,18 @@ export class MeetingRoom {
       const userId = url.searchParams.get('userId') || null;
       const name = url.searchParams.get('name') || 'Someone';
       const avatarUrl = url.searchParams.get('avatarUrl') || null;
+      // Server-verified (by the outer worker, never client-supplied) orgId
+      // for this specific join, relayed straight back below so the client's
+      // Record/AI UI reacts to what actually got verified, not its own
+      // guess at connect time.
+      const verifiedOrgId = url.searchParams.get('verifiedOrgId') || null;
       const me = { userId, name, avatarUrl, sfuSessionId: null, tracks: new Map() };
       this.sessions.set(server, me);
 
       // Bring the new joiner up to speed on who's already here (including
       // their published tracks), then tell everyone else about the new face.
       try {
-        server.send(JSON.stringify({ type: 'roster', participants: this.roster().filter((p) => p.userId !== userId) }));
+        server.send(JSON.stringify({ type: 'roster', participants: this.roster().filter((p) => p.userId !== userId), verifiedOrgId }));
       } catch (e) {}
       this.broadcast(JSON.stringify({ type: 'participant-joined', userId, name, avatarUrl }), server);
 
@@ -2984,7 +3103,10 @@ export default {
         // account calling this endpoint directly (skipping the UI entirely)
         // should get turned away exactly like one that used the button.
         if (!body.orgId) return json({ error: 'workspace_required' }, 403);
-        const memberRes = await registryStub.fetch(`https://internal/org-member-check?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(body.orgId)}`);
+        // Same specific grant the unlimited meeting itself needed to start
+        // (start_meetings), not just plain membership, recording/AI is part
+        // of that same bundle, not a separately-reachable capability.
+        const memberRes = await registryStub.fetch(`https://internal/org-member-check?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(body.orgId)}&permission=start_meetings`);
         const memberCheck = await memberRes.json();
         if (!memberCheck.ok) return json({ error: 'workspace_required' }, 403);
 
@@ -3425,7 +3547,11 @@ export default {
         const claimedOrgId = url.searchParams.get('orgId') || null;
         let verifiedOrgId = null;
         if (claimedOrgId) {
-          const memberRes = await registryStub.fetch(`https://internal/org-member-check?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(claimedOrgId)}`);
+          // Being a workspace member alone isn't enough anymore, unlimited
+          // meetings are a delegable permission (start_meetings), admins get
+          // it automatically (see hasOrgPermission), an ordinary member only
+          // has it if explicitly granted one.
+          const memberRes = await registryStub.fetch(`https://internal/org-member-check?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(claimedOrgId)}&permission=start_meetings`);
           const memberCheck = await memberRes.json();
           if (memberCheck.ok) verifiedOrgId = claimedOrgId;
         }
@@ -3439,7 +3565,12 @@ export default {
         roomUrl.searchParams.set('name', who.displayName || 'Someone');
         if (who.avatarUrl) roomUrl.searchParams.set('avatarUrl', who.avatarUrl);
         roomUrl.searchParams.set('cap', String(cap));
-        roomUrl.searchParams.set('workspace', verifiedOrgId ? '1' : '0');
+        // The client's own guess at join time (did it think it was in a
+        // workspace) is never trusted for showing Record/AI, only this,
+        // the DO relays it straight back in the initial roster message so
+        // the UI reacts to what the server actually verified, not what the
+        // client assumed before the round trip even happened.
+        if (verifiedOrgId) roomUrl.searchParams.set('verifiedOrgId', verifiedOrgId);
         return roomStub.fetch(new Request(roomUrl.toString(), request));
       }
 
@@ -3637,6 +3768,25 @@ export default {
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
         const orgId = url.searchParams.get('orgId') || '';
         return registryStub.fetch(`https://internal/org/members?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}`);
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/org/permissions') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const orgId = url.searchParams.get('orgId') || '';
+        return registryStub.fetch(`https://internal/org/permissions?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}`);
+      }
+
+      // Admin-only toggle, see the Registry handler for why this stays
+      // isOrgAdmin-gated there rather than delegable like the rest.
+      if (request.method === 'POST' && url.pathname === '/api/org/permissions/set') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/org/permissions/set', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, orgId: body.orgId, targetUserId: body.targetUserId, permission: body.permission, granted: !!body.granted }),
+        });
       }
 
       // Org-admin-only: rename the workspace and/or set its logo (uploaded

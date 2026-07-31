@@ -3247,16 +3247,42 @@
   });
 
   let activeWorkspaceForMembers = null;
+  let myWorkspacePermissions = []; // effective permissions the CALLER has in activeWorkspaceForMembers, refreshed each time the modal opens
+
+  // Keep this list and the labels below in sync with ORG_PERMISSIONS in
+  // worker.js, order here is just display order in the toggle UI.
+  const ORG_PERMISSIONS_CLIENT = ['manage_workspace', 'manage_members', 'manage_hr', 'start_meetings'];
+  const ORG_PERMISSION_LABELS = {
+    manage_workspace: 'Manage workspace settings',
+    manage_members: 'Invite & onboard members',
+    manage_hr: 'Manage HR (profiles, time off)',
+    start_meetings: 'Start unlimited meetings',
+  };
 
   async function openWorkspaceMembers(org){
     activeWorkspaceForMembers = org;
+    myWorkspacePermissions = [];
     document.getElementById('workspaceMembersTitle').textContent = org.name + ' members';
-    document.getElementById('workspaceInviteSection').style.display = org.isAdmin ? 'block' : 'none';
-    // Branding (logo + rename) is org-admin-only, same gate as invites,
-    // Personal isn't a real org (id: null) so it never gets this section.
+
+    // A non-admin can be individually granted manage_workspace/manage_members
+    // now, not just true org admins, fetch the caller's own effective grants
+    // so the invite/brand sections show up for them too when applicable.
+    let canManageMembers = org.isAdmin, canManageWorkspace = org.isAdmin;
+    if (org.id && !org.isAdmin){
+      const permRes = await apiFetch(`/org/permissions?orgId=${encodeURIComponent(org.id)}`);
+      if (permRes.ok && permRes.body){
+        myWorkspacePermissions = permRes.body.permissions || [];
+        canManageMembers = myWorkspacePermissions.includes('manage_members');
+        canManageWorkspace = myWorkspacePermissions.includes('manage_workspace');
+      }
+    }
+
+    document.getElementById('workspaceInviteSection').style.display = canManageMembers ? 'block' : 'none';
+    // Branding (logo + rename) needs manage_workspace (admins always have
+    // it), Personal isn't a real org (id: null) so it never gets this section.
     const brandSection = document.getElementById('workspaceBrandSection');
-    brandSection.style.display = (org.id && org.isAdmin) ? 'block' : 'none';
-    if (org.id && org.isAdmin){
+    brandSection.style.display = (org.id && canManageWorkspace) ? 'block' : 'none';
+    if (org.id && canManageWorkspace){
       renderAvatar(document.getElementById('workspaceBrandAvatar'), org.name, false, org.logoUrl);
       document.getElementById('workspaceBrandNameInput').value = org.name;
       document.getElementById('workspaceBrandHint').textContent = 'Tap the logo to change it. Rename, then Save.';
@@ -3284,15 +3310,45 @@
     r.body.members.forEach(m=>{
       const row = document.createElement('div');
       row.className = 'pick-row';
+      row.style.flexWrap = 'wrap';
       const av = document.createElement('div');
       av.className = 'avatar';
       av.style.width = '32px'; av.style.height = '32px'; av.style.fontSize = '12px';
       renderAvatar(av, m.displayName || 'PArA PIN user', false, m.avatarUrl);
       const nm = document.createElement('div');
-      nm.textContent = m.displayName || 'PArA PIN user';
+      nm.textContent = (m.displayName || 'PArA PIN user') + (m.isAdmin ? ' · Admin' : '');
       row.appendChild(av);
       row.appendChild(nm);
       list.appendChild(row);
+
+      // Permission toggles: only a true org admin sees these (the server
+      // only sent `permissions`/`isAdmin` on each member in the first place
+      // if the requester is an admin, see /org/members), and never for
+      // another admin, they already have everything unconditionally.
+      if (org.isAdmin && !m.isAdmin){
+        const permsRow = document.createElement('div');
+        permsRow.style.cssText = 'width:100%; display:flex; flex-wrap:wrap; gap:6px 14px; padding:2px 0 10px 42px;';
+        ORG_PERMISSIONS_CLIENT.forEach(perm=>{
+          const label = document.createElement('label');
+          label.style.cssText = 'display:flex; align-items:center; gap:5px; font-size:11.5px; color:var(--text-mid); cursor:pointer;';
+          const cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.checked = (m.permissions || []).includes(perm);
+          cb.addEventListener('change', async ()=>{
+            cb.disabled = true;
+            const res = await apiFetch('/org/permissions/set', {
+              method: 'POST',
+              body: JSON.stringify({ orgId: org.id, targetUserId: m.id, permission: perm, granted: cb.checked }),
+            });
+            cb.disabled = false;
+            if (!res.ok){ cb.checked = !cb.checked; showSessionBanner("Couldn't update that permission. Try again."); }
+          });
+          label.appendChild(cb);
+          label.appendChild(document.createTextNode(ORG_PERMISSION_LABELS[perm] || perm));
+          permsRow.appendChild(label);
+        });
+        list.appendChild(permsRow);
+      }
     });
   }
 
@@ -3301,7 +3357,8 @@
   // whatever /api/media/<uuid> URL comes back.
   let workspaceLogoFileInput = null;
   document.getElementById('workspaceBrandAvatar').addEventListener('click', ()=>{
-    if (!activeWorkspaceForMembers || !activeWorkspaceForMembers.isAdmin) return;
+    if (!activeWorkspaceForMembers) return;
+    if (!activeWorkspaceForMembers.isAdmin && !myWorkspacePermissions.includes('manage_workspace')) return;
     if (!workspaceLogoFileInput){
       workspaceLogoFileInput = document.createElement('input');
       workspaceLogoFileInput.type = 'file';
@@ -5423,6 +5480,14 @@
 
   function meetingHandleWsMessage(data){
     if (data.type === 'roster'){
+      // Authoritative: only now do we know for sure whether this join was
+      // actually granted unlimited/workspace status, not just what we
+      // guessed client-side before the round trip. Reconciling here (rather
+      // than trusting meetingOrgId as set at join time) is what keeps the
+      // Record button from showing for someone who THOUGHT they had
+      // start_meetings but the server didn't actually grant it.
+      meetingOrgId = data.verifiedOrgId || null;
+      document.getElementById('meetingRecordBtn').style.display = meetingOrgId ? 'flex' : 'none';
       (data.participants || []).forEach(p=>{
         if (p.userId === myUserId) return;
         meetingParticipants[p.userId] = { name: p.name, avatarUrl: p.avatarUrl };
