@@ -687,13 +687,18 @@
   .reply-quote-text{ font-size:12px; color:var(--text-mid); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:block; }
   .bubble-row.jump-highlight .bubble{ animation: jumpFlash 1.2s ease; }
   @keyframes jumpFlash{ 0%{ box-shadow:0 0 0 2px var(--ice); } 100%{ box-shadow:0 0 0 0 transparent; } }
-  .msg-reply-btn{
-    position:absolute; top:4px; cursor:pointer; font-size:12px;
-    color:var(--text-low); width:17px; height:17px; display:flex; align-items:center; justify-content:center;
+  /* Swipe-right-to-reply (replaces the old dedicated reply button): the row
+     itself slides right under the finger and a reply icon fades in to its
+     left, once past the threshold letting go commits the reply. See
+     wireSwipeToReply(). */
+  .bubble-row{ position:relative; touch-action:pan-y; transition:transform .18s ease; }
+  .bubble-row.reply-swipe-dragging{ transition:none; }
+  .reply-swipe-icon{
+    position:absolute; top:50%; left:-26px; transform:translateY(-50%) scale(.4);
+    font-size:15px; color:var(--text-low); opacity:0; pointer-events:none;
+    transition:opacity .15s ease, transform .15s ease, color .15s ease;
   }
-  .msg-reply-btn.pos-left{ left:6px; }
-  .msg-reply-btn.pos-right{ right:6px; }
-  .msg-reply-btn:hover{ color:var(--ice); }
+  .bubble-row.reply-swipe-ready .reply-swipe-icon{ opacity:1; transform:translateY(-50%) scale(1); color:var(--ice); }
 
   .attach-preview img{ width:40px; height:40px; object-fit:cover; border-radius:8px; }
   .attach-preview-icon{ width:40px; height:40px; border-radius:8px; background:rgba(var(--tint-rgb),0.08); display:flex; align-items:center; justify-content:center; font-size:20px; flex-shrink:0; }
@@ -906,7 +911,15 @@
   .modal-actions{ display:flex; justify-content:flex-end; gap:10px; }
 
   /* ---------- admin console (full dedicated screen, not a small modal) ---------- */
-  .admin-console-overlay{ background:var(--bg-1); align-items:stretch; justify-content:stretch; }
+  /* Used to force an opaque var(--bg-1) here, which fully covered #bgfx's
+     ambient blobs the instant this opened, that left .modal.admin-console's
+     own .lg blur with nothing but a flat color behind it to sample, so it
+     rendered dull/flat instead of frosted, the opposite of every other
+     surface in the app (sidebar, conv panel, nav) is that inconsistency the
+     "pages that aren't liquid glass" complaint was about. Going transparent
+     here lets the same ambient wash + .lg blur read through, uniform with
+     the rest of the app. */
+  .admin-console-overlay{ background:transparent; align-items:stretch; justify-content:stretch; }
   .modal.admin-console{
     width:100%; max-width:100%; height:100%; max-height:100%; border-radius:0;
     padding:0; display:flex; flex-direction:column; overflow:hidden;
@@ -1090,7 +1103,17 @@
           <span class="avatar" id="workspaceBarLogo" style="width:20px; height:20px; font-size:9px; flex-shrink:0; display:none;"></span>
           <span id="workspaceBarLabel" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">Personal</span>
         </span>
-        <span class="workspace-bar-chevron">▾</span>
+        <span style="display:flex; align-items:center; gap:6px; flex-shrink:0;">
+          <!-- Meeting Room used to be its own bottom-nav tab, but it's a
+               workspace-only feature (unlimited size, recording, AI
+               summaries), so it now lives here instead, next to whichever
+               workspace it actually belongs to, and only shows up once
+               that workspace is the active one. Personal chats keep their
+               own lighter capped group call, started from that chat's
+               header. -->
+          <span class="icon-btn" id="workspaceMeetingRoomBtn" title="Meeting Room" style="display:none;">👥</span>
+          <span class="workspace-bar-chevron">▾</span>
+        </span>
       </div>
       <div id="sessionBanner" style="display:none;margin:0 16px 10px;padding:10px 12px;border-radius:12px;background:rgba(255,80,80,0.08);border:1px solid rgba(255,80,80,0.25);font-size:12px;color:#ff9a9a;">
         <span id="sessionBannerText">Couldn't reach the PArA PIN server.</span>
@@ -1229,10 +1252,6 @@
         <div class="nav-tab-icon">💬</div>
         <span>Chats</span>
         <div class="nav-tab-badge" id="navChatsBadge" style="display:none;"></div>
-      </div>
-      <div class="nav-tab" data-nav-tab="meetingroom">
-        <div class="nav-tab-icon">👥</div>
-        <span>Meeting Room</span>
       </div>
       <div class="nav-tab" data-nav-tab="settings">
         <div class="nav-tab-icon">⚙️</div>
@@ -2152,6 +2171,12 @@
   let convSubOverride = null; // transient "X is typing..." swap-in for the active chat
   let editingMessageId = null;
   let openReactPickerFor = null;
+  // Which chat's messages are currently the ones sitting in the DOM, so
+  // renderConv() can tell "genuinely just opened this chat" (always jump to
+  // the newest message) apart from "same chat, a background event just
+  // rebuilt the list under me" (only jump if already near the bottom). See
+  // wasNearBottom below, this pairs with it.
+  let lastRenderedChatId = null;
   // Reactions stay hidden under a message until it's long-pressed (or
   // right-clicked), same idea as iMessage tapbacks, keeps a busy thread from
   // turning into a wall of pill rows. Membership here is what's currently
@@ -3335,6 +3360,9 @@
     } else {
       logoEl.style.display = 'none';
     }
+    // Meeting Room only exists for a real workspace, not Personal, so its
+    // entry point here only shows up once one is actually active.
+    document.getElementById('workspaceMeetingRoomBtn').style.display = (org && org.id) ? 'flex' : 'none';
   }
 
   function renderWorkspaceList(){
@@ -3383,6 +3411,10 @@
   document.getElementById('workspaceBar').addEventListener('click', ()=>{
     renderWorkspaceList();
     openModal('workspacesOverlay');
+  });
+  document.getElementById('workspaceMeetingRoomBtn').addEventListener('click', (e)=>{
+    e.stopPropagation();
+    openMeetingRoomOverlay();
   });
 
   document.getElementById('createWorkspaceBtn').addEventListener('click', ()=>{
@@ -4003,6 +4035,7 @@
       activeConv.style.display = 'none';
       appEl.classList.remove('show-chat');
       stopPresencePolling();
+      lastRenderedChatId = null;
       return;
     }
     const name = chatDisplayName(chat);
@@ -4048,6 +4081,20 @@
         }
       }
     }
+
+    // renderConv() gets called from ~35+ places (incoming messages, typing,
+    // presence, reactions, read receipts, key resolution, etc.), not just
+    // from opening a chat, and it rebuilds the whole message list every
+    // time. Forcing a scroll-to-bottom unconditionally on every one of those
+    // meant scrolling up to select/copy older text got yanked back down the
+    // instant any unrelated background event fired a re-render. Now it only
+    // jumps to the newest message when the chat was just opened, or the
+    // person was already sitting near the bottom (i.e. actually would want
+    // to follow new activity), otherwise their scroll position is left alone.
+    const isFreshChatOpen = lastRenderedChatId !== chat.id;
+    const wasNearBottom = isFreshChatOpen ||
+      (messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight) < 120;
+    lastRenderedChatId = chat.id;
 
     messagesEl.innerHTML = '';
     const msgs = messagesByChat[chat.id] || [];
@@ -4170,13 +4217,6 @@
           delBtn.dataset.id = m.id;
           actions.appendChild(delBtn);
         }
-        const replyBtn = document.createElement('div');
-        replyBtn.className = 'msg-action-btn msg-reply-btn ' + (isMe ? 'pos-left' : 'pos-right');
-        replyBtn.title = 'Reply';
-        replyBtn.textContent = '↩';
-        replyBtn.dataset.id = m.id;
-        bubble.appendChild(replyBtn);
-
         if (m.text && !m.protected){
           const copyBtn = document.createElement('div');
           copyBtn.className = 'msg-action-btn msg-copy';
@@ -4194,6 +4234,11 @@
         reactBtn.textContent = '☺';
         reactBtn.dataset.id = m.id;
         row.appendChild(reactBtn);
+
+        const swipeIcon = document.createElement('div');
+        swipeIcon.className = 'reply-swipe-icon';
+        swipeIcon.textContent = '↩';
+        row.appendChild(swipeIcon);
       }
 
       row.appendChild(bubble);
@@ -4244,7 +4289,7 @@
         }
       }
     });
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    if (wasNearBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
   }
 
   async function toggleReaction(messageId, emoji){
@@ -4315,6 +4360,63 @@
     }, true);
   })();
 
+  // ---------- swipe right on a message to reply ----------
+  // Replaces the old dedicated reply button. Rightward-only and gated
+  // behind real horizontal distance so vertical scrolling of the message
+  // list can't trip it. Once a swipe actually commits to a reply, the
+  // touchend is stopped from bubbling up to the document-level swipe-to-
+  // go-back listener (see goBack() below), otherwise the same gesture that
+  // just opened the reply composer would also close the conversation out
+  // from under the person.
+  (function wireSwipeToReply(){
+    const isOtherInteractive = (target) => target.closest(
+      '.msg-action-btn, .msg-react-btn, .react-option, .reaction-pill, .voice-note-play, .attachment-dl-btn, .reply-quote'
+    );
+    const THRESHOLD = 56;
+    const MAX_DRAG = 72;
+    let row = null, sx = 0, sy = 0, active = false, armed = false;
+    messagesEl.addEventListener('touchstart', (e)=>{
+      const r = e.target.closest('.bubble-row');
+      if (!r || isOtherInteractive(e.target)){ row = null; active = false; return; }
+      row = r; sx = e.touches[0].clientX; sy = e.touches[0].clientY; active = true; armed = false;
+      row.classList.add('reply-swipe-dragging');
+    }, { passive:true });
+    messagesEl.addEventListener('touchmove', (e)=>{
+      if (!active || !row) return;
+      const t = e.touches[0];
+      const dx = t.clientX - sx, dy = t.clientY - sy;
+      if (Math.abs(dy) > Math.abs(dx) || dx <= 0){
+        row.style.transform = '';
+        if (armed){ armed = false; row.classList.remove('reply-swipe-ready'); }
+        return;
+      }
+      const clamped = Math.min(dx, MAX_DRAG);
+      row.style.transform = `translateX(${clamped}px)`;
+      const nowArmed = clamped >= THRESHOLD;
+      if (nowArmed !== armed){
+        armed = nowArmed;
+        row.classList.toggle('reply-swipe-ready', armed);
+        if (armed && navigator.vibrate) navigator.vibrate(10);
+      }
+    }, { passive:true });
+    const release = (e)=>{
+      if (!row) return;
+      const r = row, wasArmed = armed;
+      row = null; active = false; armed = false;
+      r.classList.remove('reply-swipe-dragging', 'reply-swipe-ready');
+      r.style.transform = '';
+      if (wasArmed){
+        if (e) e.stopPropagation();
+        const chatId = activeChatId;
+        const msgs = chatId && messagesByChat[chatId];
+        const m = msgs && msgs.find(mm => mm.id === r.dataset.msgId);
+        if (m && !m.deleted) startReply(m);
+      }
+    };
+    messagesEl.addEventListener('touchend', release);
+    messagesEl.addEventListener('touchcancel', ()=> release(null));
+  })();
+
   messagesEl.addEventListener('click', async (e)=>{
     const dlBtn = e.target.closest('.attachment-dl-btn');
     if (dlBtn){
@@ -4373,15 +4475,6 @@
       msgInput.focus();
       sendBtn.textContent = '✓';
       sendBtn.title = 'Save edit';
-      return;
-    }
-
-    const replyBtn = e.target.closest('.msg-reply-btn');
-    if (replyBtn){
-      const msgs = messagesByChat[chatId];
-      const m = msgs && msgs.find(mm => mm.id === replyBtn.dataset.id);
-      if (!m || m.deleted) return;
-      startReply(m);
       return;
     }
 
@@ -6881,21 +6974,9 @@
         openCallsOverlay();
         return;
       }
-      if (name === 'meetingroom'){
-        // Meeting Room (unlimited size, recording, AI summaries) is a paid
-        // workspace feature now. Personal accounts get a lighter capped
-        // group call instead, started from inside a group chat itself
-        // (see the call button in the chat header), not from this tab.
-        if (!activeOrgId){
-          document.getElementById('comingSoonTitle').textContent = 'Workspace feature';
-          document.getElementById('comingSoonIcon').textContent = '🏢';
-          document.getElementById('comingSoonBody').textContent = 'Meeting Room (unlimited participants, recording, and AI meeting summaries) is available inside a workspace. For a personal chat, start a group call from that chat\'s header instead, up to 6 people.';
-          openModal('comingSoonOverlay');
-          return;
-        }
-        openMeetingRoomOverlay();
-        return;
-      }
+      // Meeting Room no longer lives on this nav (it's a workspace-only
+      // feature now), it opens from workspaceMeetingRoomBtn in the sidebar
+      // instead, next to whichever workspace is active. See updateWorkspaceBar().
       const copy = COMING_SOON_COPY[name];
       if (copy){
         document.getElementById('comingSoonTitle').textContent = copy.title;
