@@ -152,6 +152,14 @@ self.addEventListener('push', (event) => {
   let data = {};
   try { data = event.data ? event.data.json() : {}; } catch (e) {}
   const title = data.title || 'PArA PIN';
+  // A real chat message (chatId set) has an in-app equivalent already
+  // (index.html's notify-socket handler dings/decrypts/previews it live
+  // while a tab is open); a call or meeting invite (chatId null) doesn't,
+  // and is time-sensitive enough that it should always alert even with a
+  // visible tab (see worker.js's /call-signal comment: a backgrounded tab's
+  // JS timers/audio can get throttled even with a live socket, so this OS
+  // push is the only thing that reliably still rings).
+  const isChatMessage = !!data.chatId;
   const options = {
     body: data.body || '',
     icon: '/icon-192.png',
@@ -167,7 +175,24 @@ self.addEventListener('push', (event) => {
     data: { chatId: data.chatId || null },
   };
   event.waitUntil((async () => {
-    await self.registration.showNotification(title, options);
+    const clientList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    const hasVisible = clientList.some((c) => c.visibilityState === 'visible');
+
+    // Previously this showed a banner for EVERY push unconditionally, even
+    // with a tab open and visible, while the badge below correctly stayed
+    // put in that same situation, that mismatch (banner fires, badge
+    // doesn't) is exactly what looked "inconsistent" between the two. Now a
+    // plain chat message only bangs out its own OS banner when nothing
+    // visible is around to show it in-app already, or the user explicitly
+    // opted into always-on banners (see settingsAlwaysBannerInput in
+    // index.html, synced here via syncAlwaysBannerToServiceWorker), the
+    // exact same rule the in-app path already applies to itself.
+    const alwaysBanner = await kvGet('alwaysBanner', false);
+    const shouldShowBanner = !isChatMessage || !hasVisible || alwaysBanner;
+    if (shouldShowBanner) {
+      await self.registration.showNotification(title, options);
+    }
+
     // A page that's actually open and visible keeps its own accurate badge
     // count already (see index.html's updateTitleBadge) and will stomp on
     // whatever we set here the moment it handles the message itself, so
@@ -176,8 +201,6 @@ self.addEventListener('push', (event) => {
     // the real unread total from the server and posts it here (see the
     // 'set-badge-count' message handler below), so this counter self-corrects
     // rather than drifting further with every push while away.
-    const clientList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-    const hasVisible = clientList.some((c) => c.visibilityState === 'visible');
     if (!hasVisible) {
       const next = (await getBadgeCount()) + 1;
       await setBadgeCount(next);

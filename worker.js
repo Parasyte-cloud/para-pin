@@ -2396,20 +2396,45 @@ export class UserChannel {
       // for next-open), a call is time-sensitive enough to accept the
       // occasional double-alert on a device that has the app open and
       // focused too. Same retry/cleanup logic /notify already uses for pushSubs.
-      if (data && data.type === 'call-signal' && data.signal && (data.signal.kind === 'offer' || data.signal.kind === 'meeting-invite')) {
+      //
+      // A missed call also gets pushed here, since a PWA has no way to add
+      // an entry to the phone's actual native call log, this is the closest
+      // real substitute: a genuine OS notification even if this device
+      // never had the app open at all while it rang. The tricky part is
+      // that the *same* 'end'/'no-answer' signal shape gets sent by
+      // whichever side's own 30s ring timeout fires first (see
+      // startOutgoingCall/declineCall in index.html), so `direction` (that
+      // OTHER user's role in the call) is what disambiguates: only push
+      // here when the sender's direction was 'outgoing', i.e. the caller
+      // gave up waiting, which means the recipient of THIS signal (this DO)
+      // is the callee who genuinely missed it. If the callee's own timeout
+      // fired first instead, direction is 'incoming' and no push happens,
+      // the caller doesn't need a "missed call" alert about their own call.
+      const isMissedCall = data && data.signal && data.signal.kind === 'end'
+        && data.signal.reason === 'no-answer' && data.signal.direction === 'outgoing';
+      if (data && data.type === 'call-signal' && data.signal && (data.signal.kind === 'offer' || data.signal.kind === 'meeting-invite' || isMissedCall)) {
         const subs = (await this.state.storage.get('pushSubs')) || [];
         if (subs.length) {
-          const pushPayload = data.signal.kind === 'meeting-invite'
-            ? {
-                title: 'PArA PIN',
-                body: `${data.signal.fromName || 'Someone'} started a meeting${data.signal.meetingName ? `: ${data.signal.meetingName}` : ''}`,
-                chatId: null,
-              }
-            : {
-                title: 'PArA PIN',
-                body: `Incoming call from ${data.signal.fromName || 'Someone'}`,
-                chatId: null,
-              };
+          let pushPayload;
+          if (data.signal.kind === 'meeting-invite') {
+            pushPayload = {
+              title: 'PArA PIN',
+              body: `${data.signal.fromName || 'Someone'} started a meeting${data.signal.meetingName ? `: ${data.signal.meetingName}` : ''}`,
+              chatId: null,
+            };
+          } else if (isMissedCall) {
+            pushPayload = {
+              title: 'PArA PIN',
+              body: `Missed ${data.signal.video ? 'video ' : ''}call from ${data.signal.fromName || 'Someone'}`,
+              chatId: null,
+            };
+          } else {
+            pushPayload = {
+              title: 'PArA PIN',
+              body: `Incoming call from ${data.signal.fromName || 'Someone'}`,
+              chatId: null,
+            };
+          }
           const stillValid = [];
           for (const sub of subs) {
             try {
