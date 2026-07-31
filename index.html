@@ -908,6 +908,44 @@
   .admin-console-tab.active{ color:var(--text-hi); background:rgba(var(--tint-rgb),0.05); border-color:var(--glass-brd); }
   .admin-console-body{ flex:1; overflow-y:auto; padding:20px 18px 40px; max-width:640px; width:100%; margin:0 auto; }
   .admin-console-section h3{ margin-top:0; }
+
+  /* ---------- Calls / Video full pages ---------- */
+  .admin-console-head.callpage-head{ flex-direction:column; align-items:flex-start; justify-content:flex-start; gap:2px; text-align:left; }
+  .callpage-tagline{ font-size:12px; color:var(--text-low); }
+  .quick-action-row{ display:flex; gap:10px; padding:2px 0 16px; }
+  .quick-action-tile{
+    flex:1; display:flex; flex-direction:column; align-items:center; gap:6px;
+    padding:14px 8px; border-radius:16px; background:rgba(var(--tint-rgb),0.05);
+    border:1px solid var(--glass-brd); cursor:pointer; transition:background .15s ease, border-color .15s ease;
+  }
+  .quick-action-tile:hover{ background:rgba(var(--tint-rgb),0.1); }
+  .quick-action-tile.active{ background:rgba(0,212,255,0.15); border-color:rgba(0,212,255,0.4); }
+  .quick-action-tile.active .quick-action-tile-icon{ background:rgba(0,212,255,0.3); color:var(--text-hi); }
+  .quick-action-tile-icon{
+    width:38px; height:38px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+    background:rgba(0,212,255,0.15); color:var(--ice); font-size:16px; flex-shrink:0;
+  }
+  .quick-action-tile span{ font-size:11px; color:var(--text-mid); text-align:center; }
+  .call-log-row{
+    display:flex; align-items:center; gap:12px; padding:10px 6px; border-radius:14px; cursor:pointer;
+    transition:background .15s ease;
+  }
+  .call-log-row:hover{ background:rgba(var(--tint-rgb),0.05); }
+  .call-log-row .avatar{ width:46px; height:46px; font-size:16px; flex-shrink:0; }
+  .call-log-row-info{ flex:1; min-width:0; }
+  .call-log-row-name{ font-size:14.5px; font-weight:600; color:var(--text-hi); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .call-log-row-sub{ font-size:12px; color:var(--text-low); margin-top:2px; }
+  .call-log-row-sub.missed{ color:#ff6a6a; }
+  .call-log-row-action{
+    width:34px; height:34px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+    background:rgba(var(--tint-rgb),0.06); border:1px solid var(--glass-brd); color:var(--ice); flex-shrink:0;
+  }
+  .call-log-star{
+    width:26px; height:26px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+    flex-shrink:0; cursor:pointer; color:var(--text-low); font-size:15px;
+  }
+  .call-log-star.active{ color:#ffb020; }
+
   .settings-row{
     display:flex; align-items:center; justify-content:space-between; gap:12px;
     padding:12px 16px; border-radius:999px; background:rgba(var(--tint-rgb),0.03);
@@ -1724,12 +1762,32 @@
 <!-- ============ CALLS ============ -->
 <div class="overlay admin-console-overlay" id="callsOverlay">
   <div class="modal lg admin-console">
-    <div class="admin-console-head">
+    <div class="admin-console-head callpage-head">
       <h2>Calls</h2>
+      <div class="callpage-tagline">Voice calls with your PArA PIN contacts.</div>
     </div>
     <div class="admin-console-body" style="max-width:640px;">
+      <div class="search"><input type="text" id="callsSearchInput" placeholder="Search contacts"></div>
+      <div class="quick-action-row">
+        <div class="quick-action-tile" id="callsQuickCallTile">
+          <div class="quick-action-tile-icon">📞</div>
+          <span>Call</span>
+        </div>
+        <div class="quick-action-tile" id="callsQuickGroupTile">
+          <div class="quick-action-tile-icon">👥</div>
+          <span>New group call</span>
+        </div>
+        <div class="quick-action-tile" id="callsQuickFavTile">
+          <div class="quick-action-tile-icon">★</div>
+          <span>Favorites</span>
+        </div>
+      </div>
+      <div class="admin-console-tabs" id="callsFilterTabs">
+        <div class="admin-console-tab active" data-filter="all">Recent</div>
+        <div class="admin-console-tab" data-filter="missed">Missed</div>
+        <div class="admin-console-tab" data-filter="outgoing">Outgoing</div>
+      </div>
       <section class="admin-console-section">
-        <h3>Recent</h3>
         <div id="callsRecentList"></div>
       </section>
       <section class="admin-console-section">
@@ -1744,12 +1802,32 @@
 <!-- ============ VIDEO (contacts + recent video calls, mirrors Calls) ============ -->
 <div class="overlay admin-console-overlay" id="videoOverlay">
   <div class="modal lg admin-console">
-    <div class="admin-console-head">
+    <div class="admin-console-head callpage-head">
       <h2>Video</h2>
+      <div class="callpage-tagline">Video calls with your PArA PIN contacts.</div>
     </div>
     <div class="admin-console-body" style="max-width:640px;">
+      <div class="search"><input type="text" id="videoSearchInput" placeholder="Search contacts"></div>
+      <div class="quick-action-row">
+        <div class="quick-action-tile" id="videoQuickCallTile">
+          <div class="quick-action-tile-icon"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="14" height="12" rx="2.5"/><path d="M16 10.2 22 7v10l-6-3.2"/></svg></div>
+          <span>Call</span>
+        </div>
+        <div class="quick-action-tile" id="videoQuickGroupTile">
+          <div class="quick-action-tile-icon">👥</div>
+          <span>New group call</span>
+        </div>
+        <div class="quick-action-tile" id="videoQuickFavTile">
+          <div class="quick-action-tile-icon">★</div>
+          <span>Favorites</span>
+        </div>
+      </div>
+      <div class="admin-console-tabs" id="videoFilterTabs">
+        <div class="admin-console-tab active" data-filter="all">Recent</div>
+        <div class="admin-console-tab" data-filter="missed">Missed</div>
+        <div class="admin-console-tab" data-filter="outgoing">Outgoing</div>
+      </div>
       <section class="admin-console-section">
-        <h3>Recent</h3>
         <div id="videoRecentList"></div>
       </section>
       <section class="admin-console-section">
@@ -4992,8 +5070,8 @@
     activeCallDirection = null; callStartedAt = null; pendingRemoteOfferSdp = null; pendingIceCandidates = [];
     callMuted = false; callHasVideo = false; cameraOff = false;
     renderCallUi();
-    if (callsOverlayOpen) loadCallLogInto('callsRecentList', false);
-    if (videoOverlayOpen) loadCallLogInto('videoRecentList', true);
+    if (callsOverlayOpen) loadCallLogInto('callsRecentList', false, callsPageFilter);
+    if (videoOverlayOpen) loadCallLogInto('videoRecentList', true, videoPageFilter);
   }
 
   function renderCallUi(){
@@ -5209,45 +5287,99 @@
     joinMeetingRoom(newMeetingId, peerName ? `Call with ${peerName}` : 'Group call', invitees, { orgId });
   });
 
+  // Client-only "favorite contact" list, doesn't need to sync across
+  // devices, so a plain localStorage array (same pattern as the theme/
+  // wallpaper/read-receipts prefs elsewhere) is enough, no server model
+  // needed for it.
+  const FAV_CONTACTS_KEY = 'parapin_fav_contacts';
+  function getFavContacts(){
+    try { return new Set(JSON.parse(localStorage.getItem(FAV_CONTACTS_KEY) || '[]')); }
+    catch(e){ return new Set(); }
+  }
+  function toggleFavContact(userId){
+    const s = getFavContacts();
+    if (s.has(userId)) s.delete(userId); else s.add(userId);
+    try { localStorage.setItem(FAV_CONTACTS_KEY, JSON.stringify([...s])); } catch(e){}
+    return s;
+  }
+
+  let callsPageFilter = 'all'; // 'all' | 'missed' | 'outgoing'
+  let videoPageFilter = 'all';
+  let callsFavOnly = false;
+  let videoFavOnly = false;
+
   async function openCallsOverlay(){
     callsOverlayOpen = true;
     unseenMissedCalls = 0;
     document.getElementById('navCallsBadge').style.display = 'none';
     openModal('callsOverlay');
     await ensureNamesLoaded();
-    renderContactListInto('callsContactList', false);
-    await loadCallLogInto('callsRecentList', false);
+    renderCallsContactList();
+    await loadCallLogInto('callsRecentList', false, callsPageFilter);
   }
 
   async function openVideoOverlay(){
     videoOverlayOpen = true;
     openModal('videoOverlay');
     await ensureNamesLoaded();
-    renderContactListInto('videoContactList', true);
-    await loadCallLogInto('videoRecentList', true);
+    renderVideoContactList();
+    await loadCallLogInto('videoRecentList', true, videoPageFilter);
+  }
+
+  function renderCallsContactList(){
+    renderContactListInto('callsContactList', false, {
+      search: document.getElementById('callsSearchInput').value,
+      favOnly: callsFavOnly,
+    });
+  }
+  function renderVideoContactList(){
+    renderContactListInto('videoContactList', true, {
+      search: document.getElementById('videoSearchInput').value,
+      favOnly: videoFavOnly,
+    });
   }
 
   // Shared by both the Calls tab and the Video tab, same DM contact list
   // either way, the only difference is which kind of call a tap starts.
-  function renderContactListInto(containerId, videoMode){
+  function renderContactListInto(containerId, videoMode, opts){
+    opts = opts || {};
+    const search = (opts.search || '').trim().toLowerCase();
+    const favOnly = !!opts.favOnly;
+    const favs = getFavContacts();
     const list = document.getElementById(containerId);
     list.innerHTML = '';
     // Scoped to the active workspace, same reasoning as the chat list and
     // Meeting Room picker: a workspace is a separate space, calling someone
     // from a different one shouldn't be offered from inside this one.
     const dmChats = sessionChats.filter(c => c.type === 'dm' && (c.orgId || null) === (activeOrgId || null));
-    if (dmChats.length === 0){
-      list.innerHTML = '<div class="hint">No contacts yet. Start a DM first.</div>';
+    let others = dmChats.map(c => otherMemberId(c)).filter(Boolean);
+    if (favOnly) others = others.filter(id => favs.has(id));
+    if (search) others = others.filter(id => (userNameCache[id] || '').toLowerCase().includes(search));
+    if (others.length === 0){
+      list.innerHTML = `<div class="hint">${
+        favOnly ? 'No favorites yet, tap the star on a contact to add one.' :
+        search ? 'No contacts match your search.' :
+        'No contacts yet. Start a DM first.'
+      }</div>`;
       return;
     }
-    dmChats.forEach(c=>{
-      const otherId = otherMemberId(c);
-      if (!otherId) return;
+    others.forEach(otherId=>{
       const name = userNameCache[otherId] || 'PArA PIN user';
       const row = document.createElement('div');
-      row.className = 'settings-row settings-row-action';
-      row.innerHTML = `<span style="display:flex;align-items:center;gap:10px;min-width:0;"><span class="avatar" style="width:32px;height:32px;font-size:12px;flex-shrink:0;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(name)}</span></span><span>${videoMode ? ICON_VIDEO_ON : '📞'}</span>`;
+      row.className = 'call-log-row';
+      row.innerHTML = `<div class="avatar"></div>`
+        + `<div class="call-log-row-info">`
+        + `<div class="call-log-row-name">${escapeHtml(name)}</div>`
+        + `<div class="call-log-row-sub">Tap to ${videoMode ? 'video call' : 'call'}</div>`
+        + `</div>`
+        + `<div class="call-log-star${favs.has(otherId) ? ' active' : ''}" title="Favorite">★</div>`
+        + `<div class="call-log-row-action">${videoMode ? ICON_VIDEO_ON : '📞'}</div>`;
       renderAvatar(row.querySelector('.avatar'), name, false, userAvatarCache[otherId]);
+      row.querySelector('.call-log-star').addEventListener('click', (e)=>{
+        e.stopPropagation();
+        toggleFavContact(otherId);
+        if (videoMode) renderVideoContactList(); else renderCallsContactList();
+      });
       row.addEventListener('click', ()=>{
         closeModal(videoMode ? 'videoOverlay' : 'callsOverlay');
         callsOverlayOpen = false; videoOverlayOpen = false;
@@ -5260,21 +5392,35 @@
 
   // Same call log for both tabs, Calls shows the voice entries, Video shows
   // the video entries, filtered client-side by the isVideo flag each entry
-  // was logged with.
-  async function loadCallLogInto(listElId, videoMode){
+  // was logged with. `filter` further narrows to missed/outgoing, matching
+  // the Recent/Missed/Outgoing tabs above the list.
+  async function loadCallLogInto(listElId, videoMode, filter){
+    filter = filter || 'all';
     const listEl = document.getElementById(listElId);
     const r = await apiFetch('/calls/log');
     if (!r.ok || !r.body || !r.body.log){ listEl.innerHTML = '<div class="hint">No recent calls yet.</div>'; return; }
-    const entries = r.body.log.filter(e => !!e.isVideo === !!videoMode);
-    if (entries.length === 0){ listEl.innerHTML = '<div class="hint">No recent calls yet.</div>'; return; }
+    let entries = r.body.log.filter(e => !!e.isVideo === !!videoMode);
+    if (filter === 'missed') entries = entries.filter(e => e.outcome === 'missed' || e.outcome === 'declined');
+    else if (filter === 'outgoing') entries = entries.filter(e => e.direction === 'outgoing');
+    if (entries.length === 0){
+      listEl.innerHTML = `<div class="hint">${
+        filter === 'missed' ? 'No missed calls.' : filter === 'outgoing' ? 'No outgoing calls yet.' : 'No recent calls yet.'
+      }</div>`;
+      return;
+    }
     listEl.innerHTML = '';
     entries.forEach(entry=>{
       const row = document.createElement('div');
-      row.className = 'settings-row settings-row-action';
+      row.className = 'call-log-row';
       const dirIcon = entry.direction === 'outgoing' ? '↗' : '↙';
       const outcomeLabel = entry.outcome === 'missed' ? 'Missed' : entry.outcome === 'declined' ? 'Declined' : entry.outcome === 'busy' ? 'Busy' : fmtDuration(entry.durationSec);
-      const color = (entry.outcome === 'missed' || entry.outcome === 'declined') ? 'color:#ff6a6a;' : 'color:var(--text-low);';
-      row.innerHTML = `<span style="display:flex;align-items:center;gap:10px;min-width:0;"><span class="avatar" style="width:32px;height:32px;font-size:12px;flex-shrink:0;"></span><span style="overflow:hidden;"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(entry.withName)}</div><div class="hint" style="margin:0;${color}">${dirIcon} ${outcomeLabel} · ${fmtDay(entry.ts)}</div></span></span><span>${videoMode ? ICON_VIDEO_ON : '📞'}</span>`;
+      const missed = entry.outcome === 'missed' || entry.outcome === 'declined';
+      row.innerHTML = `<div class="avatar"></div>`
+        + `<div class="call-log-row-info">`
+        + `<div class="call-log-row-name">${escapeHtml(entry.withName)}</div>`
+        + `<div class="call-log-row-sub${missed ? ' missed' : ''}">${dirIcon} ${outcomeLabel} · ${fmtDay(entry.ts)}</div>`
+        + `</div>`
+        + `<div class="call-log-row-action">${videoMode ? ICON_VIDEO_ON : '📞'}</div>`;
       renderAvatar(row.querySelector('.avatar'), entry.withName, false, entry.withAvatarUrl);
       row.addEventListener('click', ()=>{
         closeModal(videoMode ? 'videoOverlay' : 'callsOverlay');
@@ -5285,6 +5431,51 @@
       listEl.appendChild(row);
     });
   }
+
+  document.getElementById('callsSearchInput').addEventListener('input', renderCallsContactList);
+  document.getElementById('videoSearchInput').addEventListener('input', renderVideoContactList);
+
+  document.querySelectorAll('#callsFilterTabs .admin-console-tab').forEach(tab=>{
+    tab.addEventListener('click', ()=>{
+      document.querySelectorAll('#callsFilterTabs .admin-console-tab').forEach(t=>t.classList.toggle('active', t === tab));
+      callsPageFilter = tab.dataset.filter;
+      loadCallLogInto('callsRecentList', false, callsPageFilter);
+    });
+  });
+  document.querySelectorAll('#videoFilterTabs .admin-console-tab').forEach(tab=>{
+    tab.addEventListener('click', ()=>{
+      document.querySelectorAll('#videoFilterTabs .admin-console-tab').forEach(t=>t.classList.toggle('active', t === tab));
+      videoPageFilter = tab.dataset.filter;
+      loadCallLogInto('videoRecentList', true, videoPageFilter);
+    });
+  });
+
+  document.getElementById('callsQuickCallTile').addEventListener('click', ()=> document.getElementById('callsSearchInput').focus());
+  document.getElementById('videoQuickCallTile').addEventListener('click', ()=> document.getElementById('videoSearchInput').focus());
+
+  // A group call needs an actual personal group chat behind it (everyone in
+  // that chat gets invited automatically, see startPersonalGroupCall), so
+  // this jumps straight into the existing "New group" flow rather than
+  // duplicating a second contact-picker just for this entry point.
+  document.getElementById('callsQuickGroupTile').addEventListener('click', ()=>{
+    closeModal('callsOverlay'); callsOverlayOpen = false;
+    document.getElementById('newGroupBtn').click();
+  });
+  document.getElementById('videoQuickGroupTile').addEventListener('click', ()=>{
+    closeModal('videoOverlay'); videoOverlayOpen = false;
+    document.getElementById('newGroupBtn').click();
+  });
+
+  document.getElementById('callsQuickFavTile').addEventListener('click', ()=>{
+    callsFavOnly = !callsFavOnly;
+    document.getElementById('callsQuickFavTile').classList.toggle('active', callsFavOnly);
+    renderCallsContactList();
+  });
+  document.getElementById('videoQuickFavTile').addEventListener('click', ()=>{
+    videoFavOnly = !videoFavOnly;
+    document.getElementById('videoQuickFavTile').classList.toggle('active', videoFavOnly);
+    renderVideoContactList();
+  });
 
   // ================= MEETING ROOM (group calls, Cloudflare Realtime SFU) =================
   // Cloudflare's SFU only knows Sessions (~one per participant's
