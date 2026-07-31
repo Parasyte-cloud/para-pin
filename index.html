@@ -891,8 +891,15 @@
        comment). Reserving this much bottom padding on every overlay shifts
        the centering point up so there's guaranteed breathing room above the
        nav for every modal, not just the tall ones that used to actually
-       overlap it. */
-    .overlay{ padding-bottom:calc(120px + env(safe-area-inset-bottom, 0px)); box-sizing:border-box; }
+       overlap it. Matching top padding (status bar / notch, plus a little
+       margin) keeps that same upward shift from pushing a tall modal's own
+       title back up into the notch, which is what adding ONLY the bottom
+       padding did. */
+    .overlay{
+      padding-bottom:calc(120px + env(safe-area-inset-bottom, 0px));
+      padding-top:calc(28px + env(safe-area-inset-top, 0px));
+      box-sizing:border-box;
+    }
     .shell{ padding:0; gap:0; position:relative; overflow:hidden; }
     .sidebar, .conv{
       width:100%; min-width:0; border-radius:0; position:absolute; inset:0;
@@ -1578,6 +1585,8 @@
         </label>
         <input type="text" id="workspaceEmailDomainInput" placeholder="Company email domain, e.g. greigtech.com" style="margin-top:8px;">
         <div class="hint" id="workspaceEmailDomainHint" style="margin-top:4px;">Anyone with a matching company email can request a sign-in link and join automatically, no invite needed. Leave blank to only let existing verified members' emails work.</div>
+        <select id="workspaceCountrySelect" style="margin-top:10px; width:100%;"></select>
+        <div class="hint" style="margin-top:4px;">Used to populate the public holidays calendar in People & HR.</div>
       </div>
       <div class="contact-pick" id="workspaceMembersList" style="max-height:none;"></div>
       <div id="workspaceInviteSection" style="display:none;">
@@ -1592,7 +1601,7 @@
         <div class="hint" id="workspaceInviteError" style="display:none;color:#ff6a6a;"></div>
       </div>
     </div>
-    <div class="modal-actions" style="margin-top:14px; flex-shrink:0;">
+    <div class="modal-actions" style="margin-top:14px; margin-bottom:14px; flex-shrink:0;">
       <div class="btn" id="workspaceOpenHrBtn">People & HR</div>
       <div class="btn" onclick="closeModal('workspaceMembersOverlay')">Close</div>
     </div>
@@ -1609,6 +1618,7 @@
       <div class="admin-console-tab active" data-tab="home">Home</div>
       <div class="admin-console-tab" data-tab="profile">My Profile</div>
       <div class="admin-console-tab" data-tab="directory">People</div>
+      <div class="admin-console-tab" data-tab="calendar">Calendar</div>
     </div>
     <div class="admin-console-body">
       <section class="admin-console-section" data-section="home">
@@ -1658,6 +1668,22 @@
       <section class="admin-console-section" data-section="directory" style="display:none;">
         <input type="text" id="hrDirectorySearch" placeholder="Search people…" style="width:100%; margin-bottom:10px;">
         <div class="contact-pick" id="hrDirectoryList" style="max-height:none;"></div>
+      </section>
+      <section class="admin-console-section" data-section="calendar" style="display:none;">
+        <div id="hrCalendarNoCountry" class="hint" style="display:none;">
+          No country set for this workspace yet, public holidays can't be shown until one is. Set it from Members → workspace name/logo section, above the invite fields.
+        </div>
+        <div id="hrCalendarBody" style="display:none;">
+          <h3 id="hrCalendarYearLabel" style="display:flex; align-items:center; justify-content:space-between;">
+            <span></span>
+            <span style="display:flex; gap:8px;">
+              <span class="icon-btn" id="hrCalendarPrevYearBtn" title="Previous year" style="width:28px; height:28px; font-size:13px;">‹</span>
+              <span class="icon-btn" id="hrCalendarNextYearBtn" title="Next year" style="width:28px; height:28px; font-size:13px;">›</span>
+            </span>
+          </h3>
+          <table class="hr-history-table" id="hrCalendarTable"></table>
+          <div class="hint" id="hrCalendarEmpty" style="display:none;">No public holidays found for this country/year.</div>
+        </div>
       </section>
     </div>
   </div>
@@ -3695,6 +3721,27 @@
     start_meetings: 'Start unlimited meetings',
   };
 
+  // Drives both the workspace's country dropdown and (via org.country) the
+  // Calendar tab's public-holidays lookup, see /org/holidays in worker.js.
+  // Not the full ISO 3166 list, a practical common-country spread, "Not set"
+  // stays the default so nothing gets guessed for a workspace that hasn't
+  // picked one yet.
+  const COUNTRY_LIST = [
+    ['', 'Not set'],
+    ['NG', 'Nigeria'], ['US', 'United States'], ['GB', 'United Kingdom'], ['CA', 'Canada'],
+    ['GH', 'Ghana'], ['KE', 'Kenya'], ['ZA', 'South Africa'], ['EG', 'Egypt'],
+    ['IN', 'India'], ['PK', 'Pakistan'], ['AE', 'United Arab Emirates'], ['SA', 'Saudi Arabia'],
+    ['DE', 'Germany'], ['FR', 'France'], ['ES', 'Spain'], ['IT', 'Italy'], ['NL', 'Netherlands'],
+    ['IE', 'Ireland'], ['PT', 'Portugal'], ['SE', 'Sweden'], ['NO', 'Norway'], ['PL', 'Poland'],
+    ['AU', 'Australia'], ['NZ', 'New Zealand'], ['SG', 'Singapore'], ['MY', 'Malaysia'],
+    ['PH', 'Philippines'], ['ID', 'Indonesia'], ['JP', 'Japan'], ['CN', 'China'], ['KR', 'South Korea'],
+    ['BR', 'Brazil'], ['MX', 'Mexico'], ['AR', 'Argentina'],
+  ];
+  (function populateCountrySelect(){
+    const sel = document.getElementById('workspaceCountrySelect');
+    sel.innerHTML = COUNTRY_LIST.map(([code, name]) => `<option value="${code}">${escapeHtml(name)}</option>`).join('');
+  })();
+
   async function openWorkspaceMembers(org){
     activeWorkspaceForMembers = org;
     myWorkspacePermissions = [];
@@ -3725,6 +3772,7 @@
       document.getElementById('workspaceBrandHint').style.color = '';
       document.getElementById('workspaceEmailAuthToggle').checked = !!org.allowEmailAuth;
       document.getElementById('workspaceEmailDomainInput').value = org.emailDomain || '';
+      document.getElementById('workspaceCountrySelect').value = org.country || '';
     }
     document.getElementById('workspaceInviteError').style.display = 'none';
     document.getElementById('workspaceInvitePinInput').value = '';
@@ -3874,7 +3922,8 @@
     if (!name){ hintEl.textContent = 'Enter a name.'; hintEl.style.color = '#ff6a6a'; return; }
     const allowEmailAuth = document.getElementById('workspaceEmailAuthToggle').checked;
     const emailDomain = document.getElementById('workspaceEmailDomainInput').value.trim();
-    const r = await apiFetch('/org/update', { method: 'POST', body: JSON.stringify({ orgId: activeWorkspaceForMembers.id, name, allowEmailAuth, emailDomain }) });
+    const country = document.getElementById('workspaceCountrySelect').value;
+    const r = await apiFetch('/org/update', { method: 'POST', body: JSON.stringify({ orgId: activeWorkspaceForMembers.id, name, allowEmailAuth, emailDomain, country }) });
     if (!r.ok || !r.body || !r.body.org){
       hintEl.textContent = r.body && r.body.error === 'domain_taken' ? 'That domain is already claimed by another workspace.'
         : r.body && r.body.error === 'invalid_domain' ? 'Enter a valid domain, e.g. company.com.'
@@ -3885,11 +3934,13 @@
     activeWorkspaceForMembers.name = r.body.org.name;
     activeWorkspaceForMembers.allowEmailAuth = r.body.org.allowEmailAuth;
     activeWorkspaceForMembers.emailDomain = r.body.org.emailDomain;
+    activeWorkspaceForMembers.country = r.body.org.country;
     const myOrg = myOrgs.find(o => o.id === activeWorkspaceForMembers.id);
     if (myOrg){
       myOrg.name = r.body.org.name;
       myOrg.allowEmailAuth = r.body.org.allowEmailAuth;
       myOrg.emailDomain = r.body.org.emailDomain;
+      myOrg.country = r.body.org.country;
     }
     document.getElementById('workspaceMembersTitle').textContent = r.body.org.name + ' members';
     updateWorkspaceBar();
@@ -3916,6 +3967,7 @@
       });
       if (target === 'directory') loadHrDirectory();
       if (target === 'profile' && !document.getElementById('hrProfileBackRow').dataset.other) loadHrProfile(null);
+      if (target === 'calendar') loadHrCalendar();
     });
   });
 
@@ -3941,6 +3993,60 @@
     if (!ts) return '';
     return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
   }
+
+  // Public holidays, sourced from org.country (set in Members → workspace
+  // branding). Year is local UI state, not tied to hrActiveOrg, so flipping
+  // years with the ‹ › buttons doesn't need a full tab reload.
+  let hrCalendarYear = new Date().getUTCFullYear();
+  async function loadHrCalendar(){
+    if (!hrActiveOrg) return;
+    const noCountryEl = document.getElementById('hrCalendarNoCountry');
+    const bodyEl = document.getElementById('hrCalendarBody');
+    const yearLabelEl = document.querySelector('#hrCalendarYearLabel span');
+    const tableEl = document.getElementById('hrCalendarTable');
+    const emptyEl = document.getElementById('hrCalendarEmpty');
+    yearLabelEl.textContent = String(hrCalendarYear);
+    tableEl.innerHTML = '<tr><td class="hint">Loading…</td></tr>';
+    const r = await apiFetch(`/org/holidays?orgId=${encodeURIComponent(hrActiveOrg.id)}&year=${hrCalendarYear}`);
+    if (!r.ok || !r.body){
+      noCountryEl.style.display = 'none';
+      bodyEl.style.display = 'block';
+      tableEl.innerHTML = '';
+      emptyEl.textContent = "Couldn't load the calendar. Try again.";
+      emptyEl.style.display = 'block';
+      return;
+    }
+    if (!r.body.country){
+      noCountryEl.style.display = 'block';
+      bodyEl.style.display = 'none';
+      return;
+    }
+    noCountryEl.style.display = 'none';
+    bodyEl.style.display = 'block';
+    const holidays = r.body.holidays || [];
+    if (!holidays.length){
+      tableEl.innerHTML = '';
+      emptyEl.textContent = r.body.unsupported
+        ? "This country isn't covered by the holidays source yet."
+        : r.body.fetchError
+        ? "Couldn't reach the holidays source, try again in a moment."
+        : 'No public holidays found for this country/year.';
+      emptyEl.style.display = 'block';
+      return;
+    }
+    emptyEl.style.display = 'none';
+    // Dates come back as plain 'YYYY-MM-DD' (no time/timezone), parsed as
+    // UTC-midnight here so the displayed weekday/date can't drift a day
+    // backward for anyone west of UTC, a real risk with new Date('YYYY-MM-DD')
+    // in some engines depending on how they treat the missing time part.
+    tableEl.innerHTML = `<tr><th>Date</th><th>Holiday</th></tr>` + holidays.map(h => {
+      const d = new Date(h.date + 'T00:00:00Z');
+      const label = isNaN(d.getTime()) ? h.date : d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+      return `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(h.name)}</td></tr>`;
+    }).join('');
+  }
+  document.getElementById('hrCalendarPrevYearBtn').addEventListener('click', ()=>{ hrCalendarYear--; loadHrCalendar(); });
+  document.getElementById('hrCalendarNextYearBtn').addEventListener('click', ()=>{ hrCalendarYear++; loadHrCalendar(); });
 
   async function loadHrHome(){
     if (!hrActiveOrg) return;

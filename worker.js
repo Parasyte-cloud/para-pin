@@ -860,7 +860,7 @@ export class Registry {
       const orgs = [{ id: null, name: 'Personal' }];
       for (const oid of myOrgIds) {
         const org = await this.state.storage.get(`org:${oid}`);
-        if (org) orgs.push({ id: org.id, name: org.name, logoUrl: org.logoUrl || null, allowEmailAuth: !!org.allowEmailAuth, emailDomain: org.emailDomain || null, isAdmin: await isOrgAdmin(this.state.storage, org.id, user.id) });
+        if (org) orgs.push({ id: org.id, name: org.name, logoUrl: org.logoUrl || null, allowEmailAuth: !!org.allowEmailAuth, emailDomain: org.emailDomain || null, country: org.country || null, isAdmin: await isOrgAdmin(this.state.storage, org.id, user.id) });
       }
 
       return json({
@@ -1453,7 +1453,7 @@ export class Registry {
     // be exactly this app's own /api/media/<uuid> shape), since it gets
     // interpolated client-side into a CSS url("...") the same way those do.
     if (request.method === 'POST' && url.pathname === '/org/update') {
-      const { pinHash, orgId, name, logoUrl, allowEmailAuth, emailDomain } = await request.json();
+      const { pinHash, orgId, name, logoUrl, allowEmailAuth, emailDomain, country } = await request.json();
       const me = await this.state.storage.get(`user:${pinHash}`);
       if (!me) return json({ error: 'not_registered' }, 401);
       if (!orgId || !(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_workspace'))) {
@@ -1464,6 +1464,10 @@ export class Registry {
       if (typeof name === 'string' && name.trim()) org.name = name.trim().slice(0, 60);
       if (logoUrl !== undefined) org.logoUrl = sanitizeAvatarUrl(logoUrl);
       if (allowEmailAuth !== undefined) org.allowEmailAuth = !!allowEmailAuth;
+      // Country drives the public-holidays calendar in People & HR (see
+      // /org/holidays below), a 2-letter ISO 3166-1 code so it maps directly
+      // onto the holidays API's own country codes with no translation layer.
+      if (country !== undefined) org.country = country ? String(country).trim().toUpperCase().slice(0, 2) : null;
       // The domain is a global claim (whoever's it's set on decides who can
       // self-provision with a matching address), so it needs its own
       // uniqueness index the same way emailIndex does for individual
@@ -1487,6 +1491,53 @@ export class Registry {
       }
       await this.state.storage.put(`org:${orgId}`, org);
       return json({ org });
+    }
+
+    // Public holidays for the org's country, keyed off org.country (set via
+    // /org/update above). Cached per country+year rather than fetched fresh
+    // every time, a given year's public holidays for a country never change
+    // once published, so there's no freshness concern with caching
+    // indefinitely, this just avoids hammering the upstream API on every
+    // People & HR Calendar tab open. Source: Nager.Holidays' free, keyless
+    // public API (github.com/nager/Nager.Date), no account/billing involved.
+    if (request.method === 'GET' && url.pathname === '/org-holidays') {
+      const orgId = url.searchParams.get('orgId');
+      const userId = url.searchParams.get('userId');
+      const year = parseInt(url.searchParams.get('year'), 10) || new Date().getUTCFullYear();
+      if (!orgId || !userId) return json({ error: 'missing_org_id' }, 400);
+      if (!(await isOrgMember(this.state.storage, orgId, userId))) return json({ error: 'forbidden' }, 403);
+      const org = await this.state.storage.get(`org:${orgId}`);
+      if (!org) return json({ error: 'not_found' }, 404);
+      if (!org.country) return json({ ok: true, country: null, holidays: [] });
+
+      const cacheKey = `holidaysCache:${org.country}:${year}`;
+      const cached = await this.state.storage.get(cacheKey);
+      if (cached) return json({ ok: true, country: org.country, holidays: cached });
+
+      try {
+        const upstream = await fetch(`https://nagerholidays.com/api/v4/Holidays/${encodeURIComponent(org.country)}/${year}`);
+        if (!upstream.ok) {
+          // A 404 here means Nager.Holidays doesn't recognize this country
+          // code for this year (unsupported country, or a typo'd code that
+          // slipped past the client's dropdown), not a transient failure,
+          // so this caches the empty result too rather than re-hitting the
+          // upstream API on every load.
+          await this.state.storage.put(cacheKey, []);
+          return json({ ok: true, country: org.country, holidays: [], unsupported: upstream.status === 404 });
+        }
+        const raw = await upstream.json();
+        const holidays = (Array.isArray(raw) ? raw : []).map(h => ({
+          date: h.date,
+          name: h.name,
+          nationalHoliday: !!h.nationalHoliday,
+        })).filter(h => h.date && h.name);
+        await this.state.storage.put(cacheKey, holidays);
+        return json({ ok: true, country: org.country, holidays });
+      } catch (e) {
+        // Upstream unreachable, don't cache a failure, next request just
+        // tries again rather than getting stuck on an empty result forever.
+        return json({ ok: true, country: org.country, holidays: [], fetchError: true });
+      }
     }
 
     // ================= Self-service email verification =================
@@ -4329,8 +4380,24 @@ export default {
         if (!body.orgId) return json({ error: 'missing_org_id' }, 400);
         return registryStub.fetch('https://internal/org/update', {
           method: 'POST',
-          body: JSON.stringify({ pinHash, orgId: body.orgId, name: body.name, logoUrl: body.logoUrl, allowEmailAuth: body.allowEmailAuth, emailDomain: body.emailDomain }),
+          body: JSON.stringify({ pinHash, orgId: body.orgId, name: body.name, logoUrl: body.logoUrl, allowEmailAuth: body.allowEmailAuth, emailDomain: body.emailDomain, country: body.country }),
         });
+      }
+
+      // Any member (not admin-only, everyone benefits from seeing the
+      // holidays calendar) can read the org's public-holidays list, scoped
+      // to whichever workspace's country it's asking about. Membership
+      // itself is checked inside the Registry DO's handler (it's the one
+      // with direct storage access), this just resolves who's asking.
+      if (request.method === 'GET' && url.pathname === '/api/org/holidays') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const orgId = url.searchParams.get('orgId') || '';
+        const year = url.searchParams.get('year') || '';
+        return registryStub.fetch(`https://internal/org-holidays?orgId=${encodeURIComponent(orgId)}&year=${encodeURIComponent(year)}&userId=${encodeURIComponent(who.userId)}`);
       }
 
       // Self-service: attach and verify an email address on the caller's
