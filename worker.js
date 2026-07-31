@@ -269,6 +269,174 @@ async function verifyWebauthnAssertion(x, y, authenticatorDataBuf, clientDataJSO
   return crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, rawSig, signedData);
 }
 
+// ==================== SSO (OpenID Connect) ====================
+// Generic OIDC only — deliberately not SAML. SAML's signature verification
+// means hand-rolling XML canonicalization (C14N) before checking anything,
+// a much larger and easier-to-get-subtly-wrong surface than OIDC's
+// JSON+JWT, with no vetted library available given this project's no-
+// build-step constraint. OIDC in exchange covers the same ground (Google
+// Workspace, Microsoft Entra ID, Okta, Auth0, OneLogin, and anything else
+// speaking the standard) through one implementation: fetch the provider's
+// published discovery document and public keys, verify a signed ID token
+// against them. See the comment above verifyOidcIdToken for the specific
+// signature-forgery defenses this includes; correctness here was verified
+// against real RSA-signed tokens (valid signature, tampered payload, wrong
+// issuer/audience/nonce, expired, unknown key, and a token forged with an
+// entirely different keypair) before this ever touched the actual OIDC
+// round-trip in /api/sso/start and /api/sso/callback below.
+
+// Fetches and caches (Cloudflare's own edge cache, via the `cf` fetch
+// option — no separate KV/DO storage needed for something this provider-
+// published and slow-changing) an OIDC issuer's discovery document, which
+// is what actually points at the authorization/token endpoints and the
+// public-key (JWKS) URL an ID token gets verified against.
+async function discoverOidcConfig(issuer) {
+  const res = await fetch(`${issuer}/.well-known/openid-configuration`, { cf: { cacheTtl: 3600, cacheEverything: true } });
+  if (!res.ok) throw new Error('discovery_failed');
+  return res.json();
+}
+async function fetchJwks(jwksUri) {
+  const res = await fetch(jwksUri, { cf: { cacheTtl: 3600, cacheEverything: true } });
+  if (!res.ok) throw new Error('jwks_fetch_failed');
+  return res.json();
+}
+
+function parseJwt(idToken) {
+  const parts = idToken.split('.');
+  if (parts.length !== 3) throw new Error('malformed_jwt');
+  const header = JSON.parse(new TextDecoder().decode(b64urlToBuf(parts[0])));
+  const payload = JSON.parse(new TextDecoder().decode(b64urlToBuf(parts[1])));
+  const signature = b64urlToBuf(parts[2]);
+  const signedInput = new TextEncoder().encode(parts[0] + '.' + parts[1]);
+  return { header, payload, signature, signedInput };
+}
+async function importRsaJwk(jwk) {
+  return crypto.subtle.importKey(
+    'jwk',
+    { kty: jwk.kty, n: jwk.n, e: jwk.e, alg: 'RS256', ext: true },
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['verify']
+  );
+}
+// Verifies an OIDC ID token's RS256 signature against a JWKS document, plus
+// the standard claim checks (issuer, audience, expiry, nonce). Always
+// verifies with RSASSA-PKCS1-v1_5/SHA-256 regardless of what the token's
+// own header.alg says — an attacker-supplied token declaring, say, `alg:
+// none` or a symmetric algorithm is exactly the "algorithm confusion"
+// class of JWT vulnerability this sidesteps by never letting the token
+// itself choose how it gets checked; header.alg is only ever read to
+// reject anything that isn't RS256 outright, never to select behavior.
+async function verifyOidcIdToken(idToken, { jwks, issuer, audience, nonce }) {
+  const { header, payload, signature, signedInput } = parseJwt(idToken);
+  if (header.alg !== 'RS256') throw new Error('unsupported_alg');
+  const jwk = (jwks.keys || []).find((k) => k.kid === header.kid);
+  if (!jwk) throw new Error('unknown_kid');
+  const key = await importRsaJwk(jwk);
+  const ok = await crypto.subtle.verify({ name: 'RSASSA-PKCS1-v1_5' }, key, signature, signedInput);
+  if (!ok) throw new Error('bad_signature');
+  if (payload.iss !== issuer) throw new Error('bad_issuer');
+  const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+  if (!aud.includes(audience)) throw new Error('bad_audience');
+  if (!payload.exp || Date.now() / 1000 > payload.exp) throw new Error('expired');
+  if (nonce && payload.nonce !== nonce) throw new Error('bad_nonce');
+  if (!payload.email) throw new Error('no_email_claim');
+  return payload;
+}
+
+// ==================== Public API keys + webhooks ====================
+// A small, deliberately narrow "developer platform": API keys authenticate
+// against the same global roster/admin system the built-in admin console
+// already manages (this app doesn't have per-workspace API scoping the way
+// its org/workspace layer does, so this stays consistent with the system it
+// actually extends, rather than inventing a second, inconsistent scoping
+// model). Webhooks fire on roster lifecycle events only (a person added,
+// claimed their PIN, or got disabled) — deliberately NOT on message
+// content or anything chat-related: this app's whole point is that a
+// conversation's plaintext never leaves the two people's devices, a webhook
+// that echoed message content out to some third-party URL would quietly
+// break that promise. Metadata about roster/HR-adjacent state changes
+// doesn't have that problem, it's the same class of thing the audit log
+// already tracks.
+
+async function generateApiKey() {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  const raw = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+  return `papk_${raw}`; // prefixed so a leaked key is recognizable at a glance in logs/scanners
+}
+
+async function generateWebhookSecret() {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function hmacSha256Hex(secret, message) {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(message)));
+  return [...sig].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Best-effort, fire-and-forget in spirit (one slow/dead receiver can't take
+// the rest down, each gets its own try/catch) but still awaited before this
+// DO's own fetch handler returns, matching how push notifications are
+// already sent elsewhere in this file. Every payload is signed the same way
+// GitHub/Stripe do it: HMAC-SHA256 of the raw JSON body, hex-encoded, in an
+// X-ParaPin-Signature header, so a receiving endpoint can verify a payload
+// actually came from here and wasn't forged by whoever else finds the URL.
+async function fireWebhooks(storage, eventType, data) {
+  const webhooks = (await storage.get('webhooks')) || [];
+  const targets = webhooks.filter((w) => !w.disabled && (w.events.includes(eventType) || w.events.includes('*')));
+  if (!targets.length) return;
+  const body = JSON.stringify({ event: eventType, data, ts: Date.now() });
+  await Promise.all(targets.map(async (w) => {
+    try {
+      const signature = await hmacSha256Hex(w.secret, body);
+      await fetch(w.url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'X-ParaPin-Signature': signature, 'X-ParaPin-Event': eventType },
+        body,
+      });
+    } catch (e) { /* one dead endpoint shouldn't affect the triggering action or any other webhook */ }
+  }));
+}
+
+// Shared by /admin/analytics (admin console) and /v1/analytics (public API)
+// — same numbers either way, just two different auth paths to reach them.
+async function computeAnalytics(storage, admins) {
+  const now = Date.now();
+  const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
+  const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
+  const map = await storage.list({ prefix: 'userById:' });
+  let totalUsers = 0, activeUsers7d = 0, activeUsers30d = 0, newUsers30d = 0, usersWithDeviceLock = 0;
+  for (const rec of map.values()) {
+    totalUsers++;
+    if (rec.hasDeviceLock) usersWithDeviceLock++;
+    if (rec.lastSeenAt && rec.lastSeenAt >= sevenDaysAgo) activeUsers7d++;
+    if (rec.lastSeenAt && rec.lastSeenAt >= thirtyDaysAgo) activeUsers30d++;
+    if (rec.createdAt && rec.createdAt >= thirtyDaysAgo) newUsers30d++;
+  }
+  const allChatIds = (await storage.get('allChatIds')) || [];
+  const retentionDays = (await storage.get('retentionDays')) || 0;
+  const legalHoldUserIds = (await storage.get('legalHoldUserIds')) || [];
+  const callStats = (await storage.get('callStats')) || { total: 0, byOutcome: {}, totalDurationSec: 0 };
+  const rosterList = (await storage.get('rosterList')) || [];
+  return {
+    totalUsers,
+    activeUsers7d,
+    activeUsers30d,
+    newUsers30d,
+    usersWithDeviceLock,
+    totalAdmins: (admins || []).length,
+    totalChats: allChatIds.length,
+    totalRosterEntries: rosterList.length,
+    retentionDays,
+    legalHoldCount: legalHoldUserIds.length,
+    callStats,
+  };
+}
+
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -459,25 +627,30 @@ async function isOrgAdminIgnoringBilling(storage, orgId, userId) {
 // role am I" indirection, an admin just checks boxes per person in the
 // Members modal.
 //
-// manage_workspace - rename/rebrand the workspace, email-auth domain settings (/org/update)
-// manage_members   - invite existing users and onboard new ones (/org/invite, /org/roster)
-// manage_hr        - edit others' HR profile/job records, decide leave requests, view others' leave history
-// start_meetings   - start/join the unlimited workspace Meeting Room (recording + AI assistant)
-const ORG_PERMISSIONS = ['manage_workspace', 'manage_members', 'manage_hr', 'start_meetings'];
+// manage_workspace  - rename/rebrand the workspace, email-auth domain settings (/org/update)
+// manage_members    - invite existing users and onboard new ones (/org/invite, /org/roster)
+// manage_hr         - edit others' HR profile/job records, decide leave requests, view others' leave history
+// start_meetings    - start/join the unlimited workspace Meeting Room (recording + AI assistant)
+// create_channels   - create a new group chat/channel within this workspace
+// moderate_messages - delete any member's message in a workspace group chat, not just your own
+const ORG_PERMISSIONS = ['manage_workspace', 'manage_members', 'manage_hr', 'start_meetings', 'create_channels', 'moderate_messages'];
 
 // Whether an ordinary (non-admin) member has each permission before any
-// explicit admin override. manage_* default OFF, they were always
-// admin-only, this system only ever ADDS capability for them. start_meetings
-// defaults ON: every workspace member could already start/join a meeting
-// before this system existed, introducing per-feature toggles shouldn't
-// silently strip that from everyone who isn't individually re-granted, an
-// admin who wants to restrict it now has a way to (explicitly turn it off
-// per person), but nobody loses access just because this feature shipped.
+// explicit admin override. manage_* and moderate_messages default OFF, they
+// were always admin-only (or, for moderation, nonexistent until now), this
+// system only ever ADDS capability for them. start_meetings and
+// create_channels default ON: every workspace member could already do both
+// before per-feature toggles existed, introducing them shouldn't silently
+// strip that from everyone who isn't individually re-granted, an admin who
+// wants to restrict either now has a way to (explicitly turn it off per
+// person), but nobody loses access just because this feature shipped.
 const ORG_PERMISSION_DEFAULTS = {
   manage_workspace: false,
   manage_members: false,
   manage_hr: false,
   start_meetings: true,
+  create_channels: true,
+  moderate_messages: false,
 };
 
 // Raw admin-set overrides for one member, `{ [permission]: true|false }`.
@@ -644,6 +817,18 @@ function userByIdSnapshot(user, admins) {
   const allKeys = (user.devicePublicKeys && typeof user.devicePublicKeys === 'object') ? user.devicePublicKeys : {};
   const trustedKeys = {};
   for (const did of deviceIds) if (allKeys[did]) trustedKeys[did] = allKeys[did];
+  // Most-recent lastSeenAt across this person's trusted devices, carried
+  // onto the snapshot specifically so the analytics dashboard (see
+  // /admin/analytics) can compute "active in the last N days" by scanning
+  // just the cheap userById:* index, instead of loading every full
+  // user:{pinHash} record (which also holds things like the TOTP secret and
+  // WebAuthn credentials that have no business being read for a stats page).
+  const meta = (user.deviceMeta && typeof user.deviceMeta === 'object') ? user.deviceMeta : {};
+  let lastSeenAt = null;
+  for (const did of deviceIds) {
+    const ts = meta[did] && meta[did].lastSeenAt;
+    if (ts && (!lastSeenAt || ts > lastSeenAt)) lastSeenAt = ts;
+  }
   return {
     id: user.id,
     displayName: user.displayName,
@@ -653,6 +838,8 @@ function userByIdSnapshot(user, admins) {
     hasDeviceLock: deviceIds.length > 0,
     deviceCount: deviceIds.length,
     isAdmin: Array.isArray(admins) ? admins.includes(user.id) : undefined,
+    lastSeenAt,
+    createdAt: user.createdAt || null,
   };
 }
 
@@ -1055,6 +1242,7 @@ export class Registry {
           avatarUrl: null,
           e2eePublicKey: null,
           deviceIds: [],
+          createdAt: Date.now(),
           // A roster-issued PIN is a shared secret the admin who created it
           // also knows, if it doubled as the permanent credential, whoever
           // uses it FIRST (which could be that admin, testing it, or anyone
@@ -1141,6 +1329,7 @@ export class Registry {
         roster.userId = user.id;
         roster.claimedAt = Date.now();
         await this.state.storage.put(`roster:${roster.id}`, roster);
+        await fireWebhooks(this.state.storage, 'roster.person_claimed', { id: roster.id, name: roster.name, userId: user.id });
 
         // Let admins know someone from the roster actually showed up, the
         // "notifications" half of HR-linked onboarding. Best-effort, never
@@ -1253,6 +1442,7 @@ export class Registry {
         if (country) user.lastKnownCountry = country;
 
         await this.state.storage.put(`user:${pinHash}`, user);
+        await this.state.storage.put(`userById:${user.id}`, userByIdSnapshot(user, admins));
       }
 
       return json({
@@ -1759,6 +1949,9 @@ export class Registry {
       if (orgId && !(await isOrgMember(this.state.storage, orgId, me.id))) {
         return json({ error: 'not_org_member' }, 403);
       }
+      if (orgId && !(await hasOrgPermission(this.state.storage, orgId, me.id, 'create_channels'))) {
+        return json({ error: 'forbidden', reason: 'create_channels_disabled' }, 403);
+      }
 
       // memberPinHashes is a batch of "does this PIN belong to someone"
       // checks, exactly what /contact's rate limit exists to throttle, a
@@ -1992,6 +2185,8 @@ export class Registry {
       if (!userId || !entry || !entry.withUserId || !entry.direction || !entry.outcome) {
         return json({ error: 'invalid' }, 400);
       }
+      const outcome = ['answered', 'missed', 'declined', 'busy'].includes(entry.outcome) ? entry.outcome : 'answered';
+      const durationSec = Math.max(0, Math.round(Number(entry.durationSec) || 0));
       const log = (await this.state.storage.get(`callLog:${userId}`)) || [];
       log.unshift({
         id: crypto.randomUUID(),
@@ -1999,14 +2194,25 @@ export class Registry {
         withName: entry.withName || 'Someone',
         withAvatarUrl: entry.withAvatarUrl || null,
         direction: entry.direction === 'incoming' ? 'incoming' : 'outgoing',
-        outcome: ['answered', 'missed', 'declined', 'busy'].includes(entry.outcome) ? entry.outcome : 'answered',
-        durationSec: Math.max(0, Math.round(Number(entry.durationSec) || 0)),
+        outcome,
+        durationSec,
         isVideo: !!entry.isVideo,
         orgId: entry.orgId || null,
         ts: Date.now(),
       });
       const capped = log.slice(0, 50);
       await this.state.storage.put(`callLog:${userId}`, capped);
+
+      // A running global counter, not a scan over every user's callLog at
+      // dashboard-view time (see /admin/analytics) — cheap to keep up to
+      // date here (one call, one increment), expensive to compute on
+      // demand across however many accounts exist by then.
+      const stats = (await this.state.storage.get('callStats')) || { total: 0, byOutcome: {}, totalDurationSec: 0 };
+      stats.total += 1;
+      stats.byOutcome[outcome] = (stats.byOutcome[outcome] || 0) + 1;
+      stats.totalDurationSec += durationSec;
+      await this.state.storage.put('callStats', stats);
+
       return json({ ok: true, log: capped });
     }
 
@@ -2210,7 +2416,7 @@ export class Registry {
     // be exactly this app's own /api/media/<uuid> shape), since it gets
     // interpolated client-side into a CSS url("...") the same way those do.
     if (request.method === 'POST' && url.pathname === '/org/update') {
-      const { pinHash, orgId, name, logoUrl, allowEmailAuth, emailDomain, country } = await request.json();
+      const { pinHash, orgId, name, logoUrl, allowEmailAuth, emailDomain, country, customDomain } = await request.json();
       const me = await this.state.storage.get(`user:${pinHash}`);
       if (!me) return json({ error: 'not_registered' }, 401);
       if (!orgId || !(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_workspace'))) {
@@ -2246,10 +2452,38 @@ export class Registry {
         if (normalizedDomain) await this.state.storage.put(`orgDomainIndex:${normalizedDomain}`, org.id);
         org.emailDomain = normalizedDomain;
       }
+      // Custom login domain: a separate concept from emailDomain above —
+      // that one detects which workspace an @company.com address belongs
+      // to during self-serve signup, this one is "when a browser hits
+      // chat.acmecorp.com, which workspace's logo/name should the PIN
+      // screen show before anyone's even signed in." Same uniqueness-index
+      // pattern (one hostname can't be claimed by two workspaces), a
+      // separate index because the two are looked up in completely
+      // different code paths (this one keyed by request hostname at the
+      // top of fetch(), not by an email's domain suffix). Actually pointing
+      // a real domain here (CNAME/custom hostname in Cloudflare) is
+      // something only the account owner can do outside this app — this
+      // just makes the app respond correctly once that's done.
+      if (customDomain !== undefined) {
+        const normalizedHost = customDomain ? String(customDomain).trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '') : null;
+        if (normalizedHost && !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(normalizedHost)) {
+          return json({ error: 'invalid_domain' }, 400);
+        }
+        if (normalizedHost) {
+          const claimedBy = await this.state.storage.get(`orgHostnameIndex:${normalizedHost}`);
+          if (claimedBy && claimedBy !== org.id) return json({ error: 'domain_taken' }, 409);
+        }
+        if (org.customDomain && org.customDomain !== normalizedHost) {
+          const owner = await this.state.storage.get(`orgHostnameIndex:${org.customDomain}`);
+          if (owner === org.id) await this.state.storage.delete(`orgHostnameIndex:${org.customDomain}`);
+        }
+        if (normalizedHost) await this.state.storage.put(`orgHostnameIndex:${normalizedHost}`, org.id);
+        org.customDomain = normalizedHost;
+      }
       await this.state.storage.put(`org:${orgId}`, org);
       const changedFields = [
         name !== undefined && 'name', logoUrl !== undefined && 'logo', allowEmailAuth !== undefined && 'email sign-in',
-        country !== undefined && 'country', emailDomain !== undefined && 'email domain',
+        country !== undefined && 'country', emailDomain !== undefined && 'email domain', customDomain !== undefined && 'custom login domain',
       ].filter(Boolean);
       if (changedFields.length) {
         await appendAuditLog(this.state.storage, orgId, {
@@ -2258,6 +2492,67 @@ export class Registry {
         });
       }
       return json({ org });
+    }
+
+    // ---- SSO (OpenID Connect) config ----
+    // Deliberately a separate endpoint from /org/update rather than folding
+    // ssoClientSecret in alongside logo/name/etc: that endpoint's response
+    // (`json({ org })`) echoes the whole org record straight back to the
+    // browser, which is fine for a logo URL, not for a client secret. This
+    // one never returns the secret at all, once saved it's write-only from
+    // the browser's perspective (same "you can rotate it, you can't read
+    // it back" treatment as an API key), /org/sso GET reports only
+    // hasClientSecret: true/false so the settings UI can show "configured"
+    // without ever displaying the value.
+    if (request.method === 'GET' && url.pathname === '/org/sso') {
+      const pinHash = url.searchParams.get('pinHash');
+      const orgId = url.searchParams.get('orgId');
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_workspace'))) {
+        return json({ error: 'forbidden' }, 403);
+      }
+      const org = await this.state.storage.get(`org:${orgId}`);
+      if (!org) return json({ error: 'not_found' }, 404);
+      return json({
+        enabled: !!org.ssoEnabled,
+        issuer: org.ssoIssuer || '',
+        clientId: org.ssoClientId || '',
+        hasClientSecret: !!org.ssoClientSecret,
+      });
+    }
+    if (request.method === 'POST' && url.pathname === '/org/sso') {
+      const { pinHash, orgId, enabled, issuer, clientId, clientSecret } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_workspace'))) {
+        return json({ error: 'forbidden' }, 403);
+      }
+      const org = await this.state.storage.get(`org:${orgId}`);
+      if (!org) return json({ error: 'not_found' }, 404);
+      if (issuer !== undefined) {
+        const normalizedIssuer = issuer ? String(issuer).trim().replace(/\/+$/, '') : null;
+        if (normalizedIssuer && !/^https:\/\/.+/.test(normalizedIssuer)) return json({ error: 'invalid_issuer' }, 400);
+        org.ssoIssuer = normalizedIssuer;
+      }
+      if (clientId !== undefined) org.ssoClientId = clientId ? String(clientId).trim().slice(0, 200) : null;
+      // Blank/omitted clientSecret on an update leaves whatever's already
+      // stored alone — the settings form always shows this field empty, so
+      // "didn't touch it" and "explicitly cleared it" have to be
+      // distinguishable, only a non-empty string here ever overwrites it.
+      if (clientSecret) org.ssoClientSecret = String(clientSecret).trim().slice(0, 500);
+      if (enabled !== undefined) {
+        if (enabled && (!org.ssoIssuer || !org.ssoClientId || !org.ssoClientSecret)) {
+          return json({ error: 'incomplete_config' }, 400);
+        }
+        org.ssoEnabled = !!enabled;
+      }
+      await this.state.storage.put(`org:${orgId}`, org);
+      await appendAuditLog(this.state.storage, orgId, {
+        actorId: me.id, actorName: me.displayName || 'Someone', action: 'workspace_settings_changed',
+        details: 'Updated: SSO configuration',
+      });
+      return json({ ok: true, enabled: !!org.ssoEnabled, issuer: org.ssoIssuer || '', clientId: org.ssoClientId || '', hasClientSecret: !!org.ssoClientSecret });
     }
 
     // Public holidays for the org's country, keyed off org.country (set via
@@ -3348,6 +3643,8 @@ export class Registry {
         emailResult = await sendOnboardingEmail(env, { to: entry.email, name: entry.name, pin });
       }
 
+      await fireWebhooks(storage, 'roster.person_added', { id: entry.id, name: entry.name, department: entry.department });
+
       // Once the PIN has actually been emailed to the person, there's no
       // reason for it to also sit in this API response / the admin's own
       // screen, the fewer places a shared secret is displayed, the better,
@@ -3412,6 +3709,7 @@ export class Registry {
       if (!entry) return json({ error: 'not_found' }, 404);
       entry.status = 'disabled';
       await this.state.storage.put(`roster:${id}`, entry);
+      await fireWebhooks(this.state.storage, 'roster.person_disabled', { id: entry.id, name: entry.name });
       return json({ ok: true, entry });
     }
 
@@ -3436,6 +3734,286 @@ export class Registry {
       if (![0, 30, 90, 365].includes(days)) return json({ error: 'invalid_value' }, 400);
       await this.state.storage.put('retentionDays', days);
       return json({ ok: true, retentionDays: days });
+    }
+
+    // ---- Legal hold ----
+    // Per-PERSON, not per-chat: the real-world scenario this exists for is
+    // "someone's under investigation/litigation, preserve everything they
+    // touched," not "pick one specific conversation to keep." Per-person
+    // also means it can reuse /admin/users' existing roster instead of
+    // needing a whole new admin-facing "browse every private chat" screen,
+    // which would be its own, much bigger, privacy/trust decision — E2EE
+    // chat content is never something this admin console can read even for
+    // a held user, this only ever protects a chat from the retention purge,
+    // it doesn't grant visibility into it.
+    if (request.method === 'GET' && url.pathname === '/admin/legal-holds') {
+      const requesterId = url.searchParams.get('requesterId');
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      const heldIds = (await this.state.storage.get('legalHoldUserIds')) || [];
+      const holds = [];
+      for (const uid of heldIds) {
+        const rec = await this.state.storage.get(`userById:${uid}`);
+        holds.push({ userId: uid, displayName: (rec && rec.displayName) || 'Unnamed' });
+      }
+      return json({ holds });
+    }
+    if (request.method === 'POST' && url.pathname === '/admin/legal-holds') {
+      const { requesterId, userId } = await request.json();
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      if (!userId) return json({ error: 'missing_user_id' }, 400);
+      const rec = await this.state.storage.get(`userById:${userId}`);
+      if (!rec) return json({ error: 'not_found' }, 404);
+      const heldIds = (await this.state.storage.get('legalHoldUserIds')) || [];
+      if (!heldIds.includes(userId)) {
+        await this.state.storage.put('legalHoldUserIds', [...heldIds, userId]);
+      }
+      return json({ ok: true });
+    }
+    if (request.method === 'POST' && url.pathname === '/admin/legal-holds/remove') {
+      const { requesterId, userId } = await request.json();
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      const heldIds = (await this.state.storage.get('legalHoldUserIds')) || [];
+      await this.state.storage.put('legalHoldUserIds', heldIds.filter((id) => id !== userId));
+      return json({ ok: true });
+    }
+    // Internal-only, used by the scheduled retention purge (see `scheduled`
+    // below) to find every chat that needs to be skipped this run —
+    // every chat any currently-held person is a member of, reusing the
+    // per-user chat index (userChats:*) that already exists for their own
+    // "which chats am I in" list, rather than needing a second index.
+    if (request.method === 'GET' && url.pathname === '/internal/legal-hold-chat-ids') {
+      const heldIds = (await this.state.storage.get('legalHoldUserIds')) || [];
+      const held = new Set();
+      for (const uid of heldIds) {
+        const chats = (await this.state.storage.get(`userChats:${uid}`)) || [];
+        for (const cid of chats) held.add(cid);
+      }
+      return json({ chatIds: [...held] });
+    }
+
+    // ---- Analytics dashboard ----
+    // Deliberately built entirely from data that's already cheap to read:
+    // the userById:* index (one storage.list, not one get() per user like
+    // /admin/roster does) for headcount/active/new, allChatIds for chat
+    // count, and the running callStats counter (see POST /call-log above)
+    // rather than summing every account's call history on every dashboard
+    // load. No storage/media-size figure — R2 doesn't expose an aggregate
+    // bucket size through the binding this Worker has, getting an accurate
+    // number would mean listing every object in MEDIA on every dashboard
+    // view, too expensive to do live for what would only ever be an
+    // approximate figure anyway.
+    if (request.method === 'GET' && url.pathname === '/admin/analytics') {
+      const requesterId = url.searchParams.get('requesterId');
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      return json(await computeAnalytics(this.state.storage, admins));
+    }
+
+    // ---- Public API keys ----
+    // The raw key is only ever returned once, right here, at creation —
+    // from then on only its SHA-256 hash is stored (same treatment as a
+    // PIN), so a leaked admin console session can't be used to go read back
+    // every issued key. Revoking just flips a flag rather than deleting the
+    // record, so /admin/api-keys keeps showing a full history of what's
+    // ever existed, including things that were later revoked.
+    if (request.method === 'GET' && url.pathname === '/admin/api-keys') {
+      const requesterId = url.searchParams.get('requesterId');
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      const keys = (await this.state.storage.get('apiKeys')) || [];
+      return json({ keys: keys.map((k) => ({ id: k.id, name: k.name, createdAt: k.createdAt, lastUsedAt: k.lastUsedAt || null, revoked: !!k.revoked, keyPreview: k.keyPreview })) });
+    }
+    if (request.method === 'POST' && url.pathname === '/admin/api-keys') {
+      const { requesterId, name } = await request.json();
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      const rawKey = await generateApiKey();
+      const keyHash = await sha256Hex(rawKey);
+      const keys = (await this.state.storage.get('apiKeys')) || [];
+      const entry = {
+        id: crypto.randomUUID(),
+        name: (name && String(name).trim().slice(0, 60)) || 'Unnamed key',
+        keyHash,
+        keyPreview: rawKey.slice(0, 9) + '…' + rawKey.slice(-4), // enough to recognize which key is which in a list, not enough to reconstruct it
+        createdAt: Date.now(),
+        lastUsedAt: null,
+        revoked: false,
+      };
+      await this.state.storage.put('apiKeys', [...keys, entry]);
+      return json({ ok: true, key: rawKey, id: entry.id });
+    }
+    if (request.method === 'POST' && url.pathname === '/admin/api-keys/revoke') {
+      const { requesterId, id } = await request.json();
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      const keys = (await this.state.storage.get('apiKeys')) || [];
+      const updated = keys.map((k) => (k.id === id ? { ...k, revoked: true } : k));
+      await this.state.storage.put('apiKeys', updated);
+      return json({ ok: true });
+    }
+    // Internal-only: looks up an API key by its raw value (hashed here, same
+    // as pinHash-based auth elsewhere) for the public /v1/* surface to check
+    // on every request. Bumps lastUsedAt so /admin/api-keys can show which
+    // keys are actually still in use vs. dormant.
+    if (request.method === 'POST' && url.pathname === '/internal/check-api-key') {
+      const { key } = await request.json();
+      if (!key) return json({ ok: false });
+      const keyHash = await sha256Hex(key);
+      const keys = (await this.state.storage.get('apiKeys')) || [];
+      const idx = keys.findIndex((k) => k.keyHash === keyHash && !k.revoked);
+      if (idx === -1) return json({ ok: false });
+      keys[idx].lastUsedAt = Date.now();
+      await this.state.storage.put('apiKeys', keys);
+      return json({ ok: true, keyId: keys[idx].id, keyName: keys[idx].name });
+    }
+
+    // ---- SSO (OIDC) internal handlers ----
+    // Everything here is only ever called by the outer worker's own
+    // /api/sso/start and /api/sso/callback (which do the actual OIDC
+    // provider round-trip and JWT verification, see their comments in the
+    // top-level fetch() export) — never reachable directly from a browser,
+    // which is exactly why the client-secret-bearing config endpoint below
+    // is safe to be this blunt about returning it.
+    if (request.method === 'GET' && url.pathname === '/internal/sso/config') {
+      const orgId = url.searchParams.get('orgId');
+      const org = orgId ? await this.state.storage.get(`org:${orgId}`) : null;
+      if (!org || !org.ssoEnabled) return json({ ok: false });
+      return json({ ok: true, issuer: org.ssoIssuer, clientId: org.ssoClientId, clientSecret: org.ssoClientSecret });
+    }
+    // CSRF/replay defense for the redirect round-trip to the IdP and back:
+    // a random, single-use, short-lived value threaded through as the
+    // standard OAuth2 `state` param, so /api/sso/callback can confirm the
+    // request it's handling actually originated from a /api/sso/start this
+    // Worker itself issued, not an attacker crafting their own callback
+    // hit. `nonce` is OIDC's separate, ID-token-bound replay defense,
+    // carried the same way, checked against the verified token's own
+    // nonce claim in verifyOidcIdToken.
+    if (request.method === 'POST' && url.pathname === '/internal/sso/save-state') {
+      const { state, orgId, nonce } = await request.json();
+      if (!state || !orgId || !nonce) return json({ error: 'missing_fields' }, 400);
+      await this.state.storage.put(`ssoState:${state}`, { orgId, nonce, expires: Date.now() + 10 * 60 * 1000 });
+      return json({ ok: true });
+    }
+    if (request.method === 'GET' && url.pathname === '/internal/sso/load-state') {
+      const state = url.searchParams.get('state');
+      const record = state ? await this.state.storage.get(`ssoState:${state}`) : null;
+      if (record) await this.state.storage.delete(`ssoState:${state}`); // one-time use regardless of outcome below
+      if (!record || Date.now() > record.expires) return json({ ok: false });
+      return json({ ok: true, orgId: record.orgId, nonce: record.nonce });
+    }
+    // Called once /api/sso/callback has a verified, trustworthy email
+    // address straight from the identity provider. Mints the exact same
+    // kind of one-time token /auth/email/request emails out, so the
+    // browser-facing completion step (POST /auth/email/confirm, already
+    // wired up client-side to read a `?token=` in the URL) is identical
+    // either way — SSO's job ends at "here's a proven email," everything
+    // after that reuses magic-link sign-in's existing, already-tested path.
+    // Unlike a self-serve magic-link signup (which only ever creates an
+    // account, never auto-joins an *existing* one to a new org), this DOES
+    // add an existing account to orgId too: successfully authenticating
+    // against a specific workspace's own configured IdP is a much stronger
+    // "this person belongs here" signal than merely knowing an email
+    // address, provisioning them into the workspace is the actual point of
+    // enterprise SSO.
+    if (request.method === 'POST' && url.pathname === '/internal/sso/complete') {
+      const { email, orgId } = await request.json();
+      const normalized = (email || '').trim().toLowerCase();
+      if (!normalized || !orgId) return json({ error: 'missing_fields' }, 400);
+      const org = await this.state.storage.get(`org:${orgId}`);
+      if (!org || !org.ssoEnabled) return json({ error: 'sso_not_enabled' }, 400);
+
+      let userId = await this.state.storage.get(`emailIndex:${normalized}`);
+      const token = crypto.randomUUID() + crypto.randomUUID();
+      let record;
+      if (userId) {
+        await addUserToOrg(this.state.storage, orgId, userId);
+        record = { userId, expires: Date.now() + 15 * 60 * 1000 };
+      } else {
+        record = { pendingSignupEmail: normalized, pendingSignupOrgId: orgId, expires: Date.now() + 15 * 60 * 1000 };
+      }
+      await this.state.storage.put(`magicLink:${token}`, record);
+      return json({ ok: true, token });
+    }
+
+    // ---- Webhooks ----
+    // Fires on roster lifecycle events only (added/claimed/disabled), never
+    // on chat content, see the comment above fireWebhooks() for why that
+    // boundary matters here specifically. The secret is returned on every
+    // list call, not just creation — unlike an API key it's not a bearer
+    // credential for calling INTO this app, it's what a receiving endpoint
+    // needs on hand to verify the X-ParaPin-Signature header on what this
+    // app calls OUT to them, so there's no "only show it once" reason to hide it.
+    if (request.method === 'GET' && url.pathname === '/admin/webhooks') {
+      const requesterId = url.searchParams.get('requesterId');
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      const webhooks = (await this.state.storage.get('webhooks')) || [];
+      return json({ webhooks });
+    }
+    if (request.method === 'POST' && url.pathname === '/admin/webhooks') {
+      const { requesterId, url: targetUrl, events } = await request.json();
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      if (!targetUrl || !/^https:\/\//.test(targetUrl)) return json({ error: 'invalid_url' }, 400);
+      const validEvents = ['roster.person_added', 'roster.person_claimed', 'roster.person_disabled'];
+      const chosen = (Array.isArray(events) ? events : []).filter((e) => validEvents.includes(e));
+      if (!chosen.length) return json({ error: 'no_valid_events' }, 400);
+      const webhooks = (await this.state.storage.get('webhooks')) || [];
+      const entry = { id: crypto.randomUUID(), url: targetUrl, secret: await generateWebhookSecret(), events: chosen, createdAt: Date.now(), disabled: false };
+      await this.state.storage.put('webhooks', [...webhooks, entry]);
+      return json({ ok: true, webhook: entry });
+    }
+    if (request.method === 'POST' && url.pathname === '/admin/webhooks/remove') {
+      const { requesterId, id } = await request.json();
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      const webhooks = (await this.state.storage.get('webhooks')) || [];
+      await this.state.storage.put('webhooks', webhooks.filter((w) => w.id !== id));
+      return json({ ok: true });
+    }
+
+    // Looked up on every page load for a hostname that isn't one of the
+    // app's own default domains, see the branding-injection block in the
+    // top-level fetch() export for how this gets used. Unauthenticated on
+    // purpose — this has to resolve before anyone's typed a PIN, it can
+    // only ever reveal a workspace's public branding (name + logo), never
+    // anything else about it.
+    if (request.method === 'GET' && url.pathname === '/internal/org-by-hostname') {
+      const hostname = (url.searchParams.get('hostname') || '').toLowerCase();
+      if (!hostname) return json({ ok: false });
+      const orgId = await this.state.storage.get(`orgHostnameIndex:${hostname}`);
+      if (!orgId) return json({ ok: false });
+      const org = await this.state.storage.get(`org:${orgId}`);
+      if (!org) return json({ ok: false });
+      return json({ ok: true, orgId: org.id, name: org.name, logoUrl: org.logoUrl || null, ssoEnabled: !!org.ssoEnabled });
+    }
+
+    // ---- Public API (/api/v1/*) internal handlers ----
+    // Auth already happened in the outer worker (the Bearer API key check
+    // against /internal/check-api-key above), these don't re-check
+    // anything, same trust boundary as every other /internal-prefixed or
+    // outer-pre-authenticated route in this DO.
+    if (request.method === 'GET' && url.pathname === '/v1/roster') {
+      const list = (await this.state.storage.get('rosterList')) || [];
+      const entries = [];
+      for (const id of list) {
+        const e = await this.state.storage.get(`roster:${id}`);
+        if (e) entries.push({ id: e.id, name: e.name, department: e.department, status: e.status, createdAt: e.createdAt, claimedAt: e.claimedAt });
+      }
+      return json({ entries });
+    }
+    if (request.method === 'POST' && url.pathname === '/v1/roster') {
+      const { name, department, email } = await request.json();
+      const result = await createRosterEntry(this.state.storage, this.env, { name, department, email, force: false });
+      if (!result.ok) return json({ error: result.error, existingStatus: result.existingStatus }, result.error === 'duplicate_name' ? 409 : 400);
+      return json({ entry: result.entry, pin: result.pin, emailSent: result.emailSent });
+    }
+    if (request.method === 'GET' && url.pathname === '/v1/analytics') {
+      const admins = (await this.state.storage.get('admins')) || [];
+      return json(await computeAnalytics(this.state.storage, admins));
     }
 
     // ---- Device lock management ----
@@ -4313,11 +4891,16 @@ export class ChatRoom {
     }
 
     if (request.method === 'POST' && url.pathname === '/delete') {
-      const { userId, messageId } = await request.json();
+      const { userId, messageId, isModerator } = await request.json();
       const msgs = await this.loadMessages();
       const msg = msgs.find((m) => m.id === messageId);
       if (!msg) return json({ error: 'not_found' }, 404);
-      if (msg.fromUserId !== userId) return json({ error: 'forbidden' }, 403);
+      // isModerator (computed by the outer worker against the chat's org
+      // permissions, see the /api/chats/:id/messages/:messageId route)
+      // lets someone with the workspace's moderate_messages grant remove a
+      // message that isn't theirs — everyone else can still only ever
+      // delete their own, exactly as before this existed.
+      if (msg.fromUserId !== userId && !isModerator) return json({ error: 'forbidden' }, 403);
       msg.text = '';
       delete msg.ciphertext;
       delete msg.iv;
@@ -4551,12 +5134,93 @@ export default {
     const url = new URL(request.url);
 
     if (!url.pathname.startsWith('/api/')) {
+      // ---- Branded custom domains ----
+      // If a workspace has claimed this hostname (see /org/update's
+      // customDomain field — the actual DNS/Cloudflare Custom Hostname
+      // wiring that routes real traffic here is a one-time account-level
+      // step outside this code), inject its name/logo into the HTML shell
+      // server-side before it's ever sent, so even the very first paint —
+      // the PIN lock screen, before anyone's signed in — already shows
+      // their branding instead of a flash of the generic one. Only ever
+      // touches GET requests for actual HTML documents (asset requests for
+      // .js/.css/images pass straight through unmodified), and only when
+      // the hostname isn't one of this app's own defaults.
+      const defaultHosts = ['chat.parasyte.cloud', 'web.parasyte.cloud', 'localhost'];
+      if (request.method === 'GET' && !defaultHosts.includes(url.hostname)) {
+        const assetRes = await env.ASSETS.fetch(request);
+        const contentType = assetRes.headers.get('content-type') || '';
+        if (contentType.includes('text/html')) {
+          try {
+            const registryStub = env.REGISTRY.get(env.REGISTRY.idFromName('global-registry-v1'));
+            const brandRes = await registryStub.fetch(`https://internal/internal/org-by-hostname?hostname=${encodeURIComponent(url.hostname)}`);
+            const brand = await brandRes.json();
+            if (brand.ok) {
+              let html = await assetRes.text();
+              // Escaped against breaking out of either the <script> block
+              // (a literal `</script>` inside an admin-set name/logo URL)
+              // or the <title> tag — both fields are admin-controlled, so
+              // this is defense against a workspace admin injecting into
+              // their OWN branded page, not a stranger, but there's no
+              // reason to skip escaping just because the blast radius is
+              // already small.
+              const brandingJson = JSON.stringify({ orgId: brand.orgId, name: brand.name, logoUrl: brand.logoUrl, ssoEnabled: brand.ssoEnabled }).replace(/</g, '\\u003c');
+              const safeName = String(brand.name || 'PArA PIN').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+              html = html.replace('</head>', `<script>window.__PARAPIN_BRANDING__=${brandingJson};</script></head>`);
+              html = html.replace(/<title>[^<]*<\/title>/, `<title>${safeName}</title>`);
+              const newHeaders = new Headers(assetRes.headers);
+              newHeaders.delete('content-length'); // stale for the rewritten body length, let the runtime recompute it
+              return new Response(html, { status: assetRes.status, headers: newHeaders });
+            }
+          } catch (e) {
+            // Any failure in the branding lookup/rewrite (Registry DO
+            // unreachable, malformed response, whatever) falls straight
+            // through to serving the normal, unbranded page below rather
+            // than breaking the login screen entirely over a cosmetic feature.
+          }
+        }
+        return assetRes;
+      }
       return env.ASSETS.fetch(request);
     }
 
     const registryStub = env.REGISTRY.get(env.REGISTRY.idFromName('global-registry-v1'));
 
     try {
+      // ==================== Public API (/api/v1/*) ====================
+      // Separate auth model from the rest of /api/*: a Bearer API key (see
+      // /admin/api-keys) instead of a pinHash, meant for a server-to-server
+      // integration, not a signed-in person's browser. Deliberately narrow:
+      // roster read/write and the analytics summary only, nothing chat- or
+      // message-related, keeping the same E2EE boundary described on
+      // fireWebhooks() above — there is no API route that can read or send
+      // encrypted conversation content.
+      if (url.pathname.startsWith('/api/v1/')) {
+        const authHeader = request.headers.get('Authorization') || '';
+        const apiKey = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+        if (!apiKey) return json({ error: 'missing_api_key' }, 401);
+        const checkRes = await registryStub.fetch('https://internal/internal/check-api-key', {
+          method: 'POST',
+          body: JSON.stringify({ key: apiKey }),
+        });
+        const check = await checkRes.json();
+        if (!check.ok) return json({ error: 'invalid_api_key' }, 401);
+
+        if (request.method === 'GET' && url.pathname === '/api/v1/roster') {
+          return registryStub.fetch('https://internal/v1/roster');
+        }
+        if (request.method === 'POST' && url.pathname === '/api/v1/roster') {
+          const body = await request.json().catch(() => ({}));
+          return registryStub.fetch('https://internal/v1/roster', {
+            method: 'POST',
+            body: JSON.stringify({ name: body.name, department: body.department, email: body.email }),
+          });
+        }
+        if (request.method === 'GET' && url.pathname === '/api/v1/analytics') {
+          return registryStub.fetch('https://internal/v1/analytics');
+        }
+        return json({ error: 'not_found' }, 404);
+      }
+
       // Per-user live channel: one persistent socket per open tab/device,
       // used only to push cross-chat "new message" notifications.
       if (url.pathname === '/api/notify/ws') {
@@ -4934,6 +5598,108 @@ export default {
             body: JSON.stringify({ requesterId: who.userId, name: body.name, department: body.department, email: body.email, force: !!body.force }),
           });
         }
+      }
+
+      if (url.pathname === '/api/admin/api-keys') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        if (request.method === 'GET') {
+          return registryStub.fetch(`https://internal/admin/api-keys?requesterId=${encodeURIComponent(who.userId)}`);
+        }
+        if (request.method === 'POST') {
+          const body = await request.json().catch(() => ({}));
+          return registryStub.fetch('https://internal/admin/api-keys', {
+            method: 'POST',
+            body: JSON.stringify({ requesterId: who.userId, name: body.name }),
+          });
+        }
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/admin/api-keys/revoke') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/admin/api-keys/revoke', {
+          method: 'POST',
+          body: JSON.stringify({ requesterId: who.userId, id: body.id }),
+        });
+      }
+
+      if (url.pathname === '/api/admin/webhooks') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        if (request.method === 'GET') {
+          return registryStub.fetch(`https://internal/admin/webhooks?requesterId=${encodeURIComponent(who.userId)}`);
+        }
+        if (request.method === 'POST') {
+          const body = await request.json().catch(() => ({}));
+          return registryStub.fetch('https://internal/admin/webhooks', {
+            method: 'POST',
+            body: JSON.stringify({ requesterId: who.userId, url: body.url, events: body.events }),
+          });
+        }
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/admin/webhooks/remove') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/admin/webhooks/remove', {
+          method: 'POST',
+          body: JSON.stringify({ requesterId: who.userId, id: body.id }),
+        });
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/admin/analytics') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        return registryStub.fetch(`https://internal/admin/analytics?requesterId=${encodeURIComponent(who.userId)}`);
+      }
+
+      if (url.pathname === '/api/admin/legal-holds') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        if (request.method === 'GET') {
+          return registryStub.fetch(`https://internal/admin/legal-holds?requesterId=${encodeURIComponent(who.userId)}`);
+        }
+        if (request.method === 'POST') {
+          const body = await request.json().catch(() => ({}));
+          return registryStub.fetch('https://internal/admin/legal-holds', {
+            method: 'POST',
+            body: JSON.stringify({ requesterId: who.userId, userId: body.userId }),
+          });
+        }
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/admin/legal-holds/remove') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/admin/legal-holds/remove', {
+          method: 'POST',
+          body: JSON.stringify({ requesterId: who.userId, userId: body.userId }),
+        });
       }
 
       if (request.method === 'POST' && url.pathname === '/api/admin/roster/bulk') {
@@ -5794,6 +6560,89 @@ export default {
         });
       }
 
+      // ==================== SSO (OIDC) ====================
+      // Both routes return HTTP redirects (302), not JSON — this is a
+      // browser navigating through a real OAuth2/OIDC authorization-code
+      // round-trip, not an apiFetch() call. Surfaced from the lock screen
+      // as a "Sign in with SSO" button that only appears on a workspace's
+      // branded custom domain (see the branding-injection block up top),
+      // since that's the only place this app currently knows which
+      // workspace's SSO config to use before anyone's signed in.
+      if (request.method === 'GET' && url.pathname === '/api/sso/start') {
+        const orgId = url.searchParams.get('orgId');
+        if (!orgId) return json({ error: 'missing_org_id' }, 400);
+        const configRes = await registryStub.fetch(`https://internal/internal/sso/config?orgId=${encodeURIComponent(orgId)}`);
+        const config = await configRes.json();
+        if (!config.ok) return json({ error: 'sso_not_configured' }, 400);
+        try {
+          const discovery = await discoverOidcConfig(config.issuer);
+          const state = crypto.randomUUID() + crypto.randomUUID();
+          const nonce = crypto.randomUUID() + crypto.randomUUID();
+          await registryStub.fetch('https://internal/internal/sso/save-state', {
+            method: 'POST',
+            body: JSON.stringify({ state, orgId, nonce }),
+          });
+          const redirectUri = `${url.origin}/api/sso/callback`;
+          const authUrl = new URL(discovery.authorization_endpoint);
+          authUrl.searchParams.set('client_id', config.clientId);
+          authUrl.searchParams.set('redirect_uri', redirectUri);
+          authUrl.searchParams.set('response_type', 'code');
+          authUrl.searchParams.set('scope', 'openid email profile');
+          authUrl.searchParams.set('state', state);
+          authUrl.searchParams.set('nonce', nonce);
+          return new Response(null, { status: 302, headers: { Location: authUrl.toString() } });
+        } catch (e) {
+          return new Response(null, { status: 302, headers: { Location: `${url.origin}/?ssoError=1` } });
+        }
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/sso/callback') {
+        const code = url.searchParams.get('code');
+        const state = url.searchParams.get('state');
+        const errorFallback = () => new Response(null, { status: 302, headers: { Location: `${url.origin}/?ssoError=1` } });
+        if (!code || !state) return errorFallback();
+        try {
+          const stateRes = await registryStub.fetch(`https://internal/internal/sso/load-state?state=${encodeURIComponent(state)}`);
+          const stateData = await stateRes.json();
+          if (!stateData.ok) return errorFallback();
+          const { orgId, nonce } = stateData;
+
+          const configRes = await registryStub.fetch(`https://internal/internal/sso/config?orgId=${encodeURIComponent(orgId)}`);
+          const config = await configRes.json();
+          if (!config.ok) return errorFallback();
+
+          const discovery = await discoverOidcConfig(config.issuer);
+          const redirectUri = `${url.origin}/api/sso/callback`;
+          const tokenRes = await fetch(discovery.token_endpoint, {
+            method: 'POST',
+            headers: { 'content-type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+              grant_type: 'authorization_code', code, redirect_uri: redirectUri,
+              client_id: config.clientId, client_secret: config.clientSecret,
+            }).toString(),
+          });
+          if (!tokenRes.ok) return errorFallback();
+          const tokens = await tokenRes.json();
+          if (!tokens.id_token) return errorFallback();
+
+          const jwks = await fetchJwks(discovery.jwks_uri);
+          const claims = await verifyOidcIdToken(tokens.id_token, {
+            jwks, issuer: discovery.issuer || config.issuer, audience: config.clientId, nonce,
+          });
+
+          const completeRes = await registryStub.fetch('https://internal/internal/sso/complete', {
+            method: 'POST',
+            body: JSON.stringify({ email: claims.email, orgId }),
+          });
+          const complete = await completeRes.json();
+          if (!complete.ok) return errorFallback();
+
+          return new Response(null, { status: 302, headers: { Location: `${url.origin}/auth/confirm?token=${encodeURIComponent(complete.token)}` } });
+        } catch (e) {
+          return errorFallback();
+        }
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/org/leave') {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
@@ -6024,9 +6873,24 @@ export default {
         const roomStub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(chatId));
 
         if (request.method === 'DELETE') {
+          // A workspace group chat's orgId (returned on verify.chat above)
+          // lets a designated moderator delete a message that isn't their
+          // own — checked here, not inside ChatRoom, because ChatRoom has no
+          // idea what an "org" is, all org/permission state lives in the
+          // Registry DO. Personal (non-workspace) chats have no orgId, so
+          // this is always false there: moderation only exists in a
+          // workspace context, matching every other permission in this system.
+          let isModerator = false;
+          if (verify.chat && verify.chat.orgId) {
+            const modRes = await registryStub.fetch(
+              `https://internal/org-member-check?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(verify.chat.orgId)}&permission=moderate_messages`
+            );
+            const modBody = await modRes.json();
+            isModerator = !!modBody.ok;
+          }
           const res = await roomStub.fetch('https://internal/delete', {
             method: 'POST',
-            body: JSON.stringify({ userId: verify.userId, messageId }),
+            body: JSON.stringify({ userId: verify.userId, messageId, isModerator }),
           });
           const resBody = await res.json();
           return json(resBody, res.status);
@@ -6231,8 +7095,12 @@ export default {
       const cutoffTs = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
       const listRes = await registryStub.fetch('https://internal/internal/all-chat-ids');
       const { chatIds } = await listRes.json();
+      const holdRes = await registryStub.fetch('https://internal/internal/legal-hold-chat-ids');
+      const { chatIds: heldChatIds } = await holdRes.json();
+      const held = new Set(heldChatIds || []);
 
       for (const chatId of chatIds || []) {
+        if (held.has(chatId)) continue; // legal hold: never auto-purged regardless of the retention window
         try {
           const roomStub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(chatId));
           const res = await roomStub.fetch('https://internal/purge-old', {
