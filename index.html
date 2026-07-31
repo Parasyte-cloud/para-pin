@@ -761,6 +761,13 @@
   .empty-state .app-icon{ width:52px; height:52px; opacity:.5; }
   .empty-state p{ font-size:13px; max-width:260px; text-align:center; }
 
+  .smart-reply-chips{ display:flex; gap:8px; padding:10px 18px 0; overflow-x:auto; }
+  .smart-reply-chip{
+    flex-shrink:0; padding:7px 14px; border-radius:999px; font-size:12.5px; font-weight:600;
+    background:rgba(var(--tint-rgb),0.06); border:1px solid var(--glass-brd); color:var(--text-hi);
+    cursor:pointer; white-space:nowrap;
+  }
+  .smart-reply-chip:hover{ background:rgba(var(--tint-rgb),0.1); }
   .composer{ padding:14px 18px; border-top:1px solid var(--glass-brd); display:flex; gap:10px; align-items:flex-end; position:relative; }
   .mention-menu{
     position:absolute; left:18px; right:18px; bottom:100%; margin-bottom:6px; max-height:180px; overflow-y:auto;
@@ -1427,6 +1434,12 @@
           <div class="attach-preview-name" id="attachPreviewName"></div>
           <div class="icon-btn" id="attachCancelBtn" title="Remove">×</div>
         </div>
+        <!-- Opt-in only (see the Smart Replies toggle in Settings, off by
+             default) — populated by maybeFetchSmartReplies(), tapping a
+             chip fills the composer rather than sending immediately, same
+             "review before it goes out" behavior as every other suggestion
+             feature already in here. -->
+        <div id="smartReplyChips" class="smart-reply-chips" style="display:none;"></div>
         <div class="composer">
           <div class="video-record-wrap" id="videoRecordWrap" style="display:none;">
             <video id="videoRecordPreview" autoplay playsinline muted></video>
@@ -1791,6 +1804,16 @@
     </div>
     <div class="admin-console-body">
       <section class="admin-console-section" data-section="home">
+        <div style="margin-bottom:20px; padding:12px; border-radius:14px; background:rgba(var(--tint-rgb),0.05); border:1px solid var(--glass-brd);">
+          <h3 style="margin-top:0;">Ask HR</h3>
+          <div class="hint" style="margin-bottom:8px;">Your leave balance, policy, manager, upcoming holidays — ask in plain language.</div>
+          <div style="display:flex; gap:8px;">
+            <input type="text" id="hrAskInput" placeholder="e.g. How many sick days do I have left?" style="flex:1;">
+            <div class="btn primary" id="hrAskBtn">Ask</div>
+          </div>
+          <div id="hrAskAnswer" style="display:none; margin-top:10px; padding:10px; border-radius:10px; background:rgba(var(--tint-rgb),0.05); font-size:13px; line-height:1.5;"></div>
+          <div class="hint" id="hrAskError" style="display:none; color:#ff6a6a; margin-top:8px;"></div>
+        </div>
         <div id="hrApprovalsSection" style="display:none; margin-bottom:20px;">
           <h3>Pending approvals</h3>
           <div id="hrApprovalsList"></div>
@@ -2176,6 +2199,14 @@
           <span>Upgrade to Premium</span><span>✨</span>
         </div>
         <div class="hint">Bigger file uploads today. Cross-device sync, AI features, and premium themes land here as they ship.</div>
+      </section>
+      <section class="admin-console-section">
+        <h3>AI</h3>
+        <label class="settings-row">
+          <span>Smart Replies</span>
+          <input type="checkbox" id="settingsSmartRepliesInput">
+        </label>
+        <div class="hint">Off by default. When on, the last few messages in a chat are sent to Cloudflare's AI to suggest quick replies — those chats normally never leave your device unencrypted, so only turn this on for chats where that trade-off is fine with you.</div>
       </section>
       <section class="admin-console-section">
         <h3>Account</h3>
@@ -4831,6 +4862,33 @@
   }
 
   // ---- Request Time Off ----
+  async function runHrAsk(){
+    if (!hrActiveOrg) return;
+    const input = document.getElementById('hrAskInput');
+    const answerEl = document.getElementById('hrAskAnswer');
+    const errEl = document.getElementById('hrAskError');
+    const btn = document.getElementById('hrAskBtn');
+    const question = input.value.trim();
+    if (!question) return;
+    answerEl.style.display = 'none';
+    errEl.style.display = 'none';
+    btn.textContent = 'Thinking…';
+    const r = await apiFetch('/org/hr/assistant', {
+      method: 'POST',
+      body: JSON.stringify({ orgId: hrActiveOrg.id, question }),
+    });
+    btn.textContent = 'Ask';
+    if (r.ok && r.body && r.body.answer){
+      answerEl.textContent = r.body.answer;
+      answerEl.style.display = 'block';
+    } else {
+      errEl.textContent = "Couldn't get an answer just now. Try again in a moment.";
+      errEl.style.display = 'block';
+    }
+  }
+  document.getElementById('hrAskBtn').addEventListener('click', runHrAsk);
+  document.getElementById('hrAskInput').addEventListener('keydown', (e)=>{ if (e.key === 'Enter') runHrAsk(); });
+
   document.getElementById('hrRequestLeaveBtn').addEventListener('click', ()=>{
     document.getElementById('hrLeaveTypeSelect').value = 'annual';
     document.getElementById('hrLeaveStartInput').value = '';
@@ -8025,6 +8083,7 @@
     settingsReadReceiptsInput.checked = readReceiptsEnabled;
     settingsLocationInput.checked = locationSharingEnabled;
     settingsLightModeInput.checked = currentTheme === 'light';
+    settingsSmartRepliesInput.checked = smartRepliesEnabled;
     refreshWallpaperStatus();
     document.getElementById('settingsAdminBtn').style.display = iAmAdmin ? 'flex' : 'none';
     openModal('settingsOverlay');
@@ -8076,6 +8135,22 @@
     localStorage.setItem('parapin_theme', currentTheme);
   }
   const settingsLightModeInput = document.getElementById('settingsLightModeInput');
+
+  // ---------------- Smart Replies (opt-in, off by default) ----------------
+  // Off by default and per-DEVICE (localStorage, not synced to the server)
+  // rather than an account-wide setting — deliberately, since turning this
+  // on means plaintext from whichever chat it's used in gets sent to
+  // Cloudflare's AI for suggestions (see /org/ai/smart-replies in worker.js
+  // for the full reasoning), that's a decision this device's user is making
+  // for themselves, not something that should silently follow them to a
+  // new device via account sync.
+  let smartRepliesEnabled = localStorage.getItem('parapin_smart_replies') === 'on';
+  const settingsSmartRepliesInput = document.getElementById('settingsSmartRepliesInput');
+  settingsSmartRepliesInput.addEventListener('change', ()=>{
+    smartRepliesEnabled = settingsSmartRepliesInput.checked;
+    localStorage.setItem('parapin_smart_replies', smartRepliesEnabled ? 'on' : 'off');
+    if (!smartRepliesEnabled) clearSmartReplySuggestions();
+  });
   settingsLightModeInput.addEventListener('change', ()=>{
     applyTheme(settingsLightModeInput.checked ? 'light' : 'dark');
   });
@@ -8265,6 +8340,49 @@
     startPresencePolling(getChat(chatId));
     startE2eeRetryPolling(chatId);
     updateNotifyPrefBtn();
+    maybeFetchSmartReplies(chatId);
+  }
+
+  // ---------------- Smart Replies (see the toggle in Settings) ----------------
+  function clearSmartReplySuggestions(){
+    const el = document.getElementById('smartReplyChips');
+    el.style.display = 'none';
+    el.innerHTML = '';
+  }
+  async function maybeFetchSmartReplies(chatId){
+    clearSmartReplySuggestions();
+    if (!smartRepliesEnabled) return;
+    if (chatId !== activeChatId) return;
+    if (msgInput.value.trim()) return; // already typing something, don't second-guess it
+    // .text is only populated once a message is actually readable — still-
+    // encrypted-pending ones (see startE2eeRetryPolling) or attachment-only
+    // ones without a caption won't have it, both correctly skipped here.
+    const msgs = (messagesByChat[chatId] || []).filter(m => !m.deleted && !m.system && m.text);
+    if (!msgs.length) return;
+    const last = msgs[msgs.length - 1];
+    if (last.fromUserId === myUserId) return; // only offer to reply TO someone, never to follow up on my own last message
+    const recent = msgs.slice(-5).map(m => ({ fromMe: m.fromUserId === myUserId, text: m.text }));
+    const r = await apiFetch('/ai/smart-replies', { method: 'POST', body: JSON.stringify({ messages: recent }) });
+    if (chatId !== activeChatId) return; // switched chats while this was in flight
+    if (!r.ok || !r.body || !Array.isArray(r.body.suggestions) || !r.body.suggestions.length) return;
+    renderSmartReplyChips(r.body.suggestions);
+  }
+  function renderSmartReplyChips(suggestions){
+    const el = document.getElementById('smartReplyChips');
+    el.innerHTML = suggestions.map((s, i) => `<div class="smart-reply-chip" data-i="${i}">${escapeHtml(s)}</div>`).join('');
+    el.querySelectorAll('.smart-reply-chip').forEach((chip, i)=>{
+      chip.addEventListener('click', ()=>{
+        // Fills the composer rather than sending immediately — same "you
+        // still get to look at it before it goes out" behavior as every
+        // other suggestion feature in this app already has.
+        msgInput.value = suggestions[i];
+        msgInput.style.height = 'auto';
+        msgInput.style.height = Math.min(msgInput.scrollHeight, 120) + 'px';
+        msgInput.focus();
+        clearSmartReplySuggestions();
+      });
+    });
+    el.style.display = 'flex';
   }
 
   function updateNotifyPrefBtn(){
@@ -8482,7 +8600,7 @@
         return;
       } else if (data.type === 'message'){
         await mergeMessages(chatId, [data.message]);
-        if (activeChatId === chatId) renderConv();
+        if (activeChatId === chatId){ renderConv(); maybeFetchSmartReplies(chatId); }
         renderChatList();
         if (activeChatId === chatId && document.visibilityState === 'visible') markChatRead(chatId);
       } else if (data.type === 'chat-meta'){
@@ -10010,6 +10128,7 @@
     if ((!text && !attachment) || !activeChatId) return;
     const chatId = activeChatId;
     const chat = getChat(chatId);
+    clearSmartReplySuggestions();
 
     const key = await ensureChatKey(chat);
     if (!key){
@@ -10203,6 +10322,10 @@
     msgInput.style.height = Math.min(msgInput.scrollHeight, 120) + 'px';
     sendTypingPing();
     renderMentionMenu();
+    // Once they've started actually composing something themselves, stale
+    // suggestions for what to say are just clutter, not a chip they filled
+    // the box with (that path already clears them itself).
+    if (msgInput.value.trim()) clearSmartReplySuggestions();
   });
 
   // Throttled, one ping at most every 2s while actively typing, not per keystroke.
