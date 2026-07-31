@@ -1372,12 +1372,25 @@
 <div class="overlay" id="createWorkspaceOverlay">
   <div class="modal lg">
     <h3>Create workspace</h3>
-    <div class="hint">You'll be its first admin, able to invite people and manage it.</div>
+    <div class="hint">You'll be its Admin. Workspaces are a paid, recurring subscription, you'll be sent to a secure Paystack checkout next.</div>
     <input type="text" id="createWorkspaceNameInput" placeholder="Workspace name" maxlength="60">
+    <input type="text" id="createWorkspaceEmailInput" placeholder="Email for billing receipts" style="margin-top:-4px;">
     <div class="hint" id="createWorkspaceError" style="display:none;color:#ff6a6a;margin-top:-6px;margin-bottom:12px;"></div>
     <div class="modal-actions">
       <div class="btn" onclick="closeModal('createWorkspaceOverlay')">Cancel</div>
-      <div class="btn primary" id="createWorkspaceSaveBtn">Create</div>
+      <div class="btn primary" id="createWorkspaceSaveBtn">Continue to payment</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ WORKSPACE LOCKED (billing lapsed) ============ -->
+<div class="overlay" id="workspaceLockedOverlay">
+  <div class="modal lg" style="text-align:center;">
+    <h3>Workspace locked</h3>
+    <div class="hint" id="workspaceLockedBody">This workspace's subscription isn't active, so it isn't reachable right now.</div>
+    <div class="modal-actions" style="justify-content:center;margin-top:14px;">
+      <div class="btn" onclick="closeModal('workspaceLockedOverlay'); switchWorkspace(null);">Back to Personal</div>
+      <div class="btn primary" id="workspaceReactivateBtn" style="display:none;">Reactivate</div>
     </div>
   </div>
 </div>
@@ -2355,6 +2368,7 @@
     // workspace that's no longer valid.
     if (!myOrgs.some(o => (o.id || null) === (activeOrgId || null))) activeOrgId = null;
     updateWorkspaceBar();
+    checkActiveWorkspaceBilling();
     activeChatId = null;
     messagesByChat = {};
     userNameCache = {};
@@ -3406,7 +3420,40 @@
     renderChatList();
     renderConv();
     closeModal('workspacesOverlay');
+    checkActiveWorkspaceBilling();
   }
+
+  // Workspaces are a paid subscription now, this is the one place that
+  // actually surfaces a lapsed one to the person looking at it (the server
+  // side gate in isOrgBillingActive is what actually blocks every workspace
+  // endpoint regardless of whether this ever runs, this is purely the UI
+  // telling them why chats/roster/Meeting Room all came back empty/forbidden).
+  async function checkActiveWorkspaceBilling(){
+    if (!activeOrgId){ closeModal('workspaceLockedOverlay'); return; }
+    const r = await apiFetch(`/billing/status?orgId=${encodeURIComponent(activeOrgId)}`);
+    if (!r.ok || !r.body){ return; } // fail open on a network blip, don't lock someone out over that
+    if (r.body.billingStatus === 'active'){ closeModal('workspaceLockedOverlay'); return; }
+    const orgName = r.body.orgName || 'This workspace';
+    document.getElementById('workspaceLockedBody').textContent = r.body.billingStatus === 'past_due'
+      ? `${orgName}'s last payment failed.${r.body.canReactivate ? ' Reactivate below to restore access.' : ' Ask your admin to update billing.'}`
+      : `${orgName}'s subscription isn't active.${r.body.canReactivate ? ' Reactivate below to restore access.' : ' Ask your admin to reactivate it.'}`;
+    const reactivateBtn = document.getElementById('workspaceReactivateBtn');
+    reactivateBtn.style.display = r.body.canReactivate ? 'inline-flex' : 'none';
+    reactivateBtn.dataset.orgId = activeOrgId;
+    openModal('workspaceLockedOverlay');
+  }
+
+  document.getElementById('workspaceReactivateBtn').addEventListener('click', async ()=>{
+    const btn = document.getElementById('workspaceReactivateBtn');
+    const orgId = btn.dataset.orgId;
+    const email = myEmail || prompt('Email for billing receipts:');
+    if (!email) return;
+    btn.textContent = 'Redirecting…';
+    const r = await apiFetch('/billing/checkout-renew', { method: 'POST', body: JSON.stringify({ orgId, email }) });
+    btn.textContent = 'Reactivate';
+    if (!r.ok || !r.body.authorizationUrl){ alert('Could not start checkout. Try again.'); return; }
+    window.location.href = r.body.authorizationUrl;
+  });
 
   document.getElementById('workspaceBar').addEventListener('click', ()=>{
     renderWorkspaceList();
@@ -3420,24 +3467,37 @@
   document.getElementById('createWorkspaceBtn').addEventListener('click', ()=>{
     closeModal('workspacesOverlay');
     document.getElementById('createWorkspaceNameInput').value = '';
+    document.getElementById('createWorkspaceEmailInput').value = myEmail || '';
     document.getElementById('createWorkspaceError').style.display = 'none';
     openModal('createWorkspaceOverlay');
     setTimeout(()=>document.getElementById('createWorkspaceNameInput').focus(), 50);
   });
 
+  // Workspaces are a paid feature now (see isOrgBillingActive in worker.js),
+  // this no longer creates a usable workspace directly, it creates one
+  // locked and immediately sends the browser to Paystack's hosted checkout.
+  // The workspace only actually unlocks once Paystack's webhook confirms the
+  // charge, never off this redirect alone, so there's nothing more to do
+  // here after the redirect fires, the app picks the new state up itself
+  // once the person comes back (see checkActiveWorkspaceBilling).
   document.getElementById('createWorkspaceSaveBtn').addEventListener('click', async ()=>{
     const errEl = document.getElementById('createWorkspaceError');
     const name = document.getElementById('createWorkspaceNameInput').value.trim();
+    const email = document.getElementById('createWorkspaceEmailInput').value.trim();
     if (!name){ errEl.textContent = 'Enter a name.'; errEl.style.display = 'block'; return; }
-    const r = await apiFetch('/org/create', { method: 'POST', body: JSON.stringify({ name }) });
-    if (!r.ok || !r.body.org){
-      errEl.textContent = 'Could not create workspace. Try again.';
+    if (!email || !email.includes('@')){ errEl.textContent = 'Enter a valid email for billing.'; errEl.style.display = 'block'; return; }
+    const saveBtn = document.getElementById('createWorkspaceSaveBtn');
+    saveBtn.textContent = 'Redirecting…';
+    const r = await apiFetch('/billing/checkout-new', { method: 'POST', body: JSON.stringify({ name, email }) });
+    saveBtn.textContent = 'Continue to payment';
+    if (!r.ok || !r.body.authorizationUrl){
+      errEl.textContent = r.body && r.body.error === 'paystack_plan_not_configured'
+        ? 'Billing isn\'t set up yet, ask your admin to configure Paystack.'
+        : 'Could not start checkout. Try again.';
       errEl.style.display = 'block';
       return;
     }
-    myOrgs.push({ id: r.body.org.id, name: r.body.org.name, isAdmin: true });
-    closeModal('createWorkspaceOverlay');
-    switchWorkspace(r.body.org.id);
+    window.location.href = r.body.authorizationUrl;
   });
 
   let activeWorkspaceForMembers = null;

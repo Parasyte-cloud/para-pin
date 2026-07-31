@@ -162,7 +162,12 @@ self.addEventListener('push', (event) => {
   const isChatMessage = !!data.chatId;
   const options = {
     body: data.body || '',
-    icon: '/icon-192.png',
+    // A DM push carries the sender's own photo (see worker.js's /notify
+    // handler), showing their avatar in the banner instead of the generic
+    // app icon, the way a phone's native contact notifications look. Falls
+    // back to the app icon for group chats, calls, and anything else that
+    // has no single "from" person's photo to show.
+    icon: data.avatarUrl || '/icon-192.png',
     badge: '/icon-192.png',
     // One notification per chat (tag), but `renotify` is what makes a second
     // message in that same chat actually alert again (sound/vibration)

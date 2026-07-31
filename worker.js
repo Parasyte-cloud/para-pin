@@ -115,7 +115,23 @@ async function addUserToOrg(storage, orgId, userId) {
   return true;
 }
 
+// ================= Workspace billing (Paystack) =================
+// A workspace only works while its subscription is active. Orgs created
+// before this went in have no billingStatus field at all, those are
+// grandfathered as active rather than retroactively locking out every
+// workspace that already existed, only NEW workspaces (and any that later
+// lapse) actually get stopped at the door. Personal space (orgId null) is
+// never gated, it was never a paid thing to begin with.
+async function isOrgBillingActive(storage, orgId) {
+  if (!orgId) return true;
+  const org = await storage.get(`org:${orgId}`);
+  if (!org) return false;
+  if (org.billingStatus === undefined) return true;
+  return org.billingStatus === 'active';
+}
+
 async function isOrgMember(storage, orgId, userId) {
+  if (!(await isOrgBillingActive(storage, orgId))) return false;
   const members = (await storage.get(`orgMembers:${orgId}`)) || [];
   return members.includes(userId);
 }
@@ -123,10 +139,24 @@ async function isOrgMember(storage, orgId, userId) {
 async function isOrgAdmin(storage, orgId, userId) {
   const org = await storage.get(`org:${orgId}`);
   if (!org) return false;
+  if (org.billingStatus !== undefined && org.billingStatus !== 'active') return false;
   if (Array.isArray(org.admins) && org.admins.includes(userId)) return true;
   // App-wide admins (the same list /admin/promote manages) can manage any
   // workspace too, useful for support/ops without needing to be personally
   // added to every org that gets created.
+  const appAdmins = (await storage.get('admins')) || [];
+  return appAdmins.includes(userId);
+}
+
+// Same admin check as above but WITHOUT the billing gate, only ever used by
+// the billing endpoints themselves (checking status, starting a reactivation
+// payment). Everything else must go through the gated isOrgAdmin, otherwise
+// a lapsed workspace's admin could still reach into the actual workspace
+// (chats, roster, etc.) through any endpoint that used this instead.
+async function isOrgAdminIgnoringBilling(storage, orgId, userId) {
+  const org = await storage.get(`org:${orgId}`);
+  if (!org) return false;
+  if (Array.isArray(org.admins) && org.admins.includes(userId)) return true;
   const appAdmins = (await storage.get('admins')) || [];
   return appAdmins.includes(userId);
 }
@@ -539,6 +569,103 @@ async function sendMagicLinkEmail(env, { to, token, origin }) {
   } catch (e) {
     return { sent: false, error: e && e.message ? e.message : 'unknown error' };
   }
+}
+
+// Sent once a workspace's Paystack subscription clears, from the webhook
+// handler (see /api/billing/webhook). Deliberately a rich inline HTML email
+// rather than a generated .docx attachment: Workers has no good native way
+// to build a real Word file at request time the way a desktop tool can, an
+// email is the reliable "this reaches them automatically, no manual step"
+// delivery method. The full written manual (with the same content plus
+// everything else in the app) can still be handed out separately as a file.
+async function sendAdminWelcomeEmail(env, { to, name, orgName }) {
+  if (!env.RESEND_API_KEY) return { sent: false, error: 'resend_not_configured' };
+  if (!env.RESEND_FROM_EMAIL) return { sent: false, error: 'resend_from_not_configured' };
+  const html = `
+    <div style="font-family:sans-serif; max-width:520px; margin:0 auto; color:#12161b;">
+      <h2>Welcome to Admin, ${escapeHtmlEmail(name || 'there')}</h2>
+      <p>Your payment for <strong>${escapeHtmlEmail(orgName || 'your workspace')}</strong> went through, it's live now.</p>
+      <h3>Quick start</h3>
+      <ul>
+        <li><strong>Invite people:</strong> Settings &rarr; Workspace &rarr; Invite, by PIN or by email.</li>
+        <li><strong>Set permissions:</strong> Settings &rarr; Workspace &rarr; Members lets you grant or withhold specific abilities per person, without making everyone a full admin.</li>
+        <li><strong>Meeting Room:</strong> the icon next to your workspace name in the sidebar, unlimited participants, recording, and AI summaries.</li>
+        <li><strong>Billing:</strong> this is a recurring subscription, if a payment ever fails, the workspace locks until it's brought current, from the same Settings screen.</li>
+      </ul>
+      <p>The PArA PIN team</p>
+    </div>`;
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: env.RESEND_FROM_EMAIL,
+        to: [to],
+        subject: `You're an Admin on PArA PIN`,
+        html,
+        text: `Welcome to Admin, ${name || 'there'}. Your payment for ${orgName || 'your workspace'} went through, it's live now. Invite people and set permissions from Settings > Workspace. Meeting Room lives next to your workspace name in the sidebar. This is a recurring subscription, if a payment fails the workspace locks until you bring it current.`,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      return { sent: false, error: `status ${res.status}${body ? ': ' + body.slice(0, 200) : ''}` };
+    }
+    return { sent: true };
+  } catch (e) {
+    return { sent: false, error: e && e.message ? e.message : 'unknown error' };
+  }
+}
+function escapeHtmlEmail(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ================= Paystack (workspace admin billing) =================
+// Verifies the x-paystack-signature header: HMAC-SHA512 of the exact raw
+// request body, using the Paystack secret key. This MUST run on the raw
+// bytes before any JSON.parse, and MUST pass before anything in the webhook
+// body is trusted, otherwise anyone who finds the webhook URL could activate
+// a workspace for free by POSTing a fake charge.success themselves.
+async function verifyPaystackSignature(rawBody, signatureHeader, secretKey) {
+  if (!signatureHeader || !secretKey) return false;
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey('raw', enc.encode(secretKey), { name: 'HMAC', hash: 'SHA-512' }, false, ['sign']);
+  const sigBuf = await crypto.subtle.sign('HMAC', key, enc.encode(rawBody));
+  const computed = [...new Uint8Array(sigBuf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  if (computed.length !== signatureHeader.length) return false;
+  // Constant-time-ish compare, a webhook signature check shouldn't leak
+  // timing information about how much of the guess was right.
+  let diff = 0;
+  for (let i = 0; i < computed.length; i++) diff |= computed.charCodeAt(i) ^ signatureHeader.charCodeAt(i);
+  return diff === 0;
+}
+
+// Starts a Paystack transaction for the recurring Admin plan. `env.PAYSTACK_PLAN_CODE`
+// is a Plan created in the Paystack dashboard (that's where the actual price
+// and billing interval live, changeable there without touching this code).
+async function paystackInitTransaction(env, { email, orgId, purpose, callbackUrl }) {
+  if (!env.PAYSTACK_SECRET_KEY) return { ok: false, error: 'paystack_not_configured' };
+  if (!env.PAYSTACK_PLAN_CODE) return { ok: false, error: 'paystack_plan_not_configured' };
+  const res = await fetch('https://api.paystack.co/transaction/initialize', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${env.PAYSTACK_SECRET_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      email,
+      plan: env.PAYSTACK_PLAN_CODE,
+      callback_url: callbackUrl,
+      metadata: { orgId, purpose },
+    }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || !body.status) {
+    return { ok: false, error: (body && body.message) || `status ${res.status}` };
+  }
+  return { ok: true, authorizationUrl: body.data.authorization_url, reference: body.data.reference };
 }
 
 export class Registry {
@@ -978,7 +1105,14 @@ export class Registry {
       if (!user) return json({ ok: false });
       const chat = await this.state.storage.get(`chat:${chatId}`);
       if (!chat || !chat.memberIds.includes(user.id)) return json({ ok: false });
-      return json({ ok: true, userId: user.id, displayName: user.displayName, chat });
+      // A workspace chat is still keyed off chat.memberIds, not the org's own
+      // member list, so it needs its own billing check here too, otherwise a
+      // lapsed workspace's chats would keep working even though everything
+      // else (roster, Meeting Room, RBAC) is locked.
+      if (chat.orgId && !(await isOrgBillingActive(this.state.storage, chat.orgId))) {
+        return json({ ok: false, error: 'workspace_payment_required' });
+      }
+      return json({ ok: true, userId: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl || null, chat });
     }
 
     if (request.method === 'POST' && url.pathname === '/leave-group') {
@@ -1148,10 +1282,110 @@ export class Registry {
       if (!name || !name.trim()) return json({ error: 'missing_name' }, 400);
 
       const orgId = crypto.randomUUID();
-      const org = { id: orgId, name: name.trim().slice(0, 60), logoUrl: null, allowEmailAuth: false, emailDomain: null, createdAt: Date.now(), createdBy: me.id, admins: [me.id] };
+      // Starts locked (billingStatus 'pending'): the creator is wired up as
+      // admin/member right away so no separate limbo bookkeeping is needed,
+      // but isOrgMember/isOrgAdmin won't actually let anyone use it (chats,
+      // roster, Meeting Room, all of it) until the Paystack webhook flips
+      // this to 'active'. See isOrgBillingActive.
+      const org = { id: orgId, name: name.trim().slice(0, 60), logoUrl: null, allowEmailAuth: false, emailDomain: null, createdAt: Date.now(), createdBy: me.id, admins: [me.id], billingStatus: 'pending' };
       await this.state.storage.put(`org:${orgId}`, org);
       await addUserToOrg(this.state.storage, orgId, me.id);
       return json({ org });
+    }
+
+    // ---- Workspace billing (Paystack) ----
+    // Called by the outer worker right after it initializes a Paystack
+    // transaction, so the webhook (which only ever gets Paystack's own
+    // `reference` back, not our orgId) has a way to find its way back to the
+    // right workspace once payment actually clears.
+    if (request.method === 'POST' && url.pathname === '/billing/store-ref') {
+      const { reference, orgId, purpose } = await request.json();
+      if (!reference || !orgId) return json({ error: 'missing_fields' }, 400);
+      await this.state.storage.put(`billingRef:${reference}`, { orgId, purpose: purpose || 'workspace_admin' });
+      return json({ ok: true });
+    }
+
+    // Marks a workspace active. Called only from the outer worker's Paystack
+    // webhook handler, after it has independently verified the
+    // x-paystack-signature, this endpoint itself trusts whatever it's given,
+    // all the actual fraud-prevention happens before this is ever reached.
+    if (request.method === 'POST' && url.pathname === '/billing/activate') {
+      const { reference, orgId: directOrgId, customerCode, subscriptionCode, payerEmail } = await request.json();
+      let orgId = directOrgId || null;
+      if (!orgId && reference) {
+        const ref = await this.state.storage.get(`billingRef:${reference}`);
+        orgId = ref ? ref.orgId : null;
+      }
+      // subscription.create fires as its own separate webhook event, after
+      // the charge.success that already resolved+activated the org via
+      // reference, all it carries is the customer code, not our reference or
+      // orgId, so it falls back to the index charge.success just wrote.
+      if (!orgId && customerCode) {
+        orgId = await this.state.storage.get(`orgByCustomerCode:${customerCode}`);
+      }
+      if (!orgId) return json({ error: 'unknown_reference' }, 404);
+      const org = await this.state.storage.get(`org:${orgId}`);
+      if (!org) return json({ error: 'not_found' }, 404);
+      org.billingStatus = 'active';
+      org.paystackCustomerCode = customerCode || org.paystackCustomerCode || null;
+      if (subscriptionCode) org.paystackSubscriptionCode = subscriptionCode;
+      org.payerEmail = payerEmail || org.payerEmail || null;
+      org.billingActivatedAt = Date.now();
+      await this.state.storage.put(`org:${orgId}`, org);
+      // Indexed both ways so a later subscription.disable / invoice event
+      // (which only ever carries Paystack's own codes, never our orgId) can
+      // still find its way back to this workspace.
+      if (org.paystackCustomerCode) await this.state.storage.put(`orgByCustomerCode:${org.paystackCustomerCode}`, orgId);
+      if (org.paystackSubscriptionCode) await this.state.storage.put(`orgBySubscriptionCode:${org.paystackSubscriptionCode}`, orgId);
+      const admins = Array.isArray(org.admins) ? org.admins : [];
+      const adminUserId = admins[0] || org.createdBy;
+      let adminPinHash = null, adminDisplayName = null;
+      if (adminUserId) {
+        adminPinHash = await this.state.storage.get(`userIdToPinHash:${adminUserId}`);
+        const adminUser = adminPinHash ? await this.state.storage.get(`user:${adminPinHash}`) : null;
+        adminDisplayName = adminUser ? adminUser.displayName : null;
+      }
+      return json({ ok: true, org, adminUserId, adminDisplayName });
+    }
+
+    // Called from subscription.disable / invoice.payment_failed. Looks the
+    // workspace up by whichever Paystack code the event carries, since those
+    // events never include our own orgId or reference.
+    if (request.method === 'POST' && url.pathname === '/billing/deactivate') {
+      const { customerCode, subscriptionCode, status } = await request.json();
+      let orgId = null;
+      if (subscriptionCode) orgId = await this.state.storage.get(`orgBySubscriptionCode:${subscriptionCode}`);
+      if (!orgId && customerCode) orgId = await this.state.storage.get(`orgByCustomerCode:${customerCode}`);
+      if (!orgId) return json({ error: 'unknown_subscription' }, 404);
+      const org = await this.state.storage.get(`org:${orgId}`);
+      if (!org) return json({ error: 'not_found' }, 404);
+      org.billingStatus = status === 'canceled' ? 'canceled' : 'past_due';
+      await this.state.storage.put(`org:${orgId}`, org);
+      return json({ ok: true, orgId });
+    }
+
+    // Client-facing status check, deliberately NOT gated by isOrgMember (that
+    // would make a lapsed workspace's own lock screen unreachable, the one
+    // place billing status needs to be readable regardless of billing status
+    // itself). Only a real member (or an app admin) can see it though.
+    if (request.method === 'GET' && url.pathname === '/billing/status') {
+      const pinHash = url.searchParams.get('pinHash');
+      const orgId = url.searchParams.get('orgId');
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me || !orgId) return json({ error: 'not_registered' }, 401);
+      const org = await this.state.storage.get(`org:${orgId}`);
+      if (!org) return json({ error: 'not_found' }, 404);
+      const members = (await this.state.storage.get(`orgMembers:${orgId}`)) || [];
+      const appAdmins = (await this.state.storage.get('admins')) || [];
+      const isMember = members.includes(me.id) || appAdmins.includes(me.id);
+      if (!isMember) return json({ error: 'forbidden' }, 403);
+      const canReactivate = await isOrgAdminIgnoringBilling(this.state.storage, orgId, me.id);
+      return json({
+        ok: true,
+        billingStatus: org.billingStatus === undefined ? 'active' : org.billingStatus,
+        orgName: org.name,
+        canReactivate,
+      });
     }
 
     // Org-admin-only branding: rename the workspace and/or set its logo.
@@ -2345,9 +2579,15 @@ export class UserChannel {
         const subs = shouldPush ? (await this.state.storage.get('pushSubs')) || [] : [];
         if (subs.length) {
           const senderLabel = data.message.fromName || 'Someone';
-          const title = data.chatType === 'group' ? (data.chatName || 'Group') : 'PArA PIN';
-          const body = data.chatType === 'group' ? `${senderLabel} sent a message` : `New message from ${senderLabel}`;
-          const pushPayload = { title, body, chatId: data.chatId };
+          // DMs put the sender's own name in the title (and their photo as
+          // the icon, see avatarUrl below), same as a phone's native "from a
+          // contact" notification, instead of a flat "PArA PIN" title with
+          // the name buried in the body. Groups keep the group name as the
+          // title (there's no single "contact" it's from) and name the
+          // sender in the body instead.
+          const title = data.chatType === 'group' ? (data.chatName || 'Group') : senderLabel;
+          const body = data.chatType === 'group' ? `${senderLabel} sent a message` : 'Sent you a message';
+          const pushPayload = { title, body, chatId: data.chatId, avatarUrl: data.message.fromAvatarUrl || null };
           const stillValid = [];
           for (const sub of subs) {
             try {
@@ -2675,7 +2915,7 @@ export class ChatRoom {
     // E2EE shipped kept their old plaintext `text` field as-is; nothing here
     // retroactively touches old history.
     if (request.method === 'POST' && url.pathname === '/messages') {
-      const { fromUserId, fromName, ciphertext, iv, alg, attachment, replyTo, protected: isProtected } = await request.json();
+      const { fromUserId, fromName, fromAvatarUrl, ciphertext, iv, alg, attachment, replyTo, protected: isProtected } = await request.json();
       const hasCiphertext = ciphertext && iv;
       const hasAttachment = attachment && attachment.url;
       if (!hasCiphertext && !hasAttachment) return json({ error: 'empty' }, 400);
@@ -2694,6 +2934,7 @@ export class ChatRoom {
         id: crypto.randomUUID(),
         fromUserId,
         fromName: fromName || null,
+        fromAvatarUrl: fromAvatarUrl || null,
         ts: Date.now(),
       };
       // Secure Vault: this is purely a client-side render gate (the message
@@ -3820,6 +4061,157 @@ export default {
         });
       }
 
+      // ---- Workspace billing (Paystack) ----
+      // Creating a workspace no longer just works for free, it now goes
+      // through a real Paystack checkout, the org is created up front
+      // (locked, billingStatus 'pending') and only unlocks once the webhook
+      // below confirms payment, see isOrgBillingActive in the Registry DO.
+      if (request.method === 'POST' && url.pathname === '/api/billing/checkout-new') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const { name, email } = await request.json().catch(() => ({}));
+        if (!email) return json({ error: 'missing_email' }, 400);
+        const createRes = await registryStub.fetch('https://internal/org/create', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, name }),
+        });
+        const createBody = await createRes.json();
+        if (!createRes.ok || !createBody.org) return json(createBody, createRes.status);
+        const orgId = createBody.org.id;
+        const pay = await paystackInitTransaction(env, {
+          email,
+          orgId,
+          purpose: 'workspace_admin',
+          callbackUrl: `${url.origin}/billing/callback`,
+        });
+        if (!pay.ok) return json({ error: pay.error || 'paystack_error' }, 502);
+        await registryStub.fetch('https://internal/billing/store-ref', {
+          method: 'POST',
+          body: JSON.stringify({ reference: pay.reference, orgId, purpose: 'workspace_admin' }),
+        });
+        return json({ ok: true, orgId, authorizationUrl: pay.authorizationUrl });
+      }
+
+      // Reactivating a lapsed workspace's subscription, same Paystack flow,
+      // just against an existing orgId instead of a freshly created one.
+      // Only that workspace's admin (checked server-side via billing/status,
+      // never trusted from the client) can trigger this.
+      if (request.method === 'POST' && url.pathname === '/api/billing/checkout-renew') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const { orgId, email } = await request.json().catch(() => ({}));
+        if (!orgId || !email) return json({ error: 'missing_fields' }, 400);
+        const statusRes = await registryStub.fetch(
+          `https://internal/billing/status?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}`
+        );
+        const statusBody = await statusRes.json();
+        if (!statusRes.ok || !statusBody.canReactivate) return json({ error: 'forbidden' }, 403);
+        const pay = await paystackInitTransaction(env, {
+          email,
+          orgId,
+          purpose: 'workspace_renewal',
+          callbackUrl: `${url.origin}/billing/callback`,
+        });
+        if (!pay.ok) return json({ error: pay.error || 'paystack_error' }, 502);
+        await registryStub.fetch('https://internal/billing/store-ref', {
+          method: 'POST',
+          body: JSON.stringify({ reference: pay.reference, orgId, purpose: 'workspace_renewal' }),
+        });
+        return json({ ok: true, orgId, authorizationUrl: pay.authorizationUrl });
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/billing/status') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const orgId = url.searchParams.get('orgId') || '';
+        return registryStub.fetch(
+          `https://internal/billing/status?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}`
+        );
+      }
+
+      // A plain landing page Paystack redirects the browser to after
+      // checkout. It deliberately does NOT activate anything itself, a
+      // redirect is just the customer's browser bouncing back and proves
+      // nothing about whether the charge actually succeeded, only the
+      // signed server-to-server webhook below is trusted for that. This
+      // just tells the person to go back to the app, which will already
+      // have picked up the new billing status by the time they do (the
+      // webhook typically lands within a few seconds).
+      if (request.method === 'GET' && url.pathname === '/billing/callback') {
+        return new Response(
+          `<!doctype html><html><body style="font-family:sans-serif;text-align:center;padding:60px 20px;">
+            <h2>Payment received</h2>
+            <p>You can close this tab and go back to PArA PIN, your workspace will unlock in a few seconds.</p>
+          </body></html>`,
+          { headers: { 'content-type': 'text/html; charset=utf-8' } }
+        );
+      }
+
+      // Paystack's server-to-server webhook, this is the ONLY thing that
+      // actually flips a workspace to active/past_due/canceled. Signature
+      // verification runs on the untouched raw body before anything in it is
+      // trusted, see verifyPaystackSignature.
+      if (request.method === 'POST' && url.pathname === '/api/billing/webhook') {
+        const rawBody = await request.text();
+        const signature = request.headers.get('x-paystack-signature');
+        const valid = await verifyPaystackSignature(rawBody, signature, env.PAYSTACK_SECRET_KEY);
+        if (!valid) return json({ error: 'invalid_signature' }, 401);
+        let event;
+        try { event = JSON.parse(rawBody); } catch (e) { return json({ ok: true }); }
+        const type = event && event.event;
+        const data = (event && event.data) || {};
+        try {
+          if (type === 'charge.success') {
+            const metadata = data.metadata || {};
+            const activateRes = await registryStub.fetch('https://internal/billing/activate', {
+              method: 'POST',
+              body: JSON.stringify({
+                reference: data.reference,
+                orgId: metadata.orgId || null,
+                customerCode: data.customer ? data.customer.customer_code : null,
+                payerEmail: data.customer ? data.customer.email : null,
+              }),
+            });
+            const activateBody = await activateRes.json();
+            if (activateRes.ok && activateBody.ok && activateBody.adminUserId) {
+              const to = (data.customer && data.customer.email) || activateBody.org.payerEmail;
+              if (to) {
+                await sendAdminWelcomeEmail(env, {
+                  to,
+                  name: activateBody.adminDisplayName,
+                  orgName: activateBody.org.name,
+                });
+              }
+            }
+          } else if (type === 'subscription.create') {
+            // Backfills the subscription code onto whichever org
+            // charge.success already activated moments earlier, see the
+            // customerCode fallback lookup in the Registry's /billing/activate.
+            await registryStub.fetch('https://internal/billing/activate', {
+              method: 'POST',
+              body: JSON.stringify({
+                customerCode: data.customer ? data.customer.customer_code : null,
+                subscriptionCode: data.subscription_code || null,
+              }),
+            });
+          } else if (type === 'subscription.disable' || type === 'invoice.payment_failed') {
+            await registryStub.fetch('https://internal/billing/deactivate', {
+              method: 'POST',
+              body: JSON.stringify({
+                customerCode: data.customer ? data.customer.customer_code : null,
+                subscriptionCode: data.subscription_code || null,
+                status: type === 'subscription.disable' ? 'canceled' : 'past_due',
+              }),
+            });
+          }
+        } catch (e) {
+          // Swallow, Paystack retries on non-2xx, and a webhook we can't
+          // fully process (unknown event shape, a lookup miss) shouldn't
+          // turn into an infinite retry storm, just no-op it.
+        }
+        return json({ ok: true });
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/org/invite') {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
@@ -4251,7 +4643,7 @@ export default {
           const { ciphertext, iv, alg, attachment, replyTo, protected: isProtected } = await request.json();
           const res = await roomStub.fetch('https://internal/messages', {
             method: 'POST',
-            body: JSON.stringify({ fromUserId: verify.userId, fromName: verify.displayName, ciphertext, iv, alg, attachment, replyTo, protected: !!isProtected }),
+            body: JSON.stringify({ fromUserId: verify.userId, fromName: verify.displayName, fromAvatarUrl: verify.avatarUrl || null, ciphertext, iv, alg, attachment, replyTo, protected: !!isProtected }),
           });
           const resBody = await res.json();
 
