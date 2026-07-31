@@ -1020,7 +1020,7 @@ export class Registry {
     const url = new URL(request.url);
 
     if (request.method === 'POST' && url.pathname === '/session') {
-      const { pinHash, displayName, deviceId, ip, ua } = await request.json();
+      const { pinHash, displayName, deviceId, ip, ua, country } = await request.json();
       if (!pinHash) return json({ error: 'missing_pin_hash' }, 400);
 
       // Every login attempt counts against this IP's budget, whether it
@@ -1093,6 +1093,13 @@ export class Registry {
         await this.state.storage.put(`user:${pinHash}`, user);
         await this.state.storage.put(`userById:${user.id}`, userByIdSnapshot(user));
       }
+
+      // Captured before the trust-check below can mutate deviceIds, used
+      // later to decide whether a new-location alert makes sense — signing
+      // in from a new country on a device that was JUST approved isn't a
+      // separate signal worth another push, the device-approval flow
+      // already alerted for that same event.
+      const deviceWasAlreadyTrusted = Array.isArray(user.deviceIds) && user.deviceIds.includes(deviceId);
 
       // Device trust: the PIN alone isn't enough to sign in from a device
       // that isn't already trusted, this is what actually answers "someone
@@ -1227,6 +1234,24 @@ export class Registry {
         user.deviceMeta = user.deviceMeta || {};
         if (!user.deviceMeta[deviceId]) user.deviceMeta[deviceId] = { label: guessDeviceLabel(ua), addedAt: Date.now() };
         user.deviceMeta[deviceId].lastSeenAt = Date.now();
+
+        // New-location alert: a previously-trusted device signing in from a
+        // country this account hasn't seen before. Deliberately narrow —
+        // only fires for an ALREADY-trusted device (a brand-new device's
+        // first-ever sign-in already gets its own alert, either the
+        // device-approval push above or is simply the account's very first
+        // login ever) and only once per new country (it becomes the new
+        // baseline immediately, so a person who actually travels doesn't
+        // get re-alerted every single day they stay there).
+        if (country && deviceWasAlreadyTrusted && user.lastKnownCountry && user.lastKnownCountry !== country && this.env.USER_CHANNEL) {
+          const payload = JSON.stringify({ title: 'PArA PIN', body: `Your account was just signed in to from a new location (${country}). Wasn't you? Check Settings > Security > Devices.`, chatId: null });
+          try {
+            const stub = this.env.USER_CHANNEL.get(this.env.USER_CHANNEL.idFromName(user.id));
+            await stub.fetch('https://internal/push-direct', { method: 'POST', body: payload });
+          } catch (e) {}
+        }
+        if (country) user.lastKnownCountry = country;
+
         await this.state.storage.put(`user:${pinHash}`, user);
       }
 
@@ -3593,6 +3618,21 @@ export class Registry {
       user.pendingDeviceLink = null;
       await this.state.storage.put(`user:${pinHash}`, user);
       await this.state.storage.put(`userById:${user.id}`, userByIdSnapshot(user));
+
+      // Threat-protection alert: whoever's holding the approving device
+      // (the one that just typed the code in) gets a push confirming a new
+      // device was added — the moment worth flagging isn't the request (the
+      // requester might be a stranger who merely knows the shared PIN), it's
+      // the approval, because that's the step that actually grants access.
+      // If the person approving didn't expect this, this is their signal.
+      if (this.env.USER_CHANNEL) {
+        const payload = JSON.stringify({ title: 'PArA PIN', body: "A new device was just added to your account. Wasn't you? Remove it in Settings > Security > Devices.", chatId: null });
+        try {
+          const stub = this.env.USER_CHANNEL.get(this.env.USER_CHANNEL.idFromName(user.id));
+          await stub.fetch('https://internal/push-direct', { method: 'POST', body: payload });
+        } catch (e) {}
+      }
+
       // Returned so the APPROVING device can immediately re-wrap its chat
       // keys for the newly-trusted device (see rewrapAllChatsForDevice on
       // the client), without this, the new device would sit there able to
@@ -4664,11 +4704,26 @@ export default {
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
         const body = await request.json().catch(() => ({}));
         const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+        const ua = request.headers.get('User-Agent') || null;
+        const country = (request.cf && request.cf.country) || null;
         const res = await registryStub.fetch('https://internal/session', {
           method: 'POST',
-          body: JSON.stringify({ pinHash, displayName: body.displayName || null, deviceId: body.deviceId || null, ip }),
+          body: JSON.stringify({ pinHash, displayName: body.displayName || null, deviceId: body.deviceId || null, ip, ua, country }),
         });
         return res;
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/devices') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        return registryStub.fetch(`https://internal/devices?pinHash=${encodeURIComponent(pinHash)}`);
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/devices/remove') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/devices/remove', { method: 'POST', body: JSON.stringify({ pinHash, id: body.id }) });
       }
 
       if (request.method === 'POST' && url.pathname === '/api/mfa/setup') {
