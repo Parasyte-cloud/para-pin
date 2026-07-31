@@ -2180,6 +2180,15 @@
         <div class="hint" id="rosterError" style="display:none; color:#ff6a6a; margin-top:-6px;"></div>
         <div class="btn primary" id="rosterAddBtn" style="margin-bottom:14px;">Generate PIN</div>
         <div id="rosterNewPin" class="roster-new-pin" style="display:none;"></div>
+        <div style="border-top:1px solid var(--border); padding-top:12px; margin-bottom:14px;">
+          <div class="hint" style="margin-bottom:6px;">Bulk import from CSV — columns: name, department, email (header row optional, email column optional).</div>
+          <div style="display:flex; gap:8px;">
+            <div class="btn" id="rosterBulkImportBtn">Choose CSV file</div>
+            <div class="btn" id="rosterBulkTemplateBtn">Download template</div>
+          </div>
+          <input type="file" id="rosterBulkFileInput" accept=".csv,text/csv" style="display:none;">
+          <div class="hint" id="rosterBulkStatus" style="display:none; margin-top:8px;"></div>
+        </div>
         <div class="contact-pick" id="rosterList" style="max-height:none;"></div>
       </section>
       <section class="admin-console-section" data-section="devices" style="display:none;">
@@ -8646,6 +8655,79 @@
       const emailNote = !email ? '' : ` Tried to email this to ${escapeHtml(email)} but it didn't go through${r.body.emailError && r.body.emailError !== 'resend_not_configured' ? ' (' + escapeHtml(r.body.emailError) + ')' : ' (email isn\'t set up yet)'}, share the PIN directly instead.`;
       rosterNewPin.innerHTML = `<div class="rp-pin">${r.body.pin.split('').join(' ')}</div><div class="rp-note">${escapeHtml(r.body.entry.name)}'s PIN, shown once, share it with them now. They'll be asked to choose their own PIN the first time they sign in.${emailNote}</div>`;
     }
+    loadRoster();
+  });
+
+  // ---------------- bulk CSV roster import ----------------
+  // Minimal RFC 4180 parser (quoted fields, doubled-quote escaping,
+  // \r\n or \n line endings) — enough for what a spreadsheet export
+  // actually produces, not a general-purpose CSV library.
+  function parseCsvText(text){
+    const rows = [];
+    let row = [], field = '', inQuotes = false;
+    for (let i = 0; i < text.length; i++){
+      const c = text[i];
+      if (inQuotes){
+        if (c === '"'){ if (text[i+1] === '"'){ field += '"'; i++; } else inQuotes = false; }
+        else field += c;
+      } else if (c === '"'){ inQuotes = true; }
+      else if (c === ','){ row.push(field); field = ''; }
+      else if (c === '\n'){ row.push(field); rows.push(row); row = []; field = ''; }
+      else if (c === '\r'){ /* skip, the \n right after it closes the row */ }
+      else field += c;
+    }
+    if (field.length || row.length){ row.push(field); rows.push(row); }
+    return rows.filter(r => r.some(cell => cell.trim() !== ''));
+  }
+  document.getElementById('rosterBulkTemplateBtn').addEventListener('click', ()=>{
+    downloadCsv('para-pin-roster-template.csv', 'name,department,email\nJane Smith,Engineering,jane@example.com\nJohn Doe,Sales,\n');
+  });
+  document.getElementById('rosterBulkImportBtn').addEventListener('click', ()=> document.getElementById('rosterBulkFileInput').click());
+  document.getElementById('rosterBulkFileInput').addEventListener('change', async ()=>{
+    const input = document.getElementById('rosterBulkFileInput');
+    const statusEl = document.getElementById('rosterBulkStatus');
+    const file = input.files[0];
+    input.value = '';
+    if (!file) return;
+    const text = await file.text();
+    const parsed = parseCsvText(text);
+    if (!parsed.length){
+      statusEl.style.display = 'block';
+      statusEl.textContent = "That file didn't have any rows to import.";
+      return;
+    }
+    // First row is a header (rather than a real person) if its first cell
+    // reads as a label, not a name — "name" itself, case-insensitively, is
+    // by far the common case, so that's the one check that matters.
+    const startIdx = parsed[0][0] && parsed[0][0].trim().toLowerCase() === 'name' ? 1 : 0;
+    const rows = parsed.slice(startIdx)
+      .map(r => ({ name: (r[0] || '').trim(), department: (r[1] || '').trim(), email: (r[2] || '').trim() }))
+      .filter(r => r.name);
+    if (!rows.length){
+      statusEl.style.display = 'block';
+      statusEl.textContent = 'No rows with a name column to import.';
+      return;
+    }
+    if (rows.length > 500){
+      statusEl.style.display = 'block';
+      statusEl.textContent = `That's ${rows.length} rows, imports are capped at 500 at a time. Split the file and try again.`;
+      return;
+    }
+    statusEl.style.display = 'block';
+    statusEl.textContent = `Importing ${rows.length} people…`;
+    const r = await apiFetch('/admin/roster/bulk', { method: 'POST', body: JSON.stringify({ rows }) });
+    if (!r.ok){
+      statusEl.textContent = "Couldn't import that file. Try again.";
+      return;
+    }
+    const skippedNames = (r.body.results || []).filter(x => x.status === 'skipped_duplicate').map(x => x.name);
+    const failedNames = (r.body.results || []).filter(x => x.status === 'failed').map(x => x.name);
+    let msg = `Imported ${r.body.created}, skipped ${r.body.skipped} already on the roster`;
+    if (r.body.failed) msg += `, ${r.body.failed} failed`;
+    msg += '.';
+    if (skippedNames.length) msg += ` Skipped: ${skippedNames.slice(0, 10).join(', ')}${skippedNames.length > 10 ? '…' : ''}.`;
+    if (failedNames.length) msg += ` Failed: ${failedNames.slice(0, 10).join(', ')}${failedNames.length > 10 ? '…' : ''}.`;
+    statusEl.textContent = msg;
     loadRoster();
   });
 

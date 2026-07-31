@@ -3289,12 +3289,12 @@ export class Registry {
       return json({ entries });
     }
 
-    if (request.method === 'POST' && url.pathname === '/admin/roster') {
-      const { requesterId, name, department, email, force } = await request.json();
-      const admins = (await this.state.storage.get('admins')) || [];
-      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
-      if (!name || !name.trim()) return json({ error: 'missing_name' }, 400);
-      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: 'invalid_email' }, 400);
+    // Shared by the single-entry POST /admin/roster below and the bulk CSV
+    // import further down — same PIN generation, same duplicate-name check,
+    // same optional onboarding email, one entry at a time either way.
+    const createRosterEntry = async (storage, env, { name, department, email, force }) => {
+      if (!name || !name.trim()) return { ok: false, error: 'missing_name' };
+      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { ok: false, error: 'invalid_email' };
 
       // Generating a second PIN for a name that's already on the roster
       // creates a genuinely separate account, not a second way in for the
@@ -3307,11 +3307,11 @@ export class Registry {
       // happen to share a name).
       if (!force) {
         const trimmedName = name.trim().toLowerCase();
-        const list = (await this.state.storage.get('rosterList')) || [];
+        const list = (await storage.get('rosterList')) || [];
         for (const id of list) {
-          const e = await this.state.storage.get(`roster:${id}`);
+          const e = await storage.get(`roster:${id}`);
           if (e && e.status !== 'disabled' && e.name.trim().toLowerCase() === trimmedName) {
-            return json({ error: 'duplicate_name', existingStatus: e.status }, 409);
+            return { ok: false, error: 'duplicate_name', existingStatus: e.status };
           }
         }
       }
@@ -3321,11 +3321,11 @@ export class Registry {
       for (let attempt = 0; attempt < 20; attempt++) {
         const candidate = String(Math.floor(1000000 + Math.random() * 9000000));
         const candidateHash = await sha256Hex(candidate);
-        const existingUser = await this.state.storage.get(`user:${candidateHash}`);
-        const existingRoster = await this.state.storage.get(`rosterByPin:${candidateHash}`);
+        const existingUser = await storage.get(`user:${candidateHash}`);
+        const existingRoster = await storage.get(`rosterByPin:${candidateHash}`);
         if (!existingUser && !existingRoster) { pin = candidate; pinHash = candidateHash; break; }
       }
-      if (!pin) return json({ error: 'could_not_generate_pin' }, 500);
+      if (!pin) return { ok: false, error: 'could_not_generate_pin' };
 
       const id = crypto.randomUUID();
       const entry = {
@@ -3338,14 +3338,14 @@ export class Registry {
         createdAt: Date.now(),
         claimedAt: null,
       };
-      await this.state.storage.put(`roster:${id}`, entry);
-      await this.state.storage.put(`rosterByPin:${pinHash}`, id);
-      const list = (await this.state.storage.get('rosterList')) || [];
-      await this.state.storage.put('rosterList', [...list, id]);
+      await storage.put(`roster:${id}`, entry);
+      await storage.put(`rosterByPin:${pinHash}`, id);
+      const list = (await storage.get('rosterList')) || [];
+      await storage.put('rosterList', [...list, id]);
 
       let emailResult = { sent: false, error: 'no_email_provided' };
       if (entry.email) {
-        emailResult = await sendOnboardingEmail(this.env, { to: entry.email, name: entry.name, pin });
+        emailResult = await sendOnboardingEmail(env, { to: entry.email, name: entry.name, pin });
       }
 
       // Once the PIN has actually been emailed to the person, there's no
@@ -3356,7 +3356,52 @@ export class Registry {
       // again after this point. If email delivery failed (or wasn't
       // configured), the admin still needs to see and hand over the PIN
       // themselves, so it's included in that case.
-      return json({ entry, pin: emailResult.sent ? undefined : pin, emailSent: emailResult.sent, emailError: emailResult.sent ? undefined : emailResult.error });
+      return { ok: true, entry, pin: emailResult.sent ? undefined : pin, emailSent: emailResult.sent, emailError: emailResult.sent ? undefined : emailResult.error };
+    };
+
+    if (request.method === 'POST' && url.pathname === '/admin/roster') {
+      const { requesterId, name, department, email, force } = await request.json();
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      const result = await createRosterEntry(this.state.storage, this.env, { name, department, email, force });
+      if (!result.ok) return json({ error: result.error, existingStatus: result.existingStatus }, result.error === 'duplicate_name' ? 409 : result.error === 'missing_name' || result.error === 'invalid_email' ? 400 : 500);
+      return json({ entry: result.entry, pin: result.pin, emailSent: result.emailSent, emailError: result.emailError });
+    }
+
+    // Bulk CSV import: same per-person logic as the single-entry endpoint
+    // above, just looped — sequentially, not in parallel, because PIN
+    // generation and the duplicate-name check both read+write shared
+    // storage keys (rosterList, rosterByPin:*) that a batch of concurrent
+    // calls could race on and corrupt. Capped at 500 rows per call, both to
+    // keep one Durable Object invocation from running long enough to hit a
+    // request timeout, and because anything bigger than that is more
+    // likely a bad paste (wrong file, wrong column) than a real headcount.
+    if (request.method === 'POST' && url.pathname === '/admin/roster/bulk') {
+      const { requesterId, rows } = await request.json();
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      if (!Array.isArray(rows) || !rows.length) return json({ error: 'no_rows' }, 400);
+      if (rows.length > 500) return json({ error: 'too_many_rows', max: 500 }, 400);
+
+      const results = [];
+      let created = 0, skipped = 0, failed = 0;
+      for (const row of rows) {
+        const name = (row && row.name) || '';
+        const department = (row && row.department) || '';
+        const email = (row && row.email) || '';
+        const r = await createRosterEntry(this.state.storage, this.env, { name, department, email, force: false });
+        if (r.ok) {
+          created++;
+          results.push({ name: r.entry.name, status: 'created', emailSent: r.emailSent });
+        } else if (r.error === 'duplicate_name') {
+          skipped++;
+          results.push({ name: name.trim() || '(blank)', status: 'skipped_duplicate' });
+        } else {
+          failed++;
+          results.push({ name: name.trim() || '(blank)', status: 'failed', error: r.error });
+        }
+      }
+      return json({ created, skipped, failed, results });
     }
 
     if (request.method === 'POST' && url.pathname === '/admin/roster/disable') {
@@ -4889,6 +4934,19 @@ export default {
             body: JSON.stringify({ requesterId: who.userId, name: body.name, department: body.department, email: body.email, force: !!body.force }),
           });
         }
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/admin/roster/bulk') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/admin/roster/bulk', {
+          method: 'POST',
+          body: JSON.stringify({ requesterId: who.userId, rows: body.rows }),
+        });
       }
 
       if (url.pathname === '/api/admin/retention') {
