@@ -2091,6 +2091,62 @@
   </div>
 </div>
 
+<!-- ============ MFA SETUP (authenticator app, two steps: confirm code then show backup codes) ============ -->
+<div class="overlay" id="mfaSetupOverlay">
+  <div class="modal lg" style="text-align:center;">
+    <h3>Set up two-factor authentication</h3>
+    <div id="mfaSetupStep1">
+      <div class="hint">Add this key to an authenticator app (Google Authenticator, Authy, 1Password, etc), then enter the 6-digit code it shows.</div>
+      <div class="hint" id="mfaSetupSecret" style="margin-top:10px; word-break:break-all; font-family:monospace; font-size:15px; letter-spacing:1px; color:var(--text);"></div>
+      <input type="tel" inputmode="numeric" id="mfaSetupCodeInput" placeholder="6-digit code" maxlength="6" style="margin-top:14px; text-align:center; letter-spacing:6px;">
+      <div class="hint" id="mfaSetupError" style="display:none; color:#ff6a6a;"></div>
+    </div>
+    <div id="mfaSetupStep2" style="display:none;">
+      <div class="hint" style="color:#ff6a6a; font-weight:600;">Save these backup codes now, you won't see them again. Each works once if you lose access to your authenticator app.</div>
+      <div id="mfaSetupBackupCodes" style="font-family:monospace; font-size:15px; line-height:1.9; margin:12px 0; letter-spacing:1px;"></div>
+    </div>
+    <div class="modal-actions" id="mfaSetupStep1Actions">
+      <div class="btn" onclick="closeModal('mfaSetupOverlay')">Cancel</div>
+      <div class="btn primary" id="mfaSetupConfirmBtn">Confirm</div>
+    </div>
+    <div class="modal-actions" id="mfaSetupStep2Actions" style="display:none;">
+      <div class="btn primary" id="mfaSetupDoneBtn" style="width:100%;">I've saved these, done</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MFA DISABLE ============ -->
+<div class="overlay" id="mfaDisableOverlay">
+  <div class="modal lg" style="text-align:center;">
+    <h3>Turn off two-factor authentication</h3>
+    <div class="hint">Enter a current code from your authenticator app to confirm.</div>
+    <input type="tel" inputmode="numeric" id="mfaDisableCodeInput" placeholder="6-digit code" maxlength="6" style="margin-top:14px; text-align:center; letter-spacing:6px;">
+    <div class="hint" id="mfaDisableError" style="display:none; color:#ff6a6a;"></div>
+    <div class="modal-actions">
+      <div class="btn" onclick="closeModal('mfaDisableOverlay')">Cancel</div>
+      <div class="btn primary" id="mfaDisableSubmitBtn">Turn off</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MFA VERIFY (login-time second factor, mandatory: no cancel/backdrop close) ============ -->
+<div class="overlay" id="mfaVerifyOverlay" data-mandatory="1">
+  <div class="modal lg" style="text-align:center;">
+    <h3>Two-factor authentication</h3>
+    <div id="mfaVerifyCodeSection">
+      <div class="hint">Enter the 6-digit code from your authenticator app, or one of your backup codes.</div>
+      <input type="text" inputmode="numeric" id="mfaVerifyCodeInput" placeholder="Code" maxlength="10" style="margin-top:14px; text-align:center; letter-spacing:4px;">
+    </div>
+    <div class="hint" id="mfaVerifyError" style="display:none; color:#ff6a6a;"></div>
+    <div class="modal-actions" id="mfaVerifyCodeActions">
+      <div class="btn primary" id="mfaVerifySubmitBtn" style="width:100%;">Verify</div>
+    </div>
+    <div class="modal-actions" id="mfaVerifyPasskeyActions" style="display:none;">
+      <div class="btn" id="mfaVerifyPasskeyBtn" style="width:100%;">Use a passkey instead</div>
+    </div>
+  </div>
+</div>
+
 <!-- ============ ADMIN CONSOLE (full screen) ============ -->
 <div class="overlay admin-console-overlay" id="rosterOverlay">
   <div class="modal lg admin-console">
@@ -2216,6 +2272,21 @@
         <div class="settings-row settings-row-action" id="settingsAdminBtn" style="display:none;"><span>Admin console</span><span>👥</span></div>
         <div class="settings-row settings-row-action" id="settingsPanicBtn" style="margin-top:10px; border-color:rgba(255,90,90,0.35); background:rgba(255,90,90,0.06);"><span style="color:#ff6a6a; font-weight:700;">Panic button</span><span>🆘</span></div>
         <div class="hint" style="margin-top:-4px;">Instantly ends any active call or meeting and locks the app back to the PIN screen. No confirmation, one tap and you're out.</div>
+      </section>
+      <section class="admin-console-section">
+        <h3>Security</h3>
+        <div class="settings-row">
+          <span>Two-factor authentication</span>
+          <span id="settingsMfaStatus">Off</span>
+        </div>
+        <div class="hint">Adds a code from an authenticator app on top of your PIN. Checked once per new device, not on every unlock.</div>
+        <div class="settings-row settings-row-action" id="settingsMfaToggleBtn" style="margin-top:10px;"><span id="settingsMfaToggleLabel">Enable two-factor authentication</span><span>🔐</span></div>
+        <div style="margin-top:16px;">
+          <div class="hint" style="margin-bottom:6px;">Passkeys (Face ID, Touch ID, Windows Hello, or a security key)</div>
+          <div id="settingsPasskeyList" style="display:flex; flex-direction:column; gap:6px; margin-bottom:8px;"></div>
+          <div class="settings-row settings-row-action" id="settingsAddPasskeyBtn"><span>Add a passkey</span><span>🔑</span></div>
+          <div class="hint" id="settingsPasskeyError" style="display:none; color:#ff6a6a;"></div>
+        </div>
       </section>
       <section class="admin-console-section">
         <h3>About</h3>
@@ -2777,6 +2848,8 @@
         showSessionBanner('This PIN has been disabled. Contact your admin if that seems wrong.');
       } else if (r.body && r.body.error === 'device_approval_required') {
         openDeviceApprovalFlow();
+      } else if (r.body && r.body.error === 'mfa_required') {
+        openMfaVerifyFlow(r.body.methods);
       } else if (r.body && r.body.error === 'rate_limited') {
         showSessionBanner(`Too many sign-in attempts. Try again in ${formatRetryAfter(r.body.retryAfterMs)}.`);
       } else {
@@ -2900,6 +2973,8 @@
           renderApp();
         } else if (r.body && r.body.error === 'device_approval_required') {
           openDeviceApprovalFlow();
+        } else if (r.body && r.body.error === 'mfa_required') {
+          openMfaVerifyFlow(r.body.methods);
         } else {
           showSessionBanner(r.networkError ? "Still can't reach the server." : 'Still failing. Try again shortly.');
         }
@@ -2967,6 +3042,98 @@
         document.getElementById('deviceApprovalRequestBtn').style.display = 'block';
       }
     }, 4000);
+  });
+
+  // ================= MFA (login-time second factor) =================
+  // Reached from initSession's mfa_required branch: myPinHash is already
+  // set at that point (it's derived before /session is ever called), so
+  // this just needs one more factor, then the exact same simplest-reliable-
+  // option as device approval above: reload and let initSession run again,
+  // this device's id is now in mfaVerifiedDeviceIds so /session will pass.
+  // `methods` (from /session's mfa_required error body) says which second
+  // factors this account actually has configured, a passkey-only account
+  // shouldn't be shown a "enter a code" box it has no way to satisfy.
+  function openMfaVerifyFlow(methods){
+    methods = methods || {};
+    document.getElementById('mfaVerifyCodeInput').value = '';
+    document.getElementById('mfaVerifyError').style.display = 'none';
+    const showCode = methods.totp !== false; // default to showing it (backup codes also live here) unless explicitly told there's no TOTP
+    document.getElementById('mfaVerifyCodeSection').style.display = showCode ? 'block' : 'none';
+    document.getElementById('mfaVerifyCodeActions').style.display = showCode ? 'flex' : 'none';
+    document.getElementById('mfaVerifyPasskeyActions').style.display = methods.webauthn ? 'flex' : 'none';
+    openModal('mfaVerifyOverlay');
+    if (showCode) setTimeout(()=>document.getElementById('mfaVerifyCodeInput').focus(), 50);
+  }
+  document.getElementById('mfaVerifySubmitBtn').addEventListener('click', async function(){
+    const btn = this;
+    const errEl = document.getElementById('mfaVerifyError');
+    const code = document.getElementById('mfaVerifyCodeInput').value.trim();
+    if (!code){
+      errEl.textContent = 'Enter a code.';
+      errEl.style.display = 'block';
+      return;
+    }
+    btn.disabled = true;
+    const r = await apiFetch('/mfa/verify-login', { method: 'POST', body: JSON.stringify({ deviceId: myDeviceId, code }) });
+    btn.disabled = false;
+    if (!r.ok){
+      errEl.textContent = r.body && r.body.error === 'invalid_code' ? "That code didn't work. Check the app and try again, or use a backup code."
+        : r.body && r.body.error === 'rate_limited' ? `Too many attempts. Try again in ${formatRetryAfter(r.body.retryAfterMs)}.`
+        : "Couldn't verify that. Try again.";
+      errEl.style.display = 'block';
+      return;
+    }
+    closeModal('mfaVerifyOverlay');
+    location.reload();
+  });
+  document.getElementById('mfaVerifyCodeInput').addEventListener('keydown', (e)=>{
+    if (e.key === 'Enter') document.getElementById('mfaVerifySubmitBtn').click();
+  });
+  document.getElementById('mfaVerifyPasskeyBtn').addEventListener('click', async function(){
+    const errEl = document.getElementById('mfaVerifyError');
+    errEl.style.display = 'none';
+    if (!window.PublicKeyCredential || !navigator.credentials){
+      errEl.textContent = "This browser doesn't support passkeys, enter a code instead.";
+      errEl.style.display = 'block';
+      return;
+    }
+    const optRes = await apiFetch('/webauthn/auth-options', { method: 'POST' });
+    if (!optRes.ok){
+      errEl.textContent = "Couldn't start passkey sign-in. Try a code instead.";
+      errEl.style.display = 'block';
+      return;
+    }
+    const opts = optRes.body;
+    let assertion;
+    try {
+      assertion = await navigator.credentials.get({
+        publicKey: {
+          challenge: e2eeB64ToBuf(opts.challenge),
+          rpId: opts.rpId,
+          allowCredentials: (opts.allowCredentialIds || []).map(id => ({ type: 'public-key', id: e2eeB64ToBuf(id) })),
+          userVerification: 'preferred',
+          timeout: 60000,
+        },
+      });
+    } catch(e){
+      errEl.textContent = e && e.name === 'NotAllowedError' ? 'Cancelled.' : "Couldn't use that passkey. Try a code instead.";
+      errEl.style.display = 'block';
+      return;
+    }
+    const r = await apiFetch('/webauthn/auth-verify', { method: 'POST', body: JSON.stringify({
+      deviceId: myDeviceId,
+      credentialId: e2eeBufToB64(assertion.rawId),
+      authenticatorData: e2eeBufToB64(assertion.response.authenticatorData),
+      clientDataJSON: e2eeBufToB64(assertion.response.clientDataJSON),
+      signature: e2eeBufToB64(assertion.response.signature),
+    }) });
+    if (!r.ok){
+      errEl.textContent = r.body && r.body.error === 'rate_limited' ? `Too many attempts. Try again in ${formatRetryAfter(r.body.retryAfterMs)}.` : "That passkey didn't verify. Try a code instead.";
+      errEl.style.display = 'block';
+      return;
+    }
+    closeModal('mfaVerifyOverlay');
+    location.reload();
   });
 
   document.getElementById('approveDeviceOpenBtn').addEventListener('click', ()=>{
@@ -8089,6 +8256,7 @@
     openModal('settingsOverlay');
     renderNotifStatus();
     refreshPremiumStatus();
+    refreshMfaStatus();
   }
 
   // ---------------- PArA Premium (per-user upgrade) ----------------
@@ -8151,6 +8319,155 @@
     localStorage.setItem('parapin_smart_replies', smartRepliesEnabled ? 'on' : 'off');
     if (!smartRepliesEnabled) clearSmartReplySuggestions();
   });
+
+  // ---------------- MFA: TOTP authenticator app + passkeys, per-device ----------------
+  // Two independent second-factor methods share one overall "MFA is on for
+  // this account" status (see the /session gate in worker.js, which OR's
+  // them together), but each has its own setup/teardown UI here: TOTP is a
+  // single on/off toggle, passkeys are a list you can have several of.
+  let totpEnabled = false;
+  async function refreshMfaStatus(){
+    const r = await apiFetch('/mfa/status');
+    const overallEnabled = !!(r.ok && r.body && r.body.enabled);
+    totpEnabled = !!(r.ok && r.body && r.body.totpEnabled);
+    document.getElementById('settingsMfaStatus').textContent = overallEnabled ? 'On' : 'Off';
+    document.getElementById('settingsMfaToggleLabel').textContent = totpEnabled ? 'Turn off two-factor authentication' : 'Enable two-factor authentication';
+    const listEl = document.getElementById('settingsPasskeyList');
+    const creds = (r.ok && r.body && r.body.webauthnCredentials) || [];
+    listEl.innerHTML = creds.length ? creds.map(c => `
+      <div class="settings-row">
+        <span>${escapeHtml(c.label || 'Passkey')}</span>
+        <span class="btn" style="padding:4px 10px; font-size:12px;" data-remove-passkey="${escapeHtml(c.id)}">Remove</span>
+      </div>
+    `).join('') : '<div class="hint">No passkeys added yet.</div>';
+  }
+  document.getElementById('settingsPasskeyList').addEventListener('click', async (e)=>{
+    const id = e.target && e.target.dataset && e.target.dataset.removePasskey;
+    if (!id) return;
+    const r = await apiFetch('/webauthn/remove', { method: 'POST', body: JSON.stringify({ id }) });
+    if (r.ok) refreshMfaStatus();
+    else alert("Couldn't remove that passkey. Try again.");
+  });
+  function guessPasskeyLabel(){
+    const ua = navigator.userAgent || '';
+    const platform = /iPhone|iPad/.test(ua) ? 'iPhone/iPad' : /Macintosh/.test(ua) ? 'Mac' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : 'this device';
+    return `Passkey (${platform})`;
+  }
+  document.getElementById('settingsAddPasskeyBtn').addEventListener('click', async ()=>{
+    const errEl = document.getElementById('settingsPasskeyError');
+    errEl.style.display = 'none';
+    if (!window.PublicKeyCredential || !navigator.credentials){
+      errEl.textContent = "This browser doesn't support passkeys.";
+      errEl.style.display = 'block';
+      return;
+    }
+    const optRes = await apiFetch('/webauthn/register-options', { method: 'POST' });
+    if (!optRes.ok){
+      errEl.textContent = "Couldn't start passkey setup. Try again.";
+      errEl.style.display = 'block';
+      return;
+    }
+    const opts = optRes.body;
+    let credential;
+    try {
+      credential = await navigator.credentials.create({
+        publicKey: {
+          challenge: e2eeB64ToBuf(opts.challenge),
+          rp: { id: opts.rpId, name: opts.rpName || 'PArA PIN' },
+          user: { id: e2eeB64ToBuf(opts.userId), name: opts.userName, displayName: opts.userName },
+          pubKeyCredParams: [{ type: 'public-key', alg: -7 }], // ES256 only, see the WebAuthn comment block in worker.js for why
+          authenticatorSelection: { userVerification: 'preferred' },
+          timeout: 60000,
+          excludeCredentials: (opts.excludeCredentialIds || []).map(id => ({ type: 'public-key', id: e2eeB64ToBuf(id) })),
+        },
+      });
+    } catch(e){
+      errEl.textContent = e && e.name === 'NotAllowedError' ? 'Cancelled.' : "Couldn't create that passkey. Try again.";
+      errEl.style.display = 'block';
+      return;
+    }
+    const r = await apiFetch('/webauthn/register-verify', { method: 'POST', body: JSON.stringify({
+      attestationObject: e2eeBufToB64(credential.response.attestationObject),
+      clientDataJSON: e2eeBufToB64(credential.response.clientDataJSON),
+      label: guessPasskeyLabel(),
+    }) });
+    if (!r.ok){
+      errEl.textContent = "Couldn't save that passkey. Try again.";
+      errEl.style.display = 'block';
+      return;
+    }
+    refreshMfaStatus();
+  });
+  document.getElementById('settingsMfaToggleBtn').addEventListener('click', async ()=>{
+    if (totpEnabled){
+      document.getElementById('mfaDisableCodeInput').value = '';
+      document.getElementById('mfaDisableError').style.display = 'none';
+      openModal('mfaDisableOverlay');
+      return;
+    }
+    const r = await apiFetch('/mfa/setup', { method: 'POST' });
+    if (!r.ok){
+      alert(r.body && r.body.error === 'already_enabled' ? 'Already enabled.' : "Couldn't start setup. Try again.");
+      return;
+    }
+    document.getElementById('mfaSetupSecret').textContent = r.body.secret;
+    document.getElementById('mfaSetupCodeInput').value = '';
+    document.getElementById('mfaSetupError').style.display = 'none';
+    document.getElementById('mfaSetupStep1').style.display = 'block';
+    document.getElementById('mfaSetupStep2').style.display = 'none';
+    document.getElementById('mfaSetupStep1Actions').style.display = 'flex';
+    document.getElementById('mfaSetupStep2Actions').style.display = 'none';
+    openModal('mfaSetupOverlay');
+  });
+  document.getElementById('mfaSetupConfirmBtn').addEventListener('click', async function(){
+    const btn = this;
+    const errEl = document.getElementById('mfaSetupError');
+    const code = document.getElementById('mfaSetupCodeInput').value.trim();
+    if (!/^\d{6}$/.test(code)){
+      errEl.textContent = 'Enter the 6-digit code your authenticator app is showing.';
+      errEl.style.display = 'block';
+      return;
+    }
+    btn.disabled = true;
+    const r = await apiFetch('/mfa/confirm', { method: 'POST', body: JSON.stringify({ code }) });
+    btn.disabled = false;
+    if (!r.ok){
+      errEl.textContent = r.body && r.body.error === 'invalid_code' ? "That code didn't match. Try the current one." : "Couldn't confirm. Try again.";
+      errEl.style.display = 'block';
+      return;
+    }
+    document.getElementById('mfaSetupBackupCodes').innerHTML = (r.body.backupCodes || []).map(c => `<div>${c}</div>`).join('');
+    document.getElementById('mfaSetupStep1').style.display = 'none';
+    document.getElementById('mfaSetupStep2').style.display = 'block';
+    document.getElementById('mfaSetupStep1Actions').style.display = 'none';
+    document.getElementById('mfaSetupStep2Actions').style.display = 'flex';
+    totpEnabled = true;
+  });
+  document.getElementById('mfaSetupDoneBtn').addEventListener('click', ()=>{
+    closeModal('mfaSetupOverlay');
+    refreshMfaStatus();
+  });
+  document.getElementById('mfaDisableSubmitBtn').addEventListener('click', async function(){
+    const btn = this;
+    const errEl = document.getElementById('mfaDisableError');
+    const code = document.getElementById('mfaDisableCodeInput').value.trim();
+    if (!/^\d{6}$/.test(code)){
+      errEl.textContent = 'Enter the 6-digit code your authenticator app is showing.';
+      errEl.style.display = 'block';
+      return;
+    }
+    btn.disabled = true;
+    const r = await apiFetch('/mfa/disable', { method: 'POST', body: JSON.stringify({ code }) });
+    btn.disabled = false;
+    if (!r.ok){
+      errEl.textContent = r.body && r.body.error === 'invalid_code' ? "That code didn't match." : "Couldn't turn it off. Try again.";
+      errEl.style.display = 'block';
+      return;
+    }
+    closeModal('mfaDisableOverlay');
+    refreshMfaStatus();
+  });
+
   settingsLightModeInput.addEventListener('change', ()=>{
     applyTheme(settingsLightModeInput.checked ? 'light' : 'dark');
   });

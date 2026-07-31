@@ -9,11 +9,285 @@ async function sha256Hex(str) {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+// ==================== TOTP (RFC 6238) MFA ====================
+// Hand-rolled rather than pulling in a library — this project has no
+// package.json/build step (worker.js deploys as one plain file), and
+// bolting an unvetted dependency onto a security-critical auth path
+// without being able to test the actual bundled deploy myself is a worse
+// risk than the ~60 lines of well-defined, standard math this actually is.
+// TOTP itself is simple: HMAC-SHA1 of a 30-second time counter, truncated
+// to 6 digits (RFC 4226's HOTP, with RFC 6238's "counter = time" on top).
+
+const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+function base32Encode(bytes) {
+  let bits = '';
+  for (const b of bytes) bits += b.toString(2).padStart(8, '0');
+  let out = '';
+  for (let i = 0; i + 5 <= bits.length; i += 5) out += BASE32_ALPHABET[parseInt(bits.slice(i, i + 5), 2)];
+  const remainder = bits.length % 5;
+  if (remainder) out += BASE32_ALPHABET[parseInt(bits.slice(-remainder).padEnd(5, '0'), 2)];
+  return out;
+}
+function base32Decode(str) {
+  const clean = str.toUpperCase().replace(/[^A-Z2-7]/g, '');
+  let bits = '';
+  for (const c of clean) {
+    const idx = BASE32_ALPHABET.indexOf(c);
+    if (idx === -1) continue;
+    bits += idx.toString(2).padStart(5, '0');
+  }
+  const bytes = [];
+  for (let i = 0; i + 8 <= bits.length; i += 8) bytes.push(parseInt(bits.slice(i, i + 8), 2));
+  return new Uint8Array(bytes);
+}
+function generateTotpSecret() {
+  const bytes = new Uint8Array(20); // 160 bits, standard TOTP secret size
+  crypto.getRandomValues(bytes);
+  return base32Encode(bytes);
+}
+// counter as an 8-byte big-endian buffer, per RFC 4226.
+function counterToBuf(counter) {
+  const buf = new ArrayBuffer(8);
+  const view = new DataView(buf);
+  // JS numbers are safe integers well past what (Date.now()/30000) will ever
+  // reach, high 32 bits stay zero for the next few thousand years.
+  view.setUint32(4, counter >>> 0, false);
+  return buf;
+}
+async function totpCodeForCounter(secretBase32, counter) {
+  const keyBytes = base32Decode(secretBase32);
+  const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']);
+  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', key, counterToBuf(counter)));
+  const offset = sig[sig.length - 1] & 0x0f;
+  const binCode = ((sig[offset] & 0x7f) << 24) | ((sig[offset + 1] & 0xff) << 16) | ((sig[offset + 2] & 0xff) << 8) | (sig[offset + 3] & 0xff);
+  return String(binCode % 1000000).padStart(6, '0');
+}
+// Checks the submitted code against the current 30s step and one step
+// either side, a generous-but-standard window that absorbs normal clock
+// drift between the phone and this Worker without meaningfully weakening
+// the 30-second-window security property.
+async function verifyTotpCode(secretBase32, code) {
+  const cleanCode = (code || '').toString().replace(/\s/g, '');
+  if (!/^\d{6}$/.test(cleanCode)) return false;
+  const counter = Math.floor(Date.now() / 30000);
+  for (const delta of [0, -1, 1]) {
+    if ((await totpCodeForCounter(secretBase32, counter + delta)) === cleanCode) return true;
+  }
+  return false;
+}
+function generateMfaBackupCodes(count = 8) {
+  const codes = [];
+  for (let i = 0; i < count; i++) {
+    const bytes = new Uint8Array(5);
+    crypto.getRandomValues(bytes);
+    const s = [...bytes].map((b) => (b % 36).toString(36)).join('').toUpperCase();
+    codes.push(s.slice(0, 4) + '-' + s.slice(4, 8) + s.slice(0, 1));
+  }
+  return codes;
+}
+
+// ==================== WebAuthn (passkeys / hardware security keys) ====================
+// Hand-rolled for the same no-build-step reason as TOTP above, but a
+// meaningfully bigger lift: TOTP's correctness could be checked bit-for-bit
+// against a published RFC 6238 test vector before ever touching this repo;
+// this code's ECDSA signature verification can't be validated the same way
+// without an actual browser + authenticator round trip, which this sandbox
+// can't produce. It's written straight off the WebAuthn Level 2 spec and
+// should be right, but treat "enable a passkey, then actually sign in with
+// it once" as part of shipping this, not as optional follow-up.
+//
+// Scope is deliberately narrower than a full WebAuthn library:
+//  - ES256 (P-256/SHA-256) credentials only — the one algorithm every
+//    platform authenticator (Face ID/Touch ID/Windows Hello) and security
+//    key supports, so nothing real is lost by not also handling RS256 etc.
+//  - Attestation statements are parsed only far enough to skip past them
+//    (need to, to find authData right after them in the CBOR map), never
+//    cryptographically verified. Attestation proves *which model* of
+//    authenticator made a key; this app's threat model cares about "does
+//    whoever's signing in hold the private key from registration", which
+//    the assertion signature check below still fully enforces either way.
+//  - rpId is the parent domain (parasyte.cloud), not a specific subdomain,
+//    so one passkey registered on either chat.parasyte.cloud or
+//    web.parasyte.cloud works on both.
+
+const RP_ID = 'parasyte.cloud';
+const ALLOWED_WEBAUTHN_ORIGINS = ['https://chat.parasyte.cloud', 'https://web.parasyte.cloud'];
+
+// Minimal CBOR decoder — just the major types WebAuthn's attestationObject
+// and COSE_Key structures actually use (0 uint, 1 negative int, 2 byte
+// string, 3 text string, 4 array, 5 map, 7 true/false/null). No indefinite-
+// length support: browsers emit definite-length CBOR for these structures.
+function cborDecode(buf, startOffset = 0) {
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  function readLength(initialByte, off) {
+    const info = initialByte & 0x1f;
+    if (info < 24) return { len: info, next: off };
+    if (info === 24) return { len: view.getUint8(off), next: off + 1 };
+    if (info === 25) return { len: view.getUint16(off), next: off + 2 };
+    if (info === 26) return { len: view.getUint32(off), next: off + 4 };
+    if (info === 27) return { len: Number(view.getBigUint64(off)), next: off + 8 };
+    throw new Error('cbor: unsupported length encoding');
+  }
+  function decode(off) {
+    const initialByte = view.getUint8(off);
+    const major = initialByte >> 5;
+    off += 1;
+    if (major === 0) {
+      const { len, next } = readLength(initialByte, off);
+      return { value: len, next };
+    }
+    if (major === 1) {
+      const { len, next } = readLength(initialByte, off);
+      return { value: -1 - len, next };
+    }
+    if (major === 2) {
+      const { len, next } = readLength(initialByte, off);
+      return { value: buf.slice(next, next + len), next: next + len };
+    }
+    if (major === 3) {
+      const { len, next } = readLength(initialByte, off);
+      return { value: new TextDecoder().decode(buf.slice(next, next + len)), next: next + len };
+    }
+    if (major === 4) {
+      const { len, next } = readLength(initialByte, off);
+      let cur = next;
+      const arr = [];
+      for (let i = 0; i < len; i++) { const r = decode(cur); arr.push(r.value); cur = r.next; }
+      return { value: arr, next: cur };
+    }
+    if (major === 5) {
+      const { len, next } = readLength(initialByte, off);
+      let cur = next;
+      const map = new Map();
+      for (let i = 0; i < len; i++) {
+        const k = decode(cur); cur = k.next;
+        const v = decode(cur); cur = v.next;
+        map.set(k.value, v.value);
+      }
+      return { value: map, next: cur };
+    }
+    if (major === 7) {
+      const info = initialByte & 0x1f;
+      if (info === 20) return { value: false, next: off };
+      if (info === 21) return { value: true, next: off };
+      if (info === 22) return { value: null, next: off };
+      throw new Error('cbor: unsupported simple value');
+    }
+    throw new Error('cbor: unsupported major type ' + major);
+  }
+  return decode(startOffset);
+}
+
+// authenticatorData is a fixed binary layout (NOT CBOR):
+//   rpIdHash(32) | flags(1) | signCount(4, big-endian) | [attestedCredentialData]
+// attestedCredentialData is only present when the AT flag (bit 0x40) is
+// set — true on registration, false on every later login assertion:
+//   aaguid(16) | credIdLen(2, big-endian) | credId(credIdLen) | COSE_Key (CBOR)
+function parseAuthenticatorData(buf) {
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const rpIdHash = buf.slice(0, 32);
+  const flags = view.getUint8(32);
+  const signCount = view.getUint32(33, false);
+  const result = {
+    rpIdHash, signCount,
+    userPresent: !!(flags & 0x01),
+    userVerified: !!(flags & 0x04),
+    attestedCredentialDataIncluded: !!(flags & 0x40),
+  };
+  let offset = 37;
+  if (result.attestedCredentialDataIncluded) {
+    offset += 16; // aaguid, not needed
+    const credIdLen = view.getUint16(offset, false); offset += 2;
+    result.credentialId = buf.slice(offset, offset + credIdLen); offset += credIdLen;
+    const { value: coseKey, next } = cborDecode(buf, offset);
+    result.coseKey = coseKey;
+    offset = next;
+  }
+  return result;
+}
+
+// COSE_Key map labels per RFC 9053: 1=kty, 3=alg, -1=crv, -2=x, -3=y.
+// Only accepts an EC2 (kty=2) ES256 (alg=-7) P-256 (crv=1) key — anything
+// else is rejected at registration rather than stored and mishandled later.
+function coseKeyToEcPoint(coseKey) {
+  if (!(coseKey instanceof Map)) return null;
+  if (coseKey.get(1) !== 2 || coseKey.get(3) !== -7 || coseKey.get(-1) !== 1) return null;
+  const x = coseKey.get(-2), y = coseKey.get(-3);
+  if (!(x instanceof Uint8Array) || !(y instanceof Uint8Array) || x.length !== 32 || y.length !== 32) return null;
+  return { x, y };
+}
+
+// WebAuthn signatures arrive ASN.1 DER-encoded (SEQUENCE { r INTEGER, s
+// INTEGER }); Web Crypto's ECDSA verify wants raw, fixed-width r||s (IEEE
+// P1363) instead, so this converts one to the other.
+function derSignatureToRaw(der) {
+  let offset = 0;
+  function readLen() {
+    let len = der[offset++];
+    if (len & 0x80) {
+      const n = len & 0x7f;
+      len = 0;
+      for (let i = 0; i < n; i++) len = (len << 8) | der[offset++];
+    }
+    return len;
+  }
+  if (der[offset++] !== 0x30) throw new Error('der: expected sequence');
+  readLen(); // sequence length, unused (we just walk the two INTEGERs after it)
+  function readInt() {
+    if (der[offset++] !== 0x02) throw new Error('der: expected integer');
+    const len = readLen();
+    let bytes = der.slice(offset, offset + len); offset += len;
+    while (bytes.length > 32 && bytes[0] === 0) bytes = bytes.slice(1); // strip DER's sign-padding byte
+    if (bytes.length < 32) { const padded = new Uint8Array(32); padded.set(bytes, 32 - bytes.length); bytes = padded; }
+    return bytes;
+  }
+  const r = readInt();
+  const s = readInt();
+  const raw = new Uint8Array(64);
+  raw.set(r, 0);
+  raw.set(s, 32);
+  return raw;
+}
+
+async function importWebauthnPublicKey(x, y) {
+  const jwk = { kty: 'EC', crv: 'P-256', x: bufToB64url(x), y: bufToB64url(y), ext: true };
+  return crypto.subtle.importKey('jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+}
+
+function buffersEqual(a, b) {
+  const ua = toU8(a), ub = toU8(b);
+  if (ua.length !== ub.length) return false;
+  for (let i = 0; i < ua.length; i++) if (ua[i] !== ub[i]) return false;
+  return true;
+}
+
+async function verifyWebauthnAssertion(x, y, authenticatorDataBuf, clientDataJSONBuf, signatureDerBuf) {
+  const clientDataHash = new Uint8Array(await crypto.subtle.digest('SHA-256', clientDataJSONBuf));
+  const signedData = concatBuffers([toU8(authenticatorDataBuf), clientDataHash]);
+  const publicKey = await importWebauthnPublicKey(x, y);
+  const rawSig = derSignatureToRaw(toU8(signatureDerBuf));
+  return crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, rawSig, signedData);
+}
+
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
     headers: { 'content-type': 'application/json' },
   });
+}
+
+// Rough, best-effort device label from a User-Agent string, purely cosmetic
+// (for the Settings > Devices list below) — never used for any trust
+// decision, so getting it slightly wrong for an exotic browser is harmless.
+function guessDeviceLabel(ua) {
+  ua = ua || '';
+  if (/iPhone/.test(ua)) return 'iPhone';
+  if (/iPad/.test(ua)) return 'iPad';
+  if (/Android/.test(ua)) return 'Android device';
+  if (/Macintosh/.test(ua)) return 'Mac';
+  if (/Windows/.test(ua)) return 'Windows PC';
+  if (/Linux/.test(ua)) return 'Linux device';
+  return 'Device';
 }
 
 // A personal (non-workspace) group call is a lighter, free-tier feature:
@@ -746,7 +1020,7 @@ export class Registry {
     const url = new URL(request.url);
 
     if (request.method === 'POST' && url.pathname === '/session') {
-      const { pinHash, displayName, deviceId, ip } = await request.json();
+      const { pinHash, displayName, deviceId, ip, ua } = await request.json();
       if (!pinHash) return json({ error: 'missing_pin_hash' }, 400);
 
       // Every login attempt counts against this IP's budget, whether it
@@ -841,6 +1115,20 @@ export class Registry {
         }
       }
 
+      // MFA: gated per-device, same shape as device trust just above (a
+      // device only ever has to clear this once, not on every single
+      // unlock — this app already re-derives pinHash and calls /session on
+      // every app open, gating every one of those the same way device
+      // approval does would make MFA far more annoying than any real MFA
+      // implementation anyone actually uses). Two second-factor methods
+      // share one gate and one mfaVerifiedDeviceIds list: either TOTP (see
+      // /mfa/verify-login) or a passkey (see /webauthn/auth-verify) clears
+      // it, the device doesn't care which.
+      const hasWebauthn = !!(user.webauthnCredentials && user.webauthnCredentials.length);
+      if ((user.mfaEnabled || hasWebauthn) && deviceId && !(user.mfaVerifiedDeviceIds || []).includes(deviceId)) {
+        return json({ error: 'mfa_required', methods: { totp: !!user.mfaEnabled, webauthn: hasWebauthn } }, 403);
+      }
+
       if (roster && roster.status !== 'claimed') {
         roster.status = 'claimed';
         roster.userId = user.id;
@@ -931,6 +1219,17 @@ export class Registry {
         if (org) orgs.push({ id: org.id, name: org.name, logoUrl: org.logoUrl || null, allowEmailAuth: !!org.allowEmailAuth, emailDomain: org.emailDomain || null, country: org.country || null, isAdmin: await isOrgAdmin(this.state.storage, org.id, user.id) });
       }
 
+      // Device metadata (a friendly guessed label + last-seen timestamp) for
+      // the Settings > Devices list, kept separate from deviceIds itself —
+      // deviceIds is the actual trust decision made above, this is purely
+      // informational and safe to just overwrite on every successful call.
+      if (deviceId) {
+        user.deviceMeta = user.deviceMeta || {};
+        if (!user.deviceMeta[deviceId]) user.deviceMeta[deviceId] = { label: guessDeviceLabel(ua), addedAt: Date.now() };
+        user.deviceMeta[deviceId].lastSeenAt = Date.now();
+        await this.state.storage.put(`user:${pinHash}`, user);
+      }
+
       return json({
         userId: user.id,
         displayName: user.displayName,
@@ -950,6 +1249,296 @@ export class Registry {
         pinnedChatIds,
         orgs,
       });
+    }
+
+    // ---- Device list + remote logout ----
+    // Self-service view of every device trusted on this account. Doesn't
+    // let a device remove itself (the row for the device you're currently
+    // using has no remove control client-side) — removing your OWN only
+    // trusted device would just immediately re-trust itself on the very
+    // next /session call anyway (deviceIds.length===0 re-triggers the
+    // brand-new-account auto-trust path above), so there's nothing
+    // meaningful "remote logout" could mean for your own current session;
+    // regular sign-out already covers that case.
+    if (request.method === 'GET' && url.pathname === '/devices') {
+      const pinHash = url.searchParams.get('pinHash');
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      const meta = user.deviceMeta || {};
+      const devices = (user.deviceIds || []).map((id) => ({
+        id,
+        label: (meta[id] && meta[id].label) || 'Device',
+        addedAt: (meta[id] && meta[id].addedAt) || null,
+        lastSeenAt: (meta[id] && meta[id].lastSeenAt) || null,
+      })).sort((a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0));
+      return json({ devices });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/devices/remove') {
+      const { pinHash, id } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      if (!id) return json({ error: 'missing_id' }, 400);
+      user.deviceIds = (user.deviceIds || []).filter((d) => d !== id);
+      if (user.devicePublicKeys) delete user.devicePublicKeys[id];
+      if (user.deviceMeta) delete user.deviceMeta[id];
+      if (Array.isArray(user.mfaVerifiedDeviceIds)) user.mfaVerifiedDeviceIds = user.mfaVerifiedDeviceIds.filter((d) => d !== id);
+      await this.state.storage.put(`user:${pinHash}`, user);
+      await this.state.storage.put(`userById:${user.id}`, userByIdSnapshot(user));
+      return json({ ok: true });
+    }
+
+    // ---- MFA (TOTP authenticator app) ----
+    // Setup is two steps (setup -> confirm) rather than enabling immediately
+    // off a submitted secret, so a typo'd/misscanned secret can't lock
+    // someone out with an authenticator app that will never produce a
+    // matching code — confirm requires one real code from the app first.
+    if (request.method === 'POST' && url.pathname === '/mfa/setup') {
+      const { pinHash } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      if (user.mfaEnabled) return json({ error: 'already_enabled' }, 400);
+      const secret = generateTotpSecret();
+      user.mfaPendingSecret = secret;
+      await this.state.storage.put(`user:${pinHash}`, user);
+      const label = encodeURIComponent(`PArA PIN:${user.displayName || user.id}`);
+      const otpauthUrl = `otpauth://totp/${label}?secret=${secret}&issuer=PArA%20PIN&algorithm=SHA1&digits=6&period=30`;
+      return json({ secret, otpauthUrl });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/mfa/confirm') {
+      const { pinHash, code } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      if (!user.mfaPendingSecret) return json({ error: 'no_pending_setup' }, 400);
+      if (!(await verifyTotpCode(user.mfaPendingSecret, code))) return json({ error: 'invalid_code' }, 400);
+      user.mfaSecret = user.mfaPendingSecret;
+      user.mfaPendingSecret = null;
+      user.mfaEnabled = true;
+      const backupCodes = generateMfaBackupCodes();
+      user.mfaBackupCodeHashes = await Promise.all(backupCodes.map((c) => sha256Hex(c)));
+      await this.state.storage.put(`user:${pinHash}`, user);
+      // Only ever returned this once, at the moment they're generated —
+      // stored as hashes from here on, same as the PIN itself, nobody
+      // (including us) can read them back later.
+      return json({ ok: true, backupCodes });
+    }
+
+    // Requires a fresh code, not just an already-unlocked session, so
+    // someone who picked up an unattended-but-unlocked device can't casually
+    // turn off a security feature that's specifically meant to matter in
+    // exactly that scenario.
+    if (request.method === 'POST' && url.pathname === '/mfa/disable') {
+      const { pinHash, code } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      if (!user.mfaEnabled) return json({ error: 'not_enabled' }, 400);
+      if (!(await verifyTotpCode(user.mfaSecret, code))) return json({ error: 'invalid_code' }, 400);
+      user.mfaEnabled = false;
+      user.mfaSecret = null;
+      user.mfaBackupCodeHashes = [];
+      user.mfaVerifiedDeviceIds = [];
+      await this.state.storage.put(`user:${pinHash}`, user);
+      return json({ ok: true });
+    }
+
+    // The actual login-time gate /session's mfa_required error sends the
+    // client here to clear. Accepts either a live 6-digit TOTP code or a
+    // single-use backup code (for "I lost my phone" recovery), never both
+    // checked in the same field — a 6-digit numeric string only ever tries
+    // as TOTP, anything else only ever tries as a backup code.
+    if (request.method === 'POST' && url.pathname === '/mfa/verify-login') {
+      const { pinHash, deviceId, code } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      if (!user.mfaEnabled) return json({ error: 'not_enabled' }, 400);
+      const rl = await checkRateLimit(this.state.storage, `mfa:${pinHash}`, {
+        maxAttempts: 10, windowMs: 10 * 60 * 1000, lockoutMs: 15 * 60 * 1000,
+      });
+      if (!rl.allowed) return json({ error: 'rate_limited', retryAfterMs: rl.retryAfterMs }, 429);
+
+      const cleanCode = (code || '').toString().trim();
+      let ok = false;
+      if (/^\d{6}$/.test(cleanCode)) {
+        ok = await verifyTotpCode(user.mfaSecret, cleanCode);
+      } else {
+        const codeHash = await sha256Hex(cleanCode.toUpperCase());
+        const hashes = user.mfaBackupCodeHashes || [];
+        const idx = hashes.indexOf(codeHash);
+        if (idx !== -1) {
+          ok = true;
+          hashes.splice(idx, 1); // single-use, gone the moment it's spent
+          user.mfaBackupCodeHashes = hashes;
+        }
+      }
+      if (!ok) return json({ error: 'invalid_code' }, 400);
+
+      if (deviceId) {
+        user.mfaVerifiedDeviceIds = user.mfaVerifiedDeviceIds || [];
+        if (!user.mfaVerifiedDeviceIds.includes(deviceId)) user.mfaVerifiedDeviceIds.push(deviceId);
+      }
+      await this.state.storage.put(`user:${pinHash}`, user);
+      return json({ ok: true, backupCodesRemaining: (user.mfaBackupCodeHashes || []).length });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/mfa/status') {
+      const pinHash = url.searchParams.get('pinHash');
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      const webauthnCount = (user.webauthnCredentials || []).length;
+      return json({
+        enabled: !!user.mfaEnabled || webauthnCount > 0,
+        totpEnabled: !!user.mfaEnabled,
+        backupCodesRemaining: (user.mfaBackupCodeHashes || []).length,
+        webauthnCredentials: (user.webauthnCredentials || []).map((c) => ({ id: c.id, label: c.label, createdAt: c.createdAt })),
+      });
+    }
+
+    // ---- WebAuthn (passkeys / hardware security keys) ----
+    // Registration is two calls (options -> verify), same reasoning as
+    // TOTP's setup -> confirm split: options hands out a fresh, single-use
+    // challenge; verify has to see a real signed response over that exact
+    // challenge before anything gets trusted and stored.
+    if (request.method === 'POST' && url.pathname === '/webauthn/register-options') {
+      const { pinHash } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      const challengeBytes = new Uint8Array(32);
+      crypto.getRandomValues(challengeBytes);
+      const challenge = bufToB64url(challengeBytes);
+      user.webauthnPendingRegChallenge = { challenge, expiresAt: Date.now() + 5 * 60 * 1000 };
+      await this.state.storage.put(`user:${pinHash}`, user);
+      return json({
+        challenge,
+        rpId: RP_ID,
+        rpName: 'PArA PIN',
+        userId: bufToB64url(new TextEncoder().encode(user.id)),
+        userName: user.displayName || user.id,
+        excludeCredentialIds: (user.webauthnCredentials || []).map((c) => c.id),
+      });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/webauthn/register-verify') {
+      const { pinHash, attestationObject, clientDataJSON, label } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      const pending = user.webauthnPendingRegChallenge;
+      if (!pending || pending.expiresAt < Date.now()) return json({ error: 'no_pending_setup' }, 400);
+      try {
+        const clientData = JSON.parse(new TextDecoder().decode(b64urlToBuf(clientDataJSON)));
+        if (clientData.type !== 'webauthn.create') return json({ error: 'invalid_client_data' }, 400);
+        if (clientData.challenge !== pending.challenge) return json({ error: 'invalid_challenge' }, 400);
+        if (!ALLOWED_WEBAUTHN_ORIGINS.includes(clientData.origin)) return json({ error: 'invalid_origin' }, 400);
+
+        const attestationBytes = b64urlToBuf(attestationObject);
+        const { value: attestation } = cborDecode(attestationBytes, 0);
+        const authData = parseAuthenticatorData(toU8(attestation.get('authData')));
+        const expectedRpIdHash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(RP_ID)));
+        if (!authData.attestedCredentialDataIncluded) return json({ error: 'no_credential_data' }, 400);
+        if (!buffersEqual(authData.rpIdHash, expectedRpIdHash)) return json({ error: 'rpid_mismatch' }, 400);
+
+        const point = coseKeyToEcPoint(authData.coseKey);
+        if (!point) return json({ error: 'unsupported_key_type' }, 400);
+
+        const credId = bufToB64url(authData.credentialId);
+        user.webauthnCredentials = (user.webauthnCredentials || []).filter((c) => c.id !== credId);
+        user.webauthnCredentials.push({
+          id: credId,
+          x: bufToB64url(point.x),
+          y: bufToB64url(point.y),
+          counter: authData.signCount,
+          label: (typeof label === 'string' && label.trim()) ? label.trim().slice(0, 40) : 'Passkey',
+          createdAt: Date.now(),
+        });
+        user.webauthnPendingRegChallenge = null;
+        await this.state.storage.put(`user:${pinHash}`, user);
+        return json({ ok: true, credential: { id: credId, label: user.webauthnCredentials[user.webauthnCredentials.length - 1].label } });
+      } catch (e) {
+        return json({ error: 'invalid_registration' }, 400);
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/webauthn/remove') {
+      const { pinHash, id } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      user.webauthnCredentials = (user.webauthnCredentials || []).filter((c) => c.id !== id);
+      await this.state.storage.put(`user:${pinHash}`, user);
+      return json({ ok: true });
+    }
+
+    // Login-time challenge, deliberately not gated on an existing session
+    // (there isn't one yet, that's the whole point) — same non-standard-auth
+    // pattern as /mfa/verify-login below, see the comment on its outer
+    // /api/webauthn/auth-options route for why that's safe here.
+    if (request.method === 'POST' && url.pathname === '/webauthn/auth-options') {
+      const { pinHash } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      const credentials = user.webauthnCredentials || [];
+      if (!credentials.length) return json({ error: 'not_enabled' }, 400);
+      const challengeBytes = new Uint8Array(32);
+      crypto.getRandomValues(challengeBytes);
+      const challenge = bufToB64url(challengeBytes);
+      user.webauthnPendingAuthChallenge = { challenge, expiresAt: Date.now() + 5 * 60 * 1000 };
+      await this.state.storage.put(`user:${pinHash}`, user);
+      return json({ challenge, rpId: RP_ID, allowCredentialIds: credentials.map((c) => c.id) });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/webauthn/auth-verify') {
+      const { pinHash, deviceId, credentialId, authenticatorData, clientDataJSON, signature } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      const credentials = user.webauthnCredentials || [];
+      if (!credentials.length) return json({ error: 'not_enabled' }, 400);
+      // Shares one rate-limit bucket with TOTP login verification (same
+      // key), a brute-force budget against this account's second factor is
+      // one budget regardless of which method is being tried.
+      const rl = await checkRateLimit(this.state.storage, `mfa:${pinHash}`, {
+        maxAttempts: 10, windowMs: 10 * 60 * 1000, lockoutMs: 15 * 60 * 1000,
+      });
+      if (!rl.allowed) return json({ error: 'rate_limited', retryAfterMs: rl.retryAfterMs }, 429);
+
+      const pending = user.webauthnPendingAuthChallenge;
+      if (!pending || pending.expiresAt < Date.now()) return json({ error: 'no_pending_challenge' }, 400);
+      const credential = credentials.find((c) => c.id === credentialId);
+      if (!credential) return json({ error: 'invalid_credential' }, 400);
+
+      try {
+        const clientData = JSON.parse(new TextDecoder().decode(b64urlToBuf(clientDataJSON)));
+        if (clientData.type !== 'webauthn.get') return json({ error: 'invalid_client_data' }, 400);
+        if (clientData.challenge !== pending.challenge) return json({ error: 'invalid_challenge' }, 400);
+        if (!ALLOWED_WEBAUTHN_ORIGINS.includes(clientData.origin)) return json({ error: 'invalid_origin' }, 400);
+
+        const authDataBuf = b64urlToBuf(authenticatorData);
+        const authData = parseAuthenticatorData(authDataBuf);
+        const expectedRpIdHash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(RP_ID)));
+        if (!buffersEqual(authData.rpIdHash, expectedRpIdHash)) return json({ error: 'rpid_mismatch' }, 400);
+        if (!authData.userPresent) return json({ error: 'user_not_present' }, 400);
+
+        const ok = await verifyWebauthnAssertion(
+          b64urlToBuf(credential.x), b64urlToBuf(credential.y),
+          authDataBuf, b64urlToBuf(clientDataJSON), b64urlToBuf(signature)
+        );
+        if (!ok) return json({ error: 'invalid_signature' }, 400);
+
+        // Clone-detection heuristic: most platform authenticators (passkeys)
+        // always report signCount 0 and never increment it, that's normal,
+        // not a red flag. Only treat a *decrease* from a previously nonzero
+        // counter as suspicious, and even then just skip the counter bump
+        // rather than blocking sign-in over it, a security key's own PIN/
+        // biometric gate is the real protection here.
+        if (authData.signCount > 0 && authData.signCount > credential.counter) {
+          credential.counter = authData.signCount;
+        }
+        user.webauthnPendingAuthChallenge = null;
+        user.mfaVerifiedDeviceIds = user.mfaVerifiedDeviceIds || [];
+        if (deviceId && !user.mfaVerifiedDeviceIds.includes(deviceId)) user.mfaVerifiedDeviceIds.push(deviceId);
+        await this.state.storage.put(`user:${pinHash}`, user);
+        return json({ ok: true });
+      } catch (e) {
+        return json({ error: 'invalid_assertion' }, 400);
+      }
     }
 
     if (request.method === 'POST' && url.pathname === '/profile') {
@@ -4080,6 +4669,96 @@ export default {
           body: JSON.stringify({ pinHash, displayName: body.displayName || null, deviceId: body.deviceId || null, ip }),
         });
         return res;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/mfa/setup') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        return registryStub.fetch('https://internal/mfa/setup', { method: 'POST', body: JSON.stringify({ pinHash }) });
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/mfa/confirm') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/mfa/confirm', { method: 'POST', body: JSON.stringify({ pinHash, code: body.code }) });
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/mfa/disable') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/mfa/disable', { method: 'POST', body: JSON.stringify({ pinHash, code: body.code }) });
+      }
+
+      // Deliberately NOT authHash-gated the normal way: this is called
+      // exactly when /session just refused to log this device in at all
+      // (mfa_required), there's no "already authenticated" state yet to
+      // read a header off of on the client. pinHash still travels the same
+      // way apiFetch always sends it, this route just doesn't require that
+      // the caller already be considered logged in server-side.
+      if (request.method === 'POST' && url.pathname === '/api/mfa/verify-login') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/mfa/verify-login', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, deviceId: body.deviceId || null, code: body.code }),
+        });
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/mfa/status') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        return registryStub.fetch(`https://internal/mfa/status?pinHash=${encodeURIComponent(pinHash)}`);
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/webauthn/register-options') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        return registryStub.fetch('https://internal/webauthn/register-options', { method: 'POST', body: JSON.stringify({ pinHash }) });
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/webauthn/register-verify') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/webauthn/register-verify', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, attestationObject: body.attestationObject, clientDataJSON: body.clientDataJSON, label: body.label || null }),
+        });
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/webauthn/remove') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/webauthn/remove', { method: 'POST', body: JSON.stringify({ pinHash, id: body.id }) });
+      }
+
+      // Deliberately NOT gated the normal way, same reasoning as
+      // /api/mfa/verify-login just below: this is called exactly when
+      // /session has just refused this device (mfa_required), before
+      // there's any "logged in" state to check. pinHash still travels the
+      // same way apiFetch always sends it, once myPinHash is set client-
+      // side (which happens before the first /session call, not after).
+      if (request.method === 'POST' && url.pathname === '/api/webauthn/auth-options') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        return registryStub.fetch('https://internal/webauthn/auth-options', { method: 'POST', body: JSON.stringify({ pinHash }) });
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/webauthn/auth-verify') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/webauthn/auth-verify', {
+          method: 'POST',
+          body: JSON.stringify({
+            pinHash, deviceId: body.deviceId || null, credentialId: body.credentialId,
+            authenticatorData: body.authenticatorData, clientDataJSON: body.clientDataJSON, signature: body.signature,
+          }),
+        });
       }
 
       // Authenticated by the OLD pin hash, you have to actually know the
