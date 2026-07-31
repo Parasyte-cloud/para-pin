@@ -9,7 +9,16 @@
 <link rel="icon" type="image/png" sizes="512x512" href="/favicon.png">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <meta name="theme-color" content="#050608">
-<link rel="manifest" href="/manifest.webmanifest">
+<link rel="manifest" href="/manifest.webmanifest" id="appManifestLink">
+<!-- Same app/backend as chat.parasyte.cloud (see the desktop-app flag script
+     later in <head> — this just needs to run this early too, before the
+     browser actually reads either of these for its "Install app" prompt),
+     just distinct enough branding that installing this one doesn't look
+     like someone installed the phone app on their laptop by mistake. -->
+<script>if (location.hostname === 'web.parasyte.cloud'){
+  document.title = 'PArA for Work';
+  document.getElementById('appManifestLink').href = '/manifest-desktop.webmanifest';
+}</script>
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -299,6 +308,19 @@
        .admin-console-body reserved for it (see that rule's own comment) is
        just wasted scroll space here — back to a normal bottom padding. */
     html.desktop-app .admin-console-body{ padding-bottom:40px; }
+  }
+  /* Wide-monitor cap: without this, .sidebar stays a fixed 380px but .conv
+     (flex:1) just keeps stretching to fill whatever's left on an ultrawide
+     or a big external display, message bubbles end up reading edge-to-edge
+     across a meter of screen. Only .shell needs this — the rail is already
+     pinned to the true viewport edge (position:fixed; left:0) regardless of
+     what .shell does beside it, and .admin-console-body (Settings, Calls,
+     People & HR, Meeting Room) already caps itself at max-width:640px on
+     its own. Centers in the space actually left over after the rail, not
+     the raw viewport, since #app's own padding-left already accounts for
+     that (see the comment above). */
+  @media (min-width: 1500px){
+    html.desktop-app .shell{ max-width:1400px; margin:0 auto; }
   }
   /* The one moving piece that makes this read as "liquid" rather than a
      static bar, a single glass capsule that slides and resizes itself to
