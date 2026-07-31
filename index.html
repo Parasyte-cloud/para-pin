@@ -4070,6 +4070,7 @@
   let hrProfileTargetUserId = null; // null = viewing/editing my own profile
   let hrCanEditJob = false;
   let hrDirectoryCache = [];
+  let hrProfileCurrentJob = null; // employee.job.current for whoever loadHrProfile last loaded, so hrJobEditBtn's handler (a separate top-level listener) can read the manager to preselect without re-fetching
 
   document.querySelectorAll('#hrOverlay .admin-console-tab').forEach(tab=>{
     tab.addEventListener('click', ()=>{
@@ -4261,6 +4262,20 @@
       const labels = { '': 'Not set', single: 'Single', married: 'Married', domestic_partnership: 'Domestic partnership', divorced: 'Divorced', widowed: 'Widowed' };
       return `<label>${label}<select data-field="${name}">${opts.map(o=>`<option value="${o}" ${value===o?'selected':''}>${labels[o]}</option>`).join('')}</select></label>`;
     }
+    if (type === 'select-manager'){
+      // This is what actually routes leave-request approvals to a line
+      // manager instead of just org admins — worker.js's /org/hr/leave/inbox
+      // and /decide already gate on employee.job.current.managerId (see
+      // that endpoint's comment: "org admins see every pending request; a
+      // line manager sees only their own reports'"), and POST /org/hr/profile
+      // already persists managerId, this was the only missing piece, nowhere
+      // in the UI actually set it. Excludes the employee being edited so
+      // nobody can be made their own manager.
+      const candidates = hrDirectoryCache.filter(m => m.userId !== (hrProfileTargetUserId || myUserId));
+      const opts = ['<option value="">No manager set</option>']
+        .concat(candidates.map(m => `<option value="${escapeHtml(m.userId)}" ${value===m.userId?'selected':''}>${escapeHtml(m.displayName || 'Someone')}</option>`));
+      return `<label>${label}<select data-field="${name}">${opts.join('')}</select></label>`;
+    }
     return `<label>${label}<input type="${type||'text'}" data-field="${name}" value="${val}"></label>`;
   }
 
@@ -4321,9 +4336,18 @@
     document.getElementById('hrPersonalSaveBtn').style.display = canEditSelfFields ? 'block' : 'none';
 
     const cur = employee.job.current;
+    hrProfileCurrentJob = cur;
+    // Directory cache may not be populated yet if this profile was opened
+    // straight from Home/My Profile rather than via a Directory click (see
+    // the comment on hrDirectoryCache above) — manager's name just won't
+    // resolve yet in that case and this falls back to "Reports to someone"
+    // rather than showing nothing; hrJobEditBtn's handler below forces a
+    // directory load before it needs the same cache for the picker.
+    const managerEntry = cur.managerId ? hrDirectoryCache.find(m => m.userId === cur.managerId) : null;
+    const managerLabel = cur.managerId ? `, reports to ${managerEntry ? managerEntry.displayName : 'someone'}` : '';
     document.getElementById('hrJobCurrent').textContent = cur.jobTitle
-      ? `${cur.jobTitle}${cur.department ? ' · ' + cur.department : ''}${cur.entity ? ' · ' + cur.entity : ''}, since ${hrFmtDate(cur.effectiveDate)}`
-      : 'No job details recorded yet.';
+      ? `${cur.jobTitle}${cur.department ? ' · ' + cur.department : ''}${cur.entity ? ' · ' + cur.entity : ''}, since ${hrFmtDate(cur.effectiveDate)}${managerLabel}`
+      : cur.managerId ? `No job details recorded yet${managerLabel}.` : 'No job details recorded yet.';
     document.getElementById('hrJobEditBtn').style.display = canEditJob ? 'inline-flex' : 'none';
     document.getElementById('hrJobEditForm').style.display = 'none';
 
@@ -4373,14 +4397,21 @@
     else { hintEl.textContent = "Couldn't save. Try again."; hintEl.style.color = '#ff6a6a'; }
   });
 
-  document.getElementById('hrJobEditBtn').addEventListener('click', ()=>{
+  document.getElementById('hrJobEditBtn').addEventListener('click', async ()=>{
     const form = document.getElementById('hrJobEditForm');
     const showing = form.style.display === 'block';
     if (showing){ form.style.display = 'none'; return; }
+    // The manager picker needs the directory loaded, which normally only
+    // happens when the Directory tab itself gets clicked — opening a job
+    // edit straight from Home/My Profile without ever visiting Directory
+    // would otherwise render an empty "no one to pick" dropdown.
+    if (!hrDirectoryCache.length) await loadHrDirectory();
+    const cur = hrProfileCurrentJob || {};
     document.getElementById('hrJobEditFields').innerHTML = [
       hrFieldRow('Job title', 'jobTitle', ''),
       hrFieldRow('Department', 'department', ''),
       hrFieldRow('Entity/Office', 'entity', ''),
+      hrFieldRow('Manager (who approves their time off)', 'managerId', cur.managerId || '', 'select-manager'),
     ].join('');
     form.style.display = 'block';
   });
@@ -5367,6 +5398,7 @@
   let ringTimeoutTimer = null;
   let ringToneInterval = null;
   let iceServersCache = null;
+  let disconnectGraceTimer = null;
   let pendingRemoteOfferSdp = null;
   let pendingIceCandidates = [];
   let callMuted = false;
@@ -5490,8 +5522,34 @@
       }
     });
     pc.addEventListener('connectionstatechange', ()=>{
-      if (pc.connectionState === 'connected' && callState !== 'connected' && callState !== 'idle') onCallConnected();
-      if ((pc.connectionState === 'failed' || pc.connectionState === 'closed') && callState !== 'idle') endCall('hangup');
+      if (pc.connectionState === 'connected'){
+        if (disconnectGraceTimer){ clearTimeout(disconnectGraceTimer); disconnectGraceTimer = null; }
+        if (callState !== 'connected' && callState !== 'idle') onCallConnected();
+      }
+      if ((pc.connectionState === 'failed' || pc.connectionState === 'closed') && callState !== 'idle'){
+        if (disconnectGraceTimer){ clearTimeout(disconnectGraceTimer); disconnectGraceTimer = null; }
+        endCall('hangup');
+      }
+      // 'disconnected' is the gap this was missing: browsers don't reliably
+      // move from disconnected -> failed on their own (some sit there
+      // indefinitely on a bad network), and nothing else in this file ever
+      // reset callState back to 'idle' for that case. A tab left open across
+      // one of those meant callState stayed stuck at 'connected' forever, and
+      // handleCallSignal's very first check ("if callState !== 'idle', silently
+      // reply busy") would then auto-reject every future incoming call on that
+      // device with zero UI, ringtone, or notification — no error, just
+      // nothing happening, which is exactly what "sometimes people don't see
+      // the calls" looks like from the outside. WebRTC does sometimes recover
+      // from a brief 'disconnected' blip on its own, so this waits out a grace
+      // period rather than ending the call the instant it flickers, and bails
+      // out above (via the 'connected' branch) if it recovers before then.
+      if (pc.connectionState === 'disconnected' && callState !== 'idle'){
+        if (disconnectGraceTimer) clearTimeout(disconnectGraceTimer);
+        disconnectGraceTimer = setTimeout(()=>{
+          disconnectGraceTimer = null;
+          if (pc.connectionState === 'disconnected' && callState !== 'idle') endCall('hangup');
+        }, 12000);
+      }
     });
     return pc;
   }
@@ -5717,6 +5775,7 @@
     awaitingConnection = false;
     if (ringTimeoutTimer){ clearTimeout(ringTimeoutTimer); ringTimeoutTimer = null; }
     if (connectTimeoutTimer){ clearTimeout(connectTimeoutTimer); connectTimeoutTimer = null; }
+    if (disconnectGraceTimer){ clearTimeout(disconnectGraceTimer); disconnectGraceTimer = null; }
     if (callTimerInterval){ clearInterval(callTimerInterval); callTimerInterval = null; }
     if (!alreadyLogged && activeCallPeerId){
       const wasConnected = callState === 'connected';
