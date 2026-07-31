@@ -215,22 +215,22 @@
   #bottomNav{
     position:relative; display:flex; align-items:stretch; justify-content:center; gap:0;
     pointer-events:auto;
-    /* Near-opaque black glass rather than a tinted see-through pane, saturate()
-       is deliberately dropped, the old version amplified whatever wallpaper
-       colour was behind it (that's why the bar used to pick up blue/brown
-       tints from the chat background instead of reading as neutral black). */
+    /* True liquid glass again, translucent + blurred rather than an opaque
+       black fill, the chrome read now comes from the bright metal-look
+       border/box-shadow rings below instead of from a dark backing. */
     background:
-      linear-gradient(180deg, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0.02) 16%, rgba(0,0,0,0.55) 55%, rgba(0,0,0,0.8) 100%),
-      rgba(9,9,11,0.88);
-    -webkit-backdrop-filter:blur(20px);
-    backdrop-filter:blur(20px);
-    border:1.5px solid rgba(230,232,236,0.55);
+      linear-gradient(180deg, rgba(255,255,255,0.24) 0%, rgba(255,255,255,0.05) 18%, rgba(255,255,255,0.02) 55%, rgba(0,0,0,0.08) 100%),
+      rgba(30,33,40,0.36);
+    -webkit-backdrop-filter:blur(26px) saturate(150%);
+    backdrop-filter:blur(26px) saturate(150%);
+    border:1.75px solid rgba(255,255,255,0.62);
     border-radius:999px; padding:6px 10px; width:100%; max-width:440px;
     box-shadow:
-      0 10px 26px rgba(0,0,0,0.55),
-      inset 0 1.5px 0 rgba(255,255,255,0.25),
-      inset 0 -2px 6px rgba(0,0,0,0.5),
-      inset 0 0 0 3px rgba(0,0,0,0.35);
+      0 10px 26px rgba(0,0,0,0.32),
+      inset 0 1.5px 0 rgba(255,255,255,0.5),
+      inset 0 -2px 6px rgba(0,0,0,0.16),
+      inset 0 0 0 3px rgba(255,255,255,0.07),
+      0 0 0 1px rgba(0,0,0,0.22);
   }
   /* Hidden until the app itself is actually showing (post-unlock), a plain
      sibling selector off #app's own .show class, no separate JS state to
@@ -299,68 +299,46 @@
     font-size:9.5px; font-weight:700; display:flex; align-items:center; justify-content:center;
     box-shadow:0 0 0 2px rgba(8,10,14,0.7);
   }
-  /* Small two-tone marks under each tab, purely decorative (matching the
-     reference mockup's little green/red pips), they don't track any real
-     status, there's nothing "online/offline" about Chats or Settings. */
-  .nav-tab-dot{
-    width:14px; height:3px; border-radius:2px; margin-top:1px; opacity:.5;
-    background:linear-gradient(90deg, #34d399 0 46%, transparent 46% 54%, #f87171 54% 100%);
-  }
   /* Thin chrome seam between segments, a real element rather than a sibling
      selector so it sits correctly around the center medallion too, where
      "previous sibling is a .nav-tab" logic would otherwise break. */
   .nav-seam{
     align-self:center; width:1px; height:60%; flex:0 0 auto;
-    background:linear-gradient(180deg, transparent, rgba(255,255,255,0.3) 35%, rgba(255,255,255,0.3) 65%, transparent);
+    background:linear-gradient(180deg, transparent, rgba(255,255,255,0.45) 35%, rgba(255,255,255,0.45) 65%, transparent);
   }
-  /* Center medallion: sits between the two tab pairs and pops up out of the
-     pill rather than sitting flush inside it, the raised chrome-badge look
-     from the reference mockup. It's a fixed circle (not a .nav-tab, never
-     matched by moveNavActivePill's data-nav-tab lookup, so the sliding
-     highlight capsule can never land on it) whose own tap locks the app
-     instead of switching tabs. */
+  /* Center medallion: sits flush in the row (no vertical offset, doesn't pop
+     above the pill) with its own bright chrome ring so it still reads as a
+     distinct raised badge against the glass. It's a fixed circle (not a
+     .nav-tab, never matched by moveNavActivePill's data-nav-tab lookup, so
+     the sliding highlight capsule can never land on it) whose own tap locks
+     the app instead of switching tabs. */
   .nav-lock-btn{
     position:relative; z-index:2; align-self:center; flex:0 0 auto;
-    width:54px; height:54px; margin:-17px 3px 0;
+    width:42px; height:42px; margin:0 4px;
     border-radius:50%; display:flex; align-items:center; justify-content:center;
     cursor:pointer;
     background:
-      radial-gradient(circle at 34% 26%, rgba(255,255,255,0.16), rgba(8,8,10,0.98) 68%),
-      #0b0b0d;
-    /* Chrome bezel built from a solid light border plus two more box-shadow
-       rings (dark then light again), a real gradient border on a circle
-       tends to render as a warped rectangle rather than a smooth ring, this
-       layered-ring approach is what actually looks right on a circle. */
-    border:2px solid #d6d9dd;
+      linear-gradient(160deg, rgba(255,255,255,0.4) 0%, rgba(255,255,255,0.08) 40%, rgba(255,255,255,0.02) 100%),
+      rgba(255,255,255,0.06);
+    -webkit-backdrop-filter:blur(8px);
+    backdrop-filter:blur(8px);
+    /* Chrome bezel built from a solid light border plus box-shadow rings, a
+       real gradient border on a circle tends to render as a warped rectangle
+       rather than a smooth ring, this layered-ring approach is what actually
+       looks right on a circle. */
+    border:2px solid rgba(255,255,255,0.8);
     box-shadow:
-      0 12px 24px rgba(0,0,0,0.55),
-      0 3px 8px rgba(0,0,0,0.4),
-      inset 0 2px 2px rgba(255,255,255,0.4),
-      inset 0 -3px 5px rgba(0,0,0,0.55),
-      0 0 0 2px rgba(30,32,36,0.9),
-      0 0 0 5px rgba(160,164,170,0.45);
+      0 4px 10px rgba(0,0,0,0.22),
+      inset 0 1.5px 2px rgba(255,255,255,0.6),
+      inset 0 -2px 4px rgba(0,0,0,0.14),
+      0 0 0 2px rgba(0,0,0,0.1),
+      0 0 0 4px rgba(255,255,255,0.22);
     transition:transform .15s cubic-bezier(.34,1.56,.64,1), box-shadow .15s ease;
   }
-  /* Small green/red glow flanking the medallion's base, matching the two
-     coloured pips at the pinch-points either side of the logo circle in the
-     reference mockup. Decorative only (z-index:-1, never intercepts the tap). */
-  .nav-lock-btn::before{
-    content:''; position:absolute; left:-15px; bottom:0px; width:16px; height:16px; z-index:-1;
-    border-radius:50%; filter:blur(4px);
-    background:radial-gradient(circle, rgba(52,211,153,0.6), transparent 70%);
-  }
-  .nav-lock-btn::after{
-    content:''; position:absolute; right:-15px; bottom:0px; width:16px; height:16px; z-index:-1;
-    border-radius:50%; filter:blur(4px);
-    background:radial-gradient(circle, rgba(248,113,113,0.6), transparent 70%);
-  }
-  .nav-lock-btn:active{
-    transform:scale(0.9);
-    box-shadow:0 6px 14px rgba(0,0,0,0.45), inset 0 2px 2px rgba(255,255,255,0.4), inset 0 -3px 5px rgba(0,0,0,0.55), 0 0 0 2px rgba(30,32,36,0.9), 0 0 0 5px rgba(160,164,170,0.45);
-  }
+  .nav-lock-btn:active{ transform:scale(0.9); }
   .nav-lock-logo{
-    width:32px; height:32px; border-radius:50%; object-fit:cover; pointer-events:none;
-    box-shadow:0 0 0 1px rgba(255,255,255,0.18);
+    width:25px; height:25px; border-radius:50%; object-fit:cover; pointer-events:none;
+    box-shadow:0 0 0 1px rgba(255,255,255,0.3);
   }
   /* ================= INCOMING CALL ================= */
   #incomingCallOverlay{ z-index:60; background:rgba(4,5,8,0.92); backdrop-filter:blur(6px); }
@@ -1357,7 +1335,6 @@
     <div class="nav-tab" data-nav-tab="profile">
       <div class="me-avatar nav-tab-avatar" id="meAvatar" title="Profile">ME</div>
       <span>Profile</span>
-      <div class="nav-tab-dot"></div>
     </div>
     <div class="nav-seam"></div>
     <div class="nav-tab" data-nav-tab="calls">
@@ -1366,7 +1343,6 @@
       </div>
       <span>Calls</span>
       <div class="nav-tab-badge" id="navCallsBadge" style="display:none;"></div>
-      <div class="nav-tab-dot"></div>
     </div>
     <div class="nav-seam"></div>
     <div class="nav-lock-btn" id="navLockBtn" title="Lock">
@@ -1379,7 +1355,6 @@
       </div>
       <span>Chats</span>
       <div class="nav-tab-badge" id="navChatsBadge" style="display:none;"></div>
-      <div class="nav-tab-dot"></div>
     </div>
     <div class="nav-seam"></div>
     <div class="nav-tab" data-nav-tab="settings">
@@ -1388,7 +1363,6 @@
       </div>
       <span>Settings</span>
       <div class="nav-tab-badge" id="navSettingsBadge" style="display:none;"></div>
-      <div class="nav-tab-dot"></div>
     </div>
   </div>
 </div>
