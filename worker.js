@@ -1017,6 +1017,58 @@ export class Registry {
       return json({ chat, existing: false });
     }
 
+    // Message a workspace member directly by their userId, not their PIN.
+    // The Members list only ever exposes userIds (a PIN is sensitive, never
+    // handed out just because two people share a workspace), so /contact's
+    // PIN-based lookup doesn't work from there, this is the same
+    // get-or-create-DM logic, just keyed off userId and gated on both sides
+    // actually being members of the given workspace (same as /contact's own
+    // orgId check) rather than one side proving they know the other's PIN.
+    if (request.method === 'POST' && url.pathname === '/org/member-dm') {
+      const { pinHash, orgId, targetUserId } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!targetUserId || targetUserId === me.id) return json({ error: 'invalid_target' }, 400);
+      if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) {
+        return json({ error: 'not_org_member' }, 403);
+      }
+      if (!(await isOrgMember(this.state.storage, orgId, targetUserId))) {
+        return json({ error: 'not_org_member' }, 403);
+      }
+      const otherPinHash = await this.state.storage.get(`userIdToPinHash:${targetUserId}`);
+      const other = otherPinHash ? await this.state.storage.get(`user:${otherPinHash}`) : null;
+      if (!other) return json({ error: 'not_found' }, 404);
+
+      const myChatIds = (await this.state.storage.get(`userChats:${me.id}`)) || [];
+      for (const cid of myChatIds) {
+        const c = await this.state.storage.get(`chat:${cid}`);
+        if (c && c.type === 'dm' && c.memberIds.includes(other.id) && (c.orgId || null) === orgId) {
+          const hidden = (await this.state.storage.get(`hiddenChats:${me.id}`)) || {};
+          if (hidden[cid]) {
+            delete hidden[cid];
+            await this.state.storage.put(`hiddenChats:${me.id}`, hidden);
+          }
+          return json({ chat: c, existing: true });
+        }
+      }
+      const otherChatIds = (await this.state.storage.get(`userChats:${other.id}`)) || [];
+      for (const cid of otherChatIds) {
+        const c = await this.state.storage.get(`chat:${cid}`);
+        if (c && c.type === 'dm' && c.memberIds.includes(me.id) && (c.orgId || null) === orgId) {
+          await this.state.storage.put(`userChats:${me.id}`, [...myChatIds, cid]);
+          return json({ chat: c, existing: true });
+        }
+      }
+      const chatId = crypto.randomUUID();
+      const chat = { id: chatId, type: 'dm', name: null, memberIds: [me.id, other.id], createdAt: Date.now(), orgId };
+      await this.state.storage.put(`chat:${chatId}`, chat);
+      await this.state.storage.put(`userChats:${me.id}`, [...myChatIds, chatId]);
+      await this.state.storage.put(`userChats:${other.id}`, [...otherChatIds, chatId]);
+      const allChatIds = (await this.state.storage.get('allChatIds')) || [];
+      await this.state.storage.put('allChatIds', [...allChatIds, chatId]);
+      return json({ chat, existing: false });
+    }
+
     if (request.method === 'POST' && url.pathname === '/group') {
       const { pinHash, name, memberPinHashes, memberIds: directMemberIds, orgId } = await request.json();
       const me = await this.state.storage.get(`user:${pinHash}`);
@@ -4227,6 +4279,16 @@ export default {
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
         const orgId = url.searchParams.get('orgId') || '';
         return registryStub.fetch(`https://internal/org/members?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}`);
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/org/member-dm') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const { orgId, targetUserId } = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/org/member-dm', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, orgId, targetUserId }),
+        });
       }
 
       if (request.method === 'GET' && url.pathname === '/api/org/permissions') {

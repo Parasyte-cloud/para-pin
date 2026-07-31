@@ -1397,37 +1397,39 @@
 
 <!-- ============ WORKSPACE MEMBERS / INVITE MODAL ============ -->
 <div class="overlay" id="workspaceMembersOverlay">
-  <div class="modal lg">
-    <h3 id="workspaceMembersTitle">Members</h3>
-    <div id="workspaceBrandSection" style="display:none; margin-top:10px; padding-bottom:16px; margin-bottom:12px; border-bottom:1px solid var(--glass-brd);">
-      <div style="display:flex; align-items:center; gap:12px;">
-        <div class="avatar" id="workspaceBrandAvatar" style="width:52px; height:52px; font-size:18px; cursor:pointer; flex-shrink:0;" title="Tap to change logo"></div>
-        <div style="flex:1; min-width:0;">
-          <input type="text" id="workspaceBrandNameInput" placeholder="Workspace name" maxlength="60">
-          <div class="hint" id="workspaceBrandHint" style="margin-top:4px;">Tap the logo to change it. Rename, then Save.</div>
+  <div class="modal lg" style="max-height:85vh; display:flex; flex-direction:column;">
+    <h3 id="workspaceMembersTitle" style="flex-shrink:0;">Members</h3>
+    <div style="overflow-y:auto; flex:1; min-height:0; margin:0 -22px; padding:0 22px;">
+      <div id="workspaceBrandSection" style="display:none; margin-top:10px; padding-bottom:16px; margin-bottom:12px; border-bottom:1px solid var(--glass-brd);">
+        <div style="display:flex; align-items:center; gap:12px;">
+          <div class="avatar" id="workspaceBrandAvatar" style="width:52px; height:52px; font-size:18px; cursor:pointer; flex-shrink:0;" title="Tap to change logo"></div>
+          <div style="flex:1; min-width:0;">
+            <input type="text" id="workspaceBrandNameInput" placeholder="Workspace name" maxlength="60">
+            <div class="hint" id="workspaceBrandHint" style="margin-top:4px;">Tap the logo to change it. Rename, then Save.</div>
+          </div>
+          <div class="btn" id="workspaceBrandSaveBtn" style="flex-shrink:0;">Save</div>
         </div>
-        <div class="btn" id="workspaceBrandSaveBtn" style="flex-shrink:0;">Save</div>
+        <label class="settings-row" style="margin-top:10px;">
+          <span>Allow email sign-in for this workspace</span>
+          <input type="checkbox" id="workspaceEmailAuthToggle">
+        </label>
+        <input type="text" id="workspaceEmailDomainInput" placeholder="Company email domain, e.g. greigtech.com" style="margin-top:8px;">
+        <div class="hint" id="workspaceEmailDomainHint" style="margin-top:4px;">Anyone with a matching company email can request a sign-in link and join automatically, no invite needed. Leave blank to only let existing verified members' emails work.</div>
       </div>
-      <label class="settings-row" style="margin-top:10px;">
-        <span>Allow email sign-in for this workspace</span>
-        <input type="checkbox" id="workspaceEmailAuthToggle">
-      </label>
-      <input type="text" id="workspaceEmailDomainInput" placeholder="Company email domain, e.g. greigtech.com" style="margin-top:8px;">
-      <div class="hint" id="workspaceEmailDomainHint" style="margin-top:4px;">Anyone with a matching company email can request a sign-in link and join automatically, no invite needed. Leave blank to only let existing verified members' emails work.</div>
-    </div>
-    <div class="contact-pick" id="workspaceMembersList"></div>
-    <div id="workspaceInviteSection" style="display:none;">
-      <div class="hint">Invite by PIN (they must already have a PArA PIN account), or invite someone brand new by name/email.</div>
-      <div style="display:flex; gap:8px; align-items:center;">
-        <input type="text" id="workspaceInvitePinInput" placeholder="1234567" inputmode="numeric" maxlength="7" style="flex:1;">
-        <div class="btn" id="workspaceInvitePinBtn">Add</div>
+      <div class="contact-pick" id="workspaceMembersList" style="max-height:none;"></div>
+      <div id="workspaceInviteSection" style="display:none;">
+        <div class="hint">Invite by PIN (they must already have a PArA PIN account), or invite someone brand new by name/email.</div>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <input type="text" id="workspaceInvitePinInput" placeholder="1234567" inputmode="numeric" maxlength="7" style="flex:1;">
+          <div class="btn" id="workspaceInvitePinBtn">Add</div>
+        </div>
+        <input type="text" id="workspaceInviteNameInput" placeholder="Full name (for a brand-new person)" style="margin-top:8px;">
+        <input type="text" id="workspaceInviteEmailInput" placeholder="Email (optional, sends their PIN)" style="margin-top:8px;">
+        <div class="btn" id="workspaceInviteNewBtn" style="margin-top:8px;">Invite new person</div>
+        <div class="hint" id="workspaceInviteError" style="display:none;color:#ff6a6a;"></div>
       </div>
-      <input type="text" id="workspaceInviteNameInput" placeholder="Full name (for a brand-new person)" style="margin-top:8px;">
-      <input type="text" id="workspaceInviteEmailInput" placeholder="Email (optional, sends their PIN)" style="margin-top:8px;">
-      <div class="btn" id="workspaceInviteNewBtn" style="margin-top:8px;">Invite new person</div>
-      <div class="hint" id="workspaceInviteError" style="display:none;color:#ff6a6a;"></div>
     </div>
-    <div class="modal-actions" style="margin-top:14px;">
+    <div class="modal-actions" style="margin-top:14px; flex-shrink:0;">
       <div class="btn" id="workspaceOpenHrBtn">People & HR</div>
       <div class="btn" onclick="closeModal('workspaceMembersOverlay')">Close</div>
     </div>
@@ -3571,8 +3573,43 @@
       renderAvatar(av, m.displayName || 'PArA PIN user', false, m.avatarUrl);
       const nm = document.createElement('div');
       nm.textContent = (m.displayName || 'PArA PIN user') + (m.isAdmin ? ' · Admin' : '');
+      nm.style.flex = '1';
       row.appendChild(av);
       row.appendChild(nm);
+
+      // The whole point of the Members list is reaching people you added,
+      // this is that: message or call them directly, without needing to
+      // already have their PIN memorized separately just to start a DM.
+      if (m.id !== myUserId){
+        const msgBtn = document.createElement('div');
+        msgBtn.className = 'icon-btn';
+        msgBtn.title = 'Message';
+        msgBtn.style.cssText = 'width:28px;height:28px;font-size:13px;flex-shrink:0;';
+        msgBtn.textContent = '💬';
+        msgBtn.onclick = async (e)=>{
+          e.stopPropagation();
+          const r = await apiFetch('/org/member-dm', { method: 'POST', body: JSON.stringify({ orgId: org.id, targetUserId: m.id }) });
+          if (!r.ok || !r.body.chat){ showSessionBanner("Couldn't open that chat. Try again."); return; }
+          if (!sessionChats.some(c => c.id === r.body.chat.id)) sessionChats.push(r.body.chat);
+          closeModal('workspaceMembersOverlay');
+          await ensureNamesLoaded();
+          await openChat(r.body.chat.id);
+          renderChatList();
+        };
+        const callBtn = document.createElement('div');
+        callBtn.className = 'icon-btn';
+        callBtn.title = 'Call';
+        callBtn.style.cssText = 'width:28px;height:28px;font-size:13px;flex-shrink:0;';
+        callBtn.textContent = '📞';
+        callBtn.onclick = (e)=>{
+          e.stopPropagation();
+          closeModal('workspaceMembersOverlay');
+          startOutgoingCall(m.id, m.displayName || 'PArA PIN user', m.avatarUrl, { video: false });
+        };
+        row.appendChild(msgBtn);
+        row.appendChild(callBtn);
+      }
+
       list.appendChild(row);
 
       // Permission toggles: only a true org admin sees these (the server
@@ -6249,8 +6286,23 @@
       meetingWsSend({ type: 'set-session', sfuSessionId: meetingSfuSessionId });
       await meetingPublishLocalTracks();
       updateMeetingStatus();
+      // Previously a failed invite send (bad network, server error) was
+      // swallowed entirely, the person starting the meeting had no way to
+      // know their invite never went anywhere, it just silently sat there
+      // with nobody joining and no explanation. This surfaces it as a
+      // dismissible banner instead, naming who specifically didn't get it.
       (inviteUserIds || []).forEach(uid=>{
-        apiFetch('/meeting/invite', { method: 'POST', body: JSON.stringify({ toUserId: uid, meetingId, meetingName: meetingName || null, orgId: meetingOrgId }) }).catch(()=>{});
+        apiFetch('/meeting/invite', { method: 'POST', body: JSON.stringify({ toUserId: uid, meetingId, meetingName: meetingName || null, orgId: meetingOrgId }) })
+          .then(r=>{
+            if (!r.ok){
+              const name = userNameCache[uid] || 'that person';
+              showSessionBanner(`Couldn't reach ${name} with the meeting invite. They may need to open PArA PIN and try again.`);
+            }
+          })
+          .catch(()=>{
+            const name = userNameCache[uid] || 'that person';
+            showSessionBanner(`Couldn't reach ${name} with the meeting invite. They may need to open PArA PIN and try again.`);
+          });
       });
     });
     const onDrop = ()=>{
