@@ -1788,6 +1788,11 @@
           </div>
           <div class="btn" id="hrEntitlementSaveBtn" style="margin-top:8px;">Save policy</div>
           <div class="hint" id="hrEntitlementHint" style="display:none; margin-top:6px;"></div>
+          <div class="hint" style="margin:16px 0 8px;">Compliance export</div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <div class="btn" id="hrExportEmployeesBtn">Export Employees (CSV)</div>
+            <div class="btn" id="hrExportLeaveBtn">Export Leave History (CSV)</div>
+          </div>
         </div>
         <h3>Celebrations</h3>
         <div id="hrCelebrations" class="hint">Nothing coming up in the next 30 days.</div>
@@ -1821,6 +1826,21 @@
           <div class="btn primary" id="hrJobSaveBtn" style="margin-top:8px;">Save change</div>
         </div>
         <table class="hr-history-table" id="hrJobHistoryTable" style="margin-top:10px;"></table>
+        <!-- Hidden entirely (not just uneditable) unless viewing your own
+             record or you're HR — see loadHrProfile, which hides this whole
+             block for a colleague looking at someone else's profile the
+             same way the server already redacts compensation out of that
+             response entirely (see GET /org/hr/profile in worker.js). -->
+        <div id="hrCompSection" style="display:none;">
+          <h3 style="margin-top:22px;">Compensation</h3>
+          <div id="hrCompCurrent" class="hint"></div>
+          <div class="btn" id="hrCompEditBtn" style="display:none; margin:8px 0;">Record a change</div>
+          <div id="hrCompEditForm" style="display:none;">
+            <div class="hr-field-grid" id="hrCompEditFields"></div>
+            <div class="btn primary" id="hrCompSaveBtn" style="margin-top:8px;">Save change</div>
+          </div>
+          <table class="hr-history-table" id="hrCompHistoryTable" style="margin-top:10px;"></table>
+        </div>
         <h3 style="margin-top:22px;">Time Off History</h3>
         <table class="hr-history-table" id="hrLeaveHistoryTable"></table>
       </section>
@@ -4159,6 +4179,7 @@
   let hrCanEditJob = false;
   let hrDirectoryCache = [];
   let hrProfileCurrentJob = null; // employee.job.current for whoever loadHrProfile last loaded, so hrJobEditBtn's handler (a separate top-level listener) can read the manager to preselect without re-fetching
+  let hrProfileCurrentComp = null; // same idea, for employee.compensation.current
 
   document.querySelectorAll('#hrOverlay .admin-console-tab').forEach(tab=>{
     tab.addEventListener('click', ()=>{
@@ -4196,6 +4217,7 @@
       permission_revoked: 'Permission revoked', leave_policy_changed: 'Leave policy changed',
       leave_approved: 'Leave approved', leave_declined: 'Leave declined',
       hr_profile_edited: 'HR profile edited', billing_activated: 'Billing activated', billing_deactivated: 'Billing deactivated',
+      hr_data_exported: 'Data exported', compensation_changed: 'Compensation changed',
     };
     return labels[action] || action;
   }
@@ -4406,6 +4428,11 @@
       const labels = { '': 'Not set', single: 'Single', married: 'Married', domestic_partnership: 'Domestic partnership', divorced: 'Divorced', widowed: 'Widowed' };
       return `<label>${label}<select data-field="${name}">${opts.map(o=>`<option value="${o}" ${value===o?'selected':''}>${labels[o]}</option>`).join('')}</select></label>`;
     }
+    if (type === 'select-frequency'){
+      const opts = ['annual', 'monthly', 'biweekly', 'weekly'];
+      const labels = { annual: 'Annual', monthly: 'Monthly', biweekly: 'Bi-weekly', weekly: 'Weekly' };
+      return `<label>${label}<select data-field="${name}">${opts.map(o=>`<option value="${o}" ${value===o?'selected':''}>${labels[o]}</option>`).join('')}</select></label>`;
+    }
     if (type === 'select-manager'){
       // This is what actually routes leave-request approvals to a line
       // manager instead of just org admins — worker.js's /org/hr/leave/inbox
@@ -4502,6 +4529,31 @@
         histRows.map(h => `<tr><td>${hrFmtDate(h.effectiveDate)}</td><td>${escapeHtml(h.jobTitle || '')}</td><td>${escapeHtml(h.department || '')}</td><td>${escapeHtml(h.entity || '')}</td></tr>`).join('')
       : '';
 
+    // employee.compensation is entirely absent (redacted server-side, see
+    // GET /org/hr/profile) when a colleague looks at someone else's
+    // profile — that's the actual access control, this display toggle is
+    // just following what the server already decided to send.
+    const compSection = document.getElementById('hrCompSection');
+    if (employee.compensation){
+      compSection.style.display = 'block';
+      const compCur = employee.compensation.current;
+      hrProfileCurrentComp = compCur;
+      document.getElementById('hrCompCurrent').textContent = compCur.baseSalary
+        ? `${compCur.baseSalary.toLocaleString()} ${compCur.currency || ''} (${compCur.payFrequency || 'frequency not set'}), since ${hrFmtDate(compCur.effectiveDate)}`
+        : 'No compensation recorded yet.';
+      document.getElementById('hrCompEditBtn').style.display = canEditJob ? 'inline-flex' : 'none';
+      document.getElementById('hrCompEditForm').style.display = 'none';
+      const compHistRows = [compCur, ...employee.compensation.history];
+      const compTable = document.getElementById('hrCompHistoryTable');
+      compTable.innerHTML = compHistRows.some(h => h.baseSalary)
+        ? `<tr><th>Effective</th><th>Base Salary</th><th>Currency</th><th>Frequency</th></tr>` +
+          compHistRows.map(h => `<tr><td>${hrFmtDate(h.effectiveDate)}</td><td>${h.baseSalary != null ? h.baseSalary.toLocaleString() : ''}</td><td>${escapeHtml(h.currency || '')}</td><td>${escapeHtml(h.payFrequency || '')}</td></tr>`).join('')
+        : '';
+    } else {
+      compSection.style.display = 'none';
+      hrProfileCurrentComp = null;
+    }
+
     const leaveTable = document.getElementById('hrLeaveHistoryTable');
     const rows = (historyRes.ok && historyRes.body && historyRes.body.rows) || [];
     leaveTable.innerHTML = rows.length
@@ -4570,6 +4622,29 @@
     loadHrProfile(hrProfileTargetUserId);
   });
 
+  document.getElementById('hrCompEditBtn').addEventListener('click', ()=>{
+    const form = document.getElementById('hrCompEditForm');
+    const showing = form.style.display === 'block';
+    if (showing){ form.style.display = 'none'; return; }
+    const cur = hrProfileCurrentComp || {};
+    document.getElementById('hrCompEditFields').innerHTML = [
+      hrFieldRow('Base salary', 'baseSalary', cur.baseSalary != null ? cur.baseSalary : '', 'number'),
+      hrFieldRow('Currency (e.g. USD)', 'currency', cur.currency || ''),
+      hrFieldRow('Pay frequency', 'payFrequency', cur.payFrequency || 'annual', 'select-frequency'),
+    ].join('');
+    form.style.display = 'block';
+  });
+
+  document.getElementById('hrCompSaveBtn').addEventListener('click', async ()=>{
+    const current = {};
+    document.querySelectorAll('#hrCompEditFields [data-field]').forEach(el=>{ current[el.dataset.field] = el.value || null; });
+    await apiFetch('/org/hr/profile', {
+      method: 'POST',
+      body: JSON.stringify({ orgId: hrActiveOrg.id, targetUserId: hrProfileTargetUserId, compensation: { current } }),
+    });
+    loadHrProfile(hrProfileTargetUserId);
+  });
+
   document.getElementById('hrEntitlementSaveBtn').addEventListener('click', async ()=>{
     const hintEl = document.getElementById('hrEntitlementHint');
     const annual = document.getElementById('hrEntitlementAnnualInput').value;
@@ -4588,6 +4663,31 @@
       hintEl.style.color = '#ff6a6a';
     }
   });
+
+  // The export endpoints hand back CSV text inside a normal JSON body (see
+  // worker.js's comment on /org/hr/export/employees — keeps this on the
+  // same apiFetch() every other endpoint uses instead of a one-off raw-
+  // response code path), so triggering an actual file download from that is
+  // on the client: wrap it in a Blob and click a throwaway <a download>.
+  function downloadCsv(filename, csvText){
+    const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  }
+  async function runHrExport(btn, path){
+    if (!hrActiveOrg) return;
+    const originalText = btn.textContent;
+    btn.textContent = 'Exporting…';
+    const r = await apiFetch(`${path}?orgId=${encodeURIComponent(hrActiveOrg.id)}`);
+    btn.textContent = originalText;
+    if (!r.ok || !r.body || typeof r.body.csv !== 'string'){ alert("Couldn't export. Try again."); return; }
+    downloadCsv(r.body.filename || 'export.csv', r.body.csv);
+  }
+  document.getElementById('hrExportEmployeesBtn').addEventListener('click', (e)=> runHrExport(e.currentTarget, '/org/hr/export/employees'));
+  document.getElementById('hrExportLeaveBtn').addEventListener('click', (e)=> runHrExport(e.currentTarget, '/org/hr/export/leave'));
 
   async function loadHrDirectory(){
     if (!hrActiveOrg) return;

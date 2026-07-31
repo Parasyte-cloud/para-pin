@@ -26,6 +26,22 @@ function authHash(request, url) {
   return request.headers.get('X-Para-Pin-Hash') || url.searchParams.get('pinHash') || null;
 }
 
+// CSV, not JSON, for the HR/audit data exports — this is specifically for
+// compliance requests (GDPR-style "give us all our people data"), and
+// whoever's asking for that wants something they can open directly in
+// Excel/Sheets, not a file they need a developer to parse. RFC 4180 quoting
+// (wrap in quotes + double any embedded quotes) any field containing a
+// comma, quote, or newline — HR free-text fields (reason, comment, address)
+// can easily contain any of those.
+function csvEscape(val) {
+  const s = val === null || val === undefined ? '' : String(val);
+  if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+function toCsv(rows) {
+  return rows.map((row) => row.map(csvEscape).join(',')).join('\r\n');
+}
+
 // Whisper's binding wants the raw audio as a base64 string, not bytes.
 // btoa(String.fromCharCode(...bytes)) blows the call stack on anything past
 // a few tens of KB (spread arg limit), so this builds the binary string in
@@ -232,9 +248,21 @@ async function hasOrgPermission(storage, orgId, userId, permission) {
 // Lazily created on first touch rather than at org-join time, most org
 // members will never fill in HR fields at all in Phase 1, forcing a full
 // record to exist immediately would just be empty rows nobody asked for.
+function emptyCompensation(effectiveDate) {
+  return { current: { effectiveDate, baseSalary: null, currency: null, payFrequency: null }, history: [] };
+}
 async function getEmployee(storage, orgId, userId) {
   const rec = await storage.get(`employee:${orgId}:${userId}`);
-  if (rec) return rec;
+  if (rec) {
+    // Backfills a field added after some employee records already existed —
+    // an old stored record simply won't have this key at all, and every
+    // caller below assumes employee.compensation.current exists. Patched in
+    // memory here rather than a one-time migration script (nothing else in
+    // this Durable Object has a migration runner), gets actually persisted
+    // the next time anything writes this record via POST /org/hr/profile.
+    if (!rec.compensation) rec.compensation = emptyCompensation(rec.hireDate || Date.now());
+    return rec;
+  }
   const joinedAt = (await storage.get(`orgJoinedAt:${orgId}:${userId}`)) || Date.now();
   return {
     orgId, userId,
@@ -247,6 +275,11 @@ async function getEmployee(storage, orgId, userId) {
     },
     hireDate: joinedAt,
     job: { current: { effectiveDate: joinedAt, entity: null, department: null, jobTitle: null, managerId: null }, history: [] },
+    // HR-only to ever set (see POST /org/hr/profile), visible to the employee
+    // themselves same as everything else here, but — unlike job title/dept,
+    // which the directory/org chart show to any colleague — never shown to
+    // anyone else at all, redacted alongside address/national ID in GET.
+    compensation: emptyCompensation(joinedAt),
     createdAt: joinedAt, updatedAt: joinedAt,
   };
 }
@@ -2057,13 +2090,17 @@ export class Registry {
           },
           hireDate: null,
           job: { current: employee.job.current, history: [] },
+          // Never shown to a colleague, only self or HR — stricter than job
+          // title/department, which the redacted branch above still passes
+          // through since the directory/org chart intentionally show those.
+          compensation: null,
         };
       }
       return json({ employee, canEditJob: isAdmin, isSelf: viewingSelf });
     }
 
     if (request.method === 'POST' && url.pathname === '/org/hr/profile') {
-      const { pinHash, orgId, targetUserId, personal, job, hireDate } = await request.json();
+      const { pinHash, orgId, targetUserId, personal, job, hireDate, compensation } = await request.json();
       const me = await this.state.storage.get(`user:${pinHash}`);
       if (!me) return json({ error: 'not_registered' }, 401);
       if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
@@ -2088,6 +2125,23 @@ export class Registry {
           employee.job.current = { effectiveDate: Date.now(), entity: job.current.entity || null, department: job.current.department || null, jobTitle: job.current.jobTitle || null, managerId: job.current.managerId || null };
         }
       }
+      // HR-only to touch at all — unlike job/personal fields, this has no
+      // self-service path even for editingSelf, nobody sets their own
+      // salary. Same history-tracking shape as job.current/job.history so a
+      // raise shows up as a dated record, not a value silently overwritten.
+      if (compensation && typeof compensation === 'object' && isAdmin) {
+        if (compensation.current) {
+          if (!employee.compensation) employee.compensation = emptyCompensation(employee.hireDate || Date.now());
+          employee.compensation.history.unshift(employee.compensation.current);
+          const baseSalaryNum = Number(compensation.current.baseSalary);
+          employee.compensation.current = {
+            effectiveDate: Date.now(),
+            baseSalary: Number.isFinite(baseSalaryNum) ? baseSalaryNum : null,
+            currency: compensation.current.currency ? String(compensation.current.currency).trim().toUpperCase().slice(0, 3) : null,
+            payFrequency: compensation.current.payFrequency || null,
+          };
+        }
+      }
       // Hire date drives tenure/accrual math, changing it retroactively
       // affects both balance calculations, HR-only for exactly that reason.
       if (isAdmin && hireDate){
@@ -2096,12 +2150,23 @@ export class Registry {
       }
       employee.updatedAt = Date.now();
       await this.state.storage.put(`employee:${orgId}:${uid}`, employee);
+      const targetRec = await this.state.storage.get(`userById:${uid}`);
+      // Compensation gets its own, always-logged entry (even on one's own
+      // record, though that path shouldn't come up often) — this is the
+      // single most sensitive kind of change in the whole HR module, worth
+      // a distinct, unmissable label rather than folding into the generic
+      // "edited a profile" line below.
+      if (compensation && compensation.current && isAdmin) {
+        await appendAuditLog(this.state.storage, orgId, {
+          actorId: me.id, actorName: me.displayName || 'Someone', action: 'compensation_changed',
+          details: `Recorded a compensation change for ${targetRec ? targetRec.displayName : 'someone'}`,
+        });
+      }
       // Only log HR acting on someone ELSE's record — every employee editing
       // their own contact details would flood this with routine self-service
       // noise that isn't what an admin reviewing "who changed HR data"
       // actually wants to see.
       if (!editingSelf) {
-        const targetRec = await this.state.storage.get(`userById:${uid}`);
         await appendAuditLog(this.state.storage, orgId, {
           actorId: me.id, actorName: me.displayName || 'Someone', action: 'hr_profile_edited',
           details: `Edited ${targetRec ? targetRec.displayName : 'someone'}'s HR profile${job && job.current ? ' (recorded a job change)' : ''}`,
@@ -2132,6 +2197,90 @@ export class Registry {
         });
       }
       return json({ members: rows });
+    }
+
+    // ---- Compliance data export ----
+    // Returns CSV text inside a normal JSON envelope (not a raw CSV response)
+    // so this goes through the exact same apiFetch() every other endpoint
+    // in this app already uses — the client turns the string into a Blob
+    // and triggers a real file download from there, see the HR overlay's
+    // Export buttons. manage_hr-gated: this is the single widest-reaching
+    // read of personal data in the whole HR module, full names, addresses,
+    // national IDs, DOB all in one file, same bar as viewing any one
+    // person's full profile already required.
+    if (request.method === 'GET' && url.pathname === '/org/hr/export/employees') {
+      const pinHash = url.searchParams.get('pinHash');
+      const orgId = url.searchParams.get('orgId');
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_hr'))) {
+        return json({ error: 'forbidden' }, 403);
+      }
+      const memberIds = (await this.state.storage.get(`orgMembers:${orgId}`)) || [];
+      const header = [
+        'User ID', 'Display Name', 'First Name', 'Middle Name', 'Last Name', 'Preferred Name',
+        'Date of Birth', 'Gender', 'Marital Status', 'National ID', 'Work Phone', 'Personal Mobile',
+        'Personal Email', 'Office Location', 'Street', 'City', 'State/Region', 'Postal Code', 'Country',
+        'Employment Type', 'Hire Date', 'Job Title', 'Department', 'Entity/Office', 'Manager',
+        'Base Salary', 'Currency', 'Pay Frequency',
+      ];
+      const rows = [header];
+      const namesById = new Map();
+      for (const id of memberIds) {
+        const userRec = await this.state.storage.get(`userById:${id}`);
+        if (userRec) namesById.set(id, userRec.displayName);
+      }
+      for (const id of memberIds) {
+        const userRec = await this.state.storage.get(`userById:${id}`);
+        if (!userRec) continue;
+        const emp = await getEmployee(this.state.storage, orgId, id);
+        const p = emp.personal;
+        const cur = emp.job.current;
+        rows.push([
+          id, userRec.displayName, p.firstName, p.middleName, p.lastName, p.preferredName,
+          p.dob ? new Date(p.dob).toISOString().slice(0, 10) : '', p.gender, p.maritalStatus, p.nationalId,
+          p.workPhone, p.personalMobile, p.personalEmail, p.officeLocation,
+          p.homeAddress.street, p.homeAddress.city, p.homeAddress.state, p.homeAddress.postal, p.homeAddress.country,
+          p.employmentType, emp.hireDate ? new Date(emp.hireDate).toISOString().slice(0, 10) : '',
+          cur.jobTitle, cur.department, cur.entity, cur.managerId ? (namesById.get(cur.managerId) || cur.managerId) : '',
+          emp.compensation.current.baseSalary, emp.compensation.current.currency, emp.compensation.current.payFrequency,
+        ]);
+      }
+      await appendAuditLog(this.state.storage, orgId, {
+        actorId: me.id, actorName: me.displayName || 'Someone', action: 'hr_data_exported',
+        details: `Exported employee records (${memberIds.length} people)`,
+      });
+      return json({ ok: true, csv: toCsv(rows), filename: `hr-employees-${orgId}.csv` });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/org/hr/export/leave') {
+      const pinHash = url.searchParams.get('pinHash');
+      const orgId = url.searchParams.get('orgId');
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_hr'))) {
+        return json({ error: 'forbidden' }, 403);
+      }
+      const ids = (await this.state.storage.get(`leaveRequestIds:${orgId}`)) || [];
+      const header = ['Employee', 'Type', 'Start Date', 'End Date', 'Half Day', 'Days', 'Status', 'Reason', 'Requested At', 'Decided By', 'Decided At', 'Comment'];
+      const rows = [header];
+      for (const rid of ids) {
+        const reqRec = await this.state.storage.get(`leaveRequest:${orgId}:${rid}`);
+        if (!reqRec) continue;
+        const requesterRec = await this.state.storage.get(`userById:${reqRec.userId}`);
+        const deciderRec = reqRec.decidedBy ? await this.state.storage.get(`userById:${reqRec.decidedBy}`) : null;
+        rows.push([
+          requesterRec ? requesterRec.displayName : reqRec.userId, reqRec.type, reqRec.startDate, reqRec.endDate,
+          reqRec.halfDay ? 'Yes' : 'No', reqRec.days, reqRec.status, reqRec.reason || '',
+          new Date(reqRec.createdAt).toISOString(), deciderRec ? deciderRec.displayName : '',
+          reqRec.decidedAt ? new Date(reqRec.decidedAt).toISOString() : '', reqRec.comment || '',
+        ]);
+      }
+      await appendAuditLog(this.state.storage, orgId, {
+        actorId: me.id, actorName: me.displayName || 'Someone', action: 'hr_data_exported',
+        details: `Exported leave request history (${ids.length} requests)`,
+      });
+      return json({ ok: true, csv: toCsv(rows), filename: `leave-history-${orgId}.csv` });
     }
 
     // Home dashboard: own leave balances/upcoming leave, plus org-wide
@@ -4779,6 +4928,20 @@ export default {
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
         const orgId = url.searchParams.get('orgId') || '';
         return registryStub.fetch(`https://internal/org/hr/directory?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}`);
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/org/hr/export/employees') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const orgId = url.searchParams.get('orgId') || '';
+        return registryStub.fetch(`https://internal/org/hr/export/employees?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}`);
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/org/hr/export/leave') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const orgId = url.searchParams.get('orgId') || '';
+        return registryStub.fetch(`https://internal/org/hr/export/leave?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}`);
       }
 
       if (request.method === 'GET' && url.pathname === '/api/org/hr/home') {
