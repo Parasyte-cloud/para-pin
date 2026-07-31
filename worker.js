@@ -1295,7 +1295,14 @@ export class Registry {
       const userId = url.searchParams.get('userId');
       if (!userId) return json({ error: 'missing_user_id' }, 400);
       const log = (await this.state.storage.get(`callLog:${userId}`)) || [];
-      return json({ log });
+      // Workspace/personal separation: a call made from inside a workspace
+      // shouldn't show up in the Calls tab back on Personal, and vice versa.
+      // orgId is optional on the query (personal = no orgId at all), and on
+      // older entries logged before this field existed (treated as personal,
+      // same grandfathering approach used for billingStatus elsewhere).
+      const orgId = url.searchParams.get('orgId') || null;
+      const scoped = log.filter(e => (e.orgId || null) === orgId);
+      return json({ log: scoped });
     }
 
     if (request.method === 'POST' && url.pathname === '/call-log') {
@@ -1313,6 +1320,7 @@ export class Registry {
         outcome: ['answered', 'missed', 'declined', 'busy'].includes(entry.outcome) ? entry.outcome : 'answered',
         durationSec: Math.max(0, Math.round(Number(entry.durationSec) || 0)),
         isVideo: !!entry.isVideo,
+        orgId: entry.orgId || null,
         ts: Date.now(),
       });
       const capped = log.slice(0, 50);
@@ -3763,7 +3771,8 @@ export default {
         const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
         const who = await whoRes.json();
         if (!who.ok) return json({ error: 'not_registered' }, 401);
-        const res = await registryStub.fetch(`https://internal/call-log?userId=${encodeURIComponent(who.userId)}`);
+        const orgId = url.searchParams.get('orgId') || '';
+        const res = await registryStub.fetch(`https://internal/call-log?userId=${encodeURIComponent(who.userId)}&orgId=${encodeURIComponent(orgId)}`);
         return res;
       }
 
