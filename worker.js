@@ -1015,6 +1015,48 @@ export class Registry {
       return json({ ok: true });
     }
 
+    // Explicit "Unarchive" action (as opposed to /hide-chat's automatic
+    // un-hide on new activity), for the Archived filter's own context menu.
+    if (request.method === 'POST' && url.pathname === '/unhide-chat') {
+      const { pinHash, chatId } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ ok: false, error: 'not_registered' }, 401);
+      const hidden = (await this.state.storage.get(`hiddenChats:${user.id}`)) || {};
+      if (hidden[chatId]) {
+        delete hidden[chatId];
+        await this.state.storage.put(`hiddenChats:${user.id}`, hidden);
+      }
+      return json({ ok: true });
+    }
+
+    // Lists chats currently hidden ("archived") for this user, for the
+    // Chats screen's own Archived filter pill. /session already lazily
+    // prunes hiddenChats the moment a hidden chat gets new activity (see
+    // above), so by the time this runs the map is always current truth,
+    // no need to redo that comparison here.
+    if (request.method === 'GET' && url.pathname === '/archived-chats') {
+      const pinHash = url.searchParams.get('pinHash');
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      const hidden = (await this.state.storage.get(`hiddenChats:${user.id}`)) || {};
+      const chats = [];
+      for (const cid of Object.keys(hidden)) {
+        const c = await this.state.storage.get(`chat:${cid}`);
+        if (c) chats.push(c);
+      }
+      const summaries = {};
+      if (this.env.CHAT_ROOM) {
+        await Promise.all(chats.map(async (c) => {
+          try {
+            const stub = this.env.CHAT_ROOM.get(this.env.CHAT_ROOM.idFromName(c.id));
+            const res = await stub.fetch(`https://internal/summary?userId=${encodeURIComponent(user.id)}`);
+            if (res.ok) summaries[c.id] = await res.json();
+          } catch (e) {}
+        }));
+      }
+      return json({ chats, summaries });
+    }
+
     // Permanently removes a DM from just this user's own chat list, unlike
     // /hide-chat, it does NOT come back on a new message. Still only ever
     // touches the caller's own userChats: the other person's list, the
@@ -4089,6 +4131,25 @@ export default {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
         return registryStub.fetch('https://internal/hide-chat', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, chatId }),
+        });
+      }
+
+      // /api/archived-chats, backs the Chats screen's Archived filter pill.
+      if (url.pathname === '/api/archived-chats' && request.method === 'GET') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        return registryStub.fetch(`https://internal/archived-chats?pinHash=${encodeURIComponent(pinHash)}`);
+      }
+
+      // /api/chats/:id/unarchive, the Archived tab's own explicit "un-hide".
+      const unarchiveMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/unarchive$/);
+      if (unarchiveMatch && request.method === 'POST') {
+        const [, chatId] = unarchiveMatch;
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        return registryStub.fetch('https://internal/unhide-chat', {
           method: 'POST',
           body: JSON.stringify({ pinHash, chatId }),
         });
