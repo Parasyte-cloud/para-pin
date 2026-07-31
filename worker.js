@@ -2148,9 +2148,17 @@ export class Registry {
       const ids = (await this.state.storage.get(`leaveRequestIds:${orgId}`)) || [];
       await this.state.storage.put(`leaveRequestIds:${orgId}`, [...ids, id]);
 
-      // Notify HR (all org admins) and the requester's direct manager, if
-      // set, reusing the same per-user push/in-app channel 1:1 calls use.
-      const notifyTargets = new Set((await this.state.storage.get(`org:${orgId}`)).admins || []);
+      // Notify whoever can actually see this in their inbox: real org admins,
+      // AND anyone individually granted manage_hr (see hasOrgPermission —
+      // org.admins alone misses that second group, they'd never hear about a
+      // request they're fully able to decide), plus the requester's direct
+      // manager, if set, reusing the same per-user push/in-app channel 1:1
+      // calls use.
+      const memberIds = (await this.state.storage.get(`orgMembers:${orgId}`)) || [];
+      const notifyTargets = new Set();
+      for (const uid of memberIds) {
+        if (await hasOrgPermission(this.state.storage, orgId, uid, 'manage_hr')) notifyTargets.add(uid);
+      }
       if (employee.job.current.managerId) notifyTargets.add(employee.job.current.managerId);
       notifyTargets.delete(me.id);
       if (this.env.USER_CHANNEL) {

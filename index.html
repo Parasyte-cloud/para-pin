@@ -1484,6 +1484,13 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17" cy="9" r="2.5"/><path d="M15.5 14.2c2.4.4 4.5 2.5 4.5 5.3"/></svg>
       </div>
       <span>People</span>
+      <!-- Count of leave requests waiting on THIS person specifically (admin
+           or line manager, see /org/hr/leave/inbox), so it's visible right
+           on the tab without having to remember to go check Home. The push
+           notification /org/hr/leave/request already sends is easy to miss/
+           dismiss; this is the persistent half of the same "did anyone
+           request time off" signal. -->
+      <div class="nav-tab-badge" id="workspaceNavPeopleBadge" style="display:none;"></div>
     </div>
     <div class="nav-seam"></div>
     <div class="nav-tab" data-nav-tab="calls">
@@ -3694,7 +3701,28 @@
     // sync, every place that changes the active workspace already calls
     // this function.
     document.getElementById('app').classList.toggle('in-workspace', !!(org && org.id));
+    refreshPendingApprovalsBadge();
   }
+
+  // Persistent counterpart to the push notification /org/hr/leave/request
+  // already sends its admins/manager: that push is one OS banner, easy to
+  // miss or swipe away, this is the "still waiting on you" signal that stays
+  // visible on the People tab until it's actually dealt with. Every place
+  // that changes which workspace is active already calls updateWorkspaceBar
+  // (see its own comment), so hooking in there covers workspace switches and
+  // initial load for free; the interval below covers "already sitting in the
+  // workspace when a new request comes in" without needing a live socket
+  // push for this specifically.
+  async function refreshPendingApprovalsBadge(){
+    const badge = document.getElementById('workspaceNavPeopleBadge');
+    if (!badge) return;
+    if (!activeOrgId || !myPinHash){ badge.style.display = 'none'; return; }
+    const r = await apiFetch(`/org/hr/leave/inbox?orgId=${encodeURIComponent(activeOrgId)}`);
+    const count = (r.ok && r.body && r.body.requests) ? r.body.requests.length : 0;
+    if (count > 0){ badge.textContent = String(count > 99 ? '99+' : count); badge.style.display = 'flex'; }
+    else badge.style.display = 'none';
+  }
+  setInterval(refreshPendingApprovalsBadge, 60000);
 
   function renderWorkspaceList(){
     const list = document.getElementById('workspaceList');
@@ -4243,6 +4271,7 @@
           btn.closest('.hr-approval-actions').querySelectorAll('.btn').forEach(b=>b.style.pointerEvents = 'none');
           await apiFetch(`/org/hr/leave/${encodeURIComponent(btn.dataset.id)}/decide`, { method: 'POST', body: JSON.stringify({ orgId, decision }) });
           loadHrHome();
+          refreshPendingApprovalsBadge();
         });
       });
     } else {
