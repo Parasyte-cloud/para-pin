@@ -678,11 +678,20 @@
   .msg-video{ display:block; max-width:240px; max-height:320px; border-radius:12px; background:#000; }
   .msg-video-wrap{ position:relative; display:inline-block; }
   .attachment-dl-btn{
-    width:26px; height:26px; border-radius:50%; display:flex; align-items:center; justify-content:center;
-    font-size:13px; cursor:pointer; flex-shrink:0; background:rgba(var(--tint-rgb),0.1); color:inherit;
+    width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+    cursor:pointer; flex-shrink:0; background:rgba(var(--tint-rgb),0.08); border:1px solid var(--glass-brd);
+    color:var(--text-mid); transition:background .15s ease, color .15s ease, transform .15s ease;
   }
-  .attachment-dl-btn:hover{ background:rgba(var(--tint-rgb),0.18); }
-  .video-dl{ position:absolute; top:8px; right:8px; background:rgba(0,0,0,0.55); color:#fff; }
+  .attachment-dl-btn svg{ width:14px; height:14px; }
+  .attachment-dl-btn:hover{ background:rgba(var(--tint-rgb),0.18); color:var(--text-hi); }
+  .attachment-dl-btn:active{ transform:scale(0.92); }
+  .video-dl, #lightboxDownloadBtn{
+    position:absolute; top:9px; right:9px; width:32px; height:32px;
+    background:rgba(18,18,22,0.55); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+    border:1px solid rgba(255,255,255,0.16); color:#fff; box-shadow:0 3px 12px rgba(0,0,0,0.35);
+  }
+  .video-dl svg, #lightboxDownloadBtn svg{ width:15px; height:15px; }
+  .video-dl:hover, #lightboxDownloadBtn:hover{ background:rgba(18,18,22,0.78); }
   /* Live self-view while recording a video, sits just above the composer so
      you can see what you're capturing without covering the message list. */
   .video-record-wrap{
@@ -1154,6 +1163,7 @@
       <div class="active-call-bar-status" id="activeCallBarStatus"></div>
     </div>
     <div class="icon-btn" id="activeCallMuteBtn" title="Mute">🎙️</div>
+    <div class="icon-btn" id="activeCallAddBtn" title="Add people" style="display:none;"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="16" y1="11" x2="22" y2="11"/></svg></div>
     <div class="icon-btn active-call-end-btn" id="activeCallEndBtn" title="End call">📞</div>
   </div>
 
@@ -1267,6 +1277,20 @@
     <div class="modal-actions">
       <div class="btn" onclick="closeModal('groupOverlay')">Cancel</div>
       <div class="btn primary" id="groupCreateBtn" disabled>Create group</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ ADD PEOPLE TO CALL MODAL ============ -->
+<div class="overlay" id="addToCallOverlay">
+  <div class="modal lg">
+    <h3>Add people to call</h3>
+    <div class="hint">This turns your 1:1 call into a group call. Pick who to add.</div>
+    <div class="contact-pick" id="addToCallPick"></div>
+    <div class="hint" id="addToCallHint" style="margin-top:-6px;"></div>
+    <div class="modal-actions">
+      <div class="btn" onclick="closeModal('addToCallOverlay')">Cancel</div>
+      <div class="btn primary" id="addToCallConfirmBtn" disabled>Add & continue</div>
     </div>
   </div>
 </div>
@@ -1458,7 +1482,7 @@
 <div class="overlay" id="lightboxOverlay" style="background:rgba(0,0,0,0.9);">
   <div style="position:relative;">
     <img id="lightboxImg" style="max-width:92vw;max-height:88vh;border-radius:10px;display:block;" src="" alt="">
-    <div class="icon-btn" id="lightboxDownloadBtn" title="Download" style="position:absolute; top:10px; right:10px; background:rgba(0,0,0,0.55); border-color:rgba(255,255,255,0.25); color:#fff;">⬇</div>
+    <div class="icon-btn" id="lightboxDownloadBtn" title="Download"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 21h16"/></svg></div>
   </div>
 </div>
 
@@ -1757,6 +1781,7 @@
     <div class="video-call-btn" id="videoCallMuteBtn" title="Mute">🎙️</div>
     <div class="video-call-btn" id="videoCallCameraBtn" title="Turn camera off"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-0.15em;"><rect x="2" y="6" width="14" height="12" rx="2.5"/><path d="M16 10.2 22 7v10l-6-3.2"/></svg></div>
     <div class="video-call-btn" id="videoCallSwitchBtn" title="Switch camera">🔄</div>
+    <div class="video-call-btn" id="videoCallAddBtn" title="Add people" style="display:none;"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="16" y1="11" x2="22" y2="11"/></svg></div>
     <div class="video-call-btn video-call-end-btn" id="videoCallEndBtn" title="End call">📞</div>
   </div>
 </div>
@@ -2057,6 +2082,7 @@
   // font instead of matching the rest of the UI's line-icon style.
   const ICON_VIDEO_ON = '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-0.15em;"><rect x="2" y="6" width="14" height="12" rx="2.5"/><path d="M16 10.2 22 7v10l-6-3.2"/></svg>';
   const ICON_VIDEO_OFF = '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-0.15em;"><path d="M16 8.5V7a2 2 0 0 0-2-2H8m-4 0h-.5A1.5 1.5 0 0 0 2 6.5v11A1.5 1.5 0 0 0 3.5 19H14a2 2 0 0 0 2-2v-1.5"/><path d="M16 10.2 22 7v10l-6-3.2"/><line x1="2" y1="2" x2="22" y2="22"/></svg>';
+  const ICON_DOWNLOAD = '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 21h16"/></svg>';
   let activeChatId = null;
   // True right after the user taps Back to the mobile chat list.
   // `activeChatId` deliberately stays set (still needed for read state etc.)
@@ -3952,14 +3978,14 @@
                 + `<button class="voice-note-play" data-voice-id="${m.id}">▶</button>`
                 + `<div class="voice-note-bar"><div class="voice-note-bar-fill"></div></div>`
                 + `<div class="voice-note-dur">${fmtDuration(dur)}</div>`
-                + `<div class="attachment-dl-btn voice-note-dl" data-url="${escapeHtml(attUrl)}" data-filename="voice-message.webm" title="Download">⬇</div>`
+                + `<div class="attachment-dl-btn voice-note-dl" data-url="${escapeHtml(attUrl)}" data-filename="voice-message.webm" title="Download">${ICON_DOWNLOAD}</div>`
                 + `</div>`);
           } else if (m.attachment.kind === 'video'){
             inner += stillDecrypting
               ? `<div class="att-decrypting">🔒 Decrypting video…</div>`
               : (`<div class="msg-video-wrap">`
                 + `<video class="msg-video" src="${escapeHtml(attUrl)}" controls playsinline preload="metadata"></video>`
-                + `<div class="attachment-dl-btn video-dl" data-url="${escapeHtml(attUrl)}" data-filename="video.mp4" title="Download">⬇</div>`
+                + `<div class="attachment-dl-btn video-dl" data-url="${escapeHtml(attUrl)}" data-filename="video.mp4" title="Download">${ICON_DOWNLOAD}</div>`
                 + `</div>`);
           } else {
             const fname = m.attachment.name || 'File';
@@ -4634,6 +4660,10 @@
   let awaitingConnection = false;
   let connectTimeoutTimer = null;
   const CONNECT_TIMEOUT_MS = 15000;
+  // "Add people" upgrades a 1:1 call into a group call by ending the P2P
+  // call and starting a Meeting Room with the current peer plus whoever is
+  // picked here, see openAddToCallOverlay/addToCallConfirmBtn below.
+  let addToCallSelected = new Set();
 
   async function getIceServers(){
     if (iceServersCache) return iceServersCache;
@@ -4983,6 +5013,9 @@
       const camBtn = document.getElementById('videoCallCameraBtn');
       camBtn.classList.toggle('active', cameraOff);
       camBtn.innerHTML = cameraOff ? ICON_VIDEO_OFF : ICON_VIDEO_ON;
+      // Only offer to upgrade a call that's actually connected, ringing
+      // still has no peer connection worth handing off to a meeting yet.
+      document.getElementById('videoCallAddBtn').style.display = callState === 'connected' ? 'flex' : 'none';
     } else if (ringingOrConnected){
       videoScreen.classList.remove('show');
       renderAvatar(document.getElementById('activeCallBarAvatar'), activeCallPeerName, false, activeCallPeerAvatar);
@@ -4992,6 +5025,7 @@
       const muteBtn = document.getElementById('activeCallMuteBtn');
       muteBtn.classList.toggle('active', callMuted);
       muteBtn.textContent = callMuted ? '🔇' : '🎙️';
+      document.getElementById('activeCallAddBtn').style.display = callState === 'connected' ? 'flex' : 'none';
     } else {
       bar.style.display = 'none';
       videoScreen.classList.remove('show');
@@ -5092,6 +5126,80 @@
     const newMeetingId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
     joinMeetingRoom(newMeetingId, chat.name || 'Group call', invitable, { orgId: null });
   }
+
+  // "Add people" to an in-progress 1:1 call (voice or video): there's no
+  // such thing as a 3-way P2P WebRTC call, so this hangs up the existing
+  // 1:1 connection and immediately starts a Meeting Room instead, inviting
+  // the current peer plus whoever gets picked here. Same workspace-vs-
+  // personal split as startPersonalGroupCall above: a call happening inside
+  // an active workspace becomes an unlimited Meeting Room, otherwise it's a
+  // capped personal group call.
+  document.getElementById('activeCallAddBtn').addEventListener('click', openAddToCallOverlay);
+  document.getElementById('videoCallAddBtn').addEventListener('click', openAddToCallOverlay);
+
+  async function openAddToCallOverlay(){
+    if (callState !== 'connected' || !activeCallPeerId) return;
+    addToCallSelected = new Set();
+    await ensureNamesLoaded();
+    const list = document.getElementById('addToCallPick');
+    list.innerHTML = '';
+    const dmChats = sessionChats.filter(c => c.type === 'dm' && (c.orgId || null) === (activeOrgId || null));
+    const others = dmChats.map(c => otherMemberId(c)).filter(id => id && id !== activeCallPeerId);
+    if (others.length === 0){
+      list.innerHTML = '<div class="hint">No other contacts to add here, start a DM with them first.</div>';
+    }
+    others.forEach(otherId=>{
+      const name = userNameCache[otherId] || 'PArA PIN user';
+      const row = document.createElement('label');
+      row.className = 'pick-row';
+      const av = document.createElement('div');
+      av.className = 'avatar';
+      renderAvatar(av, name, false, userAvatarCache[otherId]);
+      row.innerHTML = `<input type="checkbox" data-id="${otherId}">`;
+      row.appendChild(av);
+      const nm = document.createElement('div');
+      nm.className = 'pname';
+      nm.textContent = name;
+      row.appendChild(nm);
+      const cb = row.querySelector('input');
+      cb.addEventListener('change', ()=>{
+        if (cb.checked) addToCallSelected.add(otherId); else addToCallSelected.delete(otherId);
+        updateAddToCallBtn();
+      });
+      list.appendChild(row);
+    });
+    updateAddToCallBtn();
+    openModal('addToCallOverlay');
+  }
+
+  function updateAddToCallBtn(){
+    const btn = document.getElementById('addToCallConfirmBtn');
+    btn.disabled = addToCallSelected.size === 0;
+    const hint = document.getElementById('addToCallHint');
+    if (!activeOrgId){
+      const total = addToCallSelected.size + 2; // me + current peer
+      hint.textContent = total > PERSONAL_MEETING_CAP_CLIENT
+        ? `Personal calls are limited to ${PERSONAL_MEETING_CAP_CLIENT} people, only the first few picked will be invited.`
+        : '';
+    } else {
+      hint.textContent = '';
+    }
+  }
+
+  document.getElementById('addToCallConfirmBtn').addEventListener('click', ()=>{
+    if (addToCallSelected.size === 0 || callState !== 'connected') return;
+    // Capture everything before endCall() wipes the 1:1 call state clean.
+    const peerId = activeCallPeerId;
+    const peerName = activeCallPeerName;
+    const orgId = activeOrgId || null;
+    let invitees = [peerId, ...addToCallSelected];
+    const cap = orgId ? 0 : PERSONAL_MEETING_CAP_CLIENT;
+    if (cap && invitees.length + 1 > cap) invitees = invitees.slice(0, cap - 1);
+    closeModal('addToCallOverlay');
+    endCall('upgraded-to-group');
+    const newMeetingId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
+    joinMeetingRoom(newMeetingId, peerName ? `Call with ${peerName}` : 'Group call', invitees, { orgId });
+  });
 
   async function openCallsOverlay(){
     callsOverlayOpen = true;
