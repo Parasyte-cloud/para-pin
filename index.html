@@ -254,14 +254,51 @@
      mobile-only view), just a bit roomier so it reads as a real desktop app
      rather than a phone screen stretched wide. Gated on both the hostname
      flag AND min-width so a narrow browser window on this same host still
-     falls back to the normal mobile layout instead of clipping. Deliberately
-     NOT touching .nav-wrap/.nav-pill positioning here — that pill has broken
-     three separate times already this project from exactly this kind of
-     change, a proper persistent left-rail nav for this host is a follow-up,
-     not bundled into this pass. */
+     falls back to the normal mobile layout instead of clipping.
+
+     Left-rail nav: rather than editing .nav-wrap/.nav-pill's own numbers
+     (that pill has broken three separate times already this project from
+     exactly that), this turns the SAME pill 90 degrees via flex-direction,
+     scoped entirely behind html.desktop-app so the mobile/tablet pill this
+     was built for is untouched pixel-for-pixel. moveNavActivePill() below
+     detects the column layout at runtime (getComputedStyle) and slides the
+     highlight capsule on top/height instead of left/width, no separate copy
+     of that logic to keep in sync. */
   @media (min-width: 900px){
     html.desktop-app .sidebar{ width:380px; }
     html.desktop-app .shell{ gap:22px; padding:22px; }
+
+    html.desktop-app .nav-wrap{
+      left:0; right:auto; top:0; bottom:0; width:104px; height:100vh;
+      display:flex; align-items:center; justify-content:center; padding:18px 0;
+      box-sizing:border-box;
+    }
+    html.desktop-app .nav-pill{
+      flex-direction:column; align-items:stretch; justify-content:flex-start;
+      width:76px; max-width:76px; height:auto; max-height:100%;
+      padding:16px 10px; border-radius:30px; gap:0;
+    }
+    html.desktop-app .nav-tab{ flex-direction:column; padding:10px 4px; }
+    html.desktop-app .nav-lock-btn{ margin:10px auto; }
+    html.desktop-app .nav-seam{
+      align-self:center; width:60%; height:1px; margin:6px auto;
+      background:linear-gradient(90deg, transparent, rgba(255,255,255,0.45) 35%, rgba(255,255,255,0.45) 65%, transparent);
+    }
+    /* #app itself isn't the thing that needs the inset — .shell already sits
+       centered inside it with its own padding — but the fixed-position
+       full-bleed overlays (.admin-console-overlay's sheets: Settings, Calls,
+       People & HR, Meeting Room) are siblings of #app too and would render
+       edge-to-edge under the rail otherwise, same bleed-through class of bug
+       as the earlier padding-vs-transparent-overlay fix, so they get their
+       own explicit inset here rather than inheriting one. */
+    html.desktop-app #app{ padding-left:104px; box-sizing:border-box; }
+    html.desktop-app .modal.admin-console{
+      margin-left:104px; width:calc(100% - 104px); max-width:calc(100% - 104px);
+    }
+    /* Nav no longer docks at the bottom in rail mode, so the extra ~120px
+       .admin-console-body reserved for it (see that rule's own comment) is
+       just wasted scroll space here — back to a normal bottom padding. */
+    html.desktop-app .admin-console-body{ padding-bottom:40px; }
   }
   /* The one moving piece that makes this read as "liquid" rather than a
      static bar, a single glass capsule that slides and resizes itself to
@@ -1026,7 +1063,7 @@
   .pick-row input{ accent-color:var(--ice); width:16px; height:16px; }
   .pick-row .avatar{ width:30px; height:30px; border-radius:50%; font-size:11px; }
   .pick-row .pname{ font-size:13px; }
-  .modal-actions{ display:flex; justify-content:flex-end; gap:10px; }
+  .modal-actions{ display:flex; justify-content:flex-end; gap:10px; margin-top:18px; }
 
   /* ---------- admin console (full dedicated screen, not a small modal) ---------- */
   /* Used to force an opaque var(--bg-1) here, which fully covered #bgfx's
@@ -1599,7 +1636,7 @@
     <div class="hint">Bigger uploads now, cross-device sync/AI/themes as they ship.</div>
     <input type="text" id="premiumUpgradeEmailInput" placeholder="Your email" style="margin-top:10px;">
     <div class="hint" id="premiumUpgradeError" style="display:none;color:#ff6a6a;"></div>
-    <div class="modal-actions" style="flex-direction:column; gap:8px; margin-top:14px;">
+    <div class="modal-actions" style="flex-direction:column; gap:8px; ">
       <div class="btn primary" id="premiumUpgradeMonthlyBtn" style="width:100%;">$9.99/month</div>
       <div class="btn" id="premiumUpgradeLifetimeBtn" style="width:100%;">$99 once, lifetime</div>
       <div class="btn" onclick="closeModal('premiumUpgradeOverlay')" style="width:100%;">Cancel</div>
@@ -1611,7 +1648,7 @@
   <div class="modal lg" style="text-align:center;">
     <h3>Workspace locked</h3>
     <div class="hint" id="workspaceLockedBody">This workspace's subscription isn't active, so it isn't reachable right now.</div>
-    <div class="modal-actions" style="justify-content:center;margin-top:14px;">
+    <div class="modal-actions" style="justify-content:center;">
       <div class="btn" onclick="closeModal('workspaceLockedOverlay'); switchWorkspace(null);">Back to Personal</div>
       <div class="btn primary" id="workspaceReactivateBtn" style="display:none;">Reactivate</div>
     </div>
@@ -1654,7 +1691,7 @@
         <div class="hint" id="workspaceInviteError" style="display:none;color:#ff6a6a;"></div>
       </div>
     </div>
-    <div class="modal-actions" style="margin-top:14px; margin-bottom:14px; flex-shrink:0;">
+    <div class="modal-actions" style="margin-bottom:14px; flex-shrink:0;">
       <div class="btn" id="workspaceOpenHrBtn">People & HR</div>
       <div class="btn" onclick="closeModal('workspaceMembersOverlay')">Close</div>
     </div>
@@ -1774,7 +1811,7 @@
     <div class="hint">Enter your PArA PIN to view this. It re-locks the moment you leave this chat.</div>
     <input type="text" id="unlockProtectedPinInput" placeholder="1234567" inputmode="numeric" maxlength="7" class="mono" style="text-align:center; letter-spacing:.08em; font-size:18px; margin-top:14px;">
     <div class="hint" id="unlockProtectedError" style="display:none;color:#ff6a6a;margin-top:8px;"></div>
-    <div class="modal-actions" style="justify-content:center;margin-top:14px;">
+    <div class="modal-actions" style="justify-content:center;">
       <div class="btn" onclick="closeModal('unlockProtectedOverlay')">Cancel</div>
       <div class="btn primary" id="unlockProtectedBtn">Unlock</div>
     </div>
@@ -2187,7 +2224,7 @@
       </div>
       <div id="meetingSummaryError" class="hint" style="display:none; color:#ff6a6a;"></div>
     </div>
-    <div class="modal-actions" style="margin-top:14px;">
+    <div class="modal-actions">
       <div class="btn" id="meetingSummaryCloseBtn" onclick="closeModal('meetingSummaryOverlay')">Close</div>
       <div class="btn" id="meetingSummaryPostBtn" style="display:none;">Post to chat…</div>
     </div>
@@ -7417,8 +7454,22 @@
     if (!nav || !pill) return;
     const tab = nav.querySelector(`.nav-tab[data-nav-tab="${name}"]`);
     if (!tab || tab.offsetWidth === 0){ pill.style.opacity = '0'; return; }
-    pill.style.left = tab.offsetLeft + 'px';
-    pill.style.width = tab.offsetWidth + 'px';
+    // web.parasyte.cloud's desktop rail turns this same pill vertical purely
+    // in CSS (flex-direction:column, see html.desktop-app .nav-pill) rather
+    // than duplicating it, so read that back at runtime instead of assuming
+    // horizontal — lets the highlight capsule slide on top/height in rail
+    // mode and left/width everywhere else, off one shared code path.
+    if (getComputedStyle(nav).flexDirection === 'column'){
+      pill.style.top = tab.offsetTop + 'px';
+      pill.style.height = tab.offsetHeight + 'px';
+      pill.style.left = '';
+      pill.style.width = '';
+    } else {
+      pill.style.left = tab.offsetLeft + 'px';
+      pill.style.width = tab.offsetWidth + 'px';
+      pill.style.top = '';
+      pill.style.height = '';
+    }
     pill.style.opacity = '1';
   }
   // Positions BOTH pills regardless of which nav is currently visible, cheap
