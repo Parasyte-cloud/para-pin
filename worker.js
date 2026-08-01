@@ -2550,11 +2550,14 @@ export class Registry {
       // just makes the app respond correctly once that's done.
       if (customDomain !== undefined) {
         const normalizedHost = customDomain ? String(customDomain).trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '') : null;
+        console.log('[customdomain-debug]', JSON.stringify({ orgId, rawCustomDomain: customDomain, normalizedHost }));
         if (normalizedHost && !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(normalizedHost)) {
+          console.log('[customdomain-debug] rejected: failed format regex');
           return json({ error: 'invalid_domain' }, 400);
         }
         if (normalizedHost) {
           const claimedBy = await this.state.storage.get(`orgHostnameIndex:${normalizedHost}`);
+          console.log('[customdomain-debug] claimedBy', JSON.stringify({ claimedBy, orgId: org.id }));
           if (claimedBy && claimedBy !== org.id) return json({ error: 'domain_taken' }, 409);
         }
         if (org.customDomain && org.customDomain !== normalizedHost) {
@@ -2563,6 +2566,7 @@ export class Registry {
         }
         if (normalizedHost) await this.state.storage.put(`orgHostnameIndex:${normalizedHost}`, org.id);
         org.customDomain = normalizedHost;
+        console.log('[customdomain-debug] wrote org.customDomain =', org.customDomain);
       }
       await this.state.storage.put(`org:${orgId}`, org);
       const changedFields = [
