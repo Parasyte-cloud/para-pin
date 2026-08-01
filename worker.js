@@ -7356,7 +7356,7 @@ export default {
         if (!body.orgId) return json({ error: 'missing_org_id' }, 400);
         return registryStub.fetch('https://internal/org/update', {
           method: 'POST',
-          body: JSON.stringify({ pinHash, orgId: body.orgId, name: body.name, logoUrl: body.logoUrl, allowEmailAuth: body.allowEmailAuth, emailDomain: body.emailDomain, country: body.country }),
+          body: JSON.stringify({ pinHash, orgId: body.orgId, name: body.name, logoUrl: body.logoUrl, allowEmailAuth: body.allowEmailAuth, emailDomain: body.emailDomain, country: body.country, customDomain: body.customDomain }),
         });
       }
 
