@@ -4627,6 +4627,111 @@ export class Registry {
       return json({ ok: true });
     }
 
+    // ---- Public status page ----
+    // Platform-wide (not per-workspace, this is one shared deployment), so
+    // gated by the same global `admins` list as the rest of this Admin
+    // Console rather than any org's manage_workspace permission. Component
+    // list is fixed in code, not admin-configurable, deliberately: a status
+    // page's whole value is being simple enough to trust at a glance.
+    const STATUS_COMPONENTS = [
+      { key: 'app', label: 'Web & desktop app' },
+      { key: 'messaging', label: 'Messaging & calls' },
+      { key: 'auth', label: 'Authentication & SSO' },
+      { key: 'api', label: 'API & webhooks' },
+    ];
+    const STATUS_VALUES = ['operational', 'degraded', 'outage'];
+    const INCIDENT_STATUSES = ['investigating', 'identified', 'monitoring', 'resolved'];
+    const INCIDENT_SEVERITIES = ['minor', 'major', 'critical'];
+
+    async function getStatusSnapshot(storage, { limit }) {
+      const componentEntries = await Promise.all(
+        STATUS_COMPONENTS.map(async (c) => ({
+          key: c.key,
+          label: c.label,
+          status: (await storage.get(`platformComponentStatus:${c.key}`)) || 'operational',
+        }))
+      );
+      const ids = (await storage.get('statusIncidentIds')) || [];
+      const incidents = [];
+      for (const id of ids.slice(0, limit)) {
+        const inc = await storage.get(`statusIncident:${id}`);
+        if (inc) incidents.push(inc);
+      }
+      const rank = { operational: 0, degraded: 1, outage: 2 };
+      const overall = componentEntries.reduce((worst, c) => (rank[c.status] > rank[worst] ? c.status : worst), 'operational');
+      return { overall, components: componentEntries, incidents };
+    }
+
+    // Unauthenticated on purpose — this is the whole point of a status
+    // page, anyone evaluating the product (not just logged-in members)
+    // should be able to check it without an account.
+    if (request.method === 'GET' && url.pathname === '/internal/status-public') {
+      return json(await getStatusSnapshot(this.state.storage, { limit: 20 }));
+    }
+
+    if (request.method === 'GET' && url.pathname === '/admin/status') {
+      const requesterId = url.searchParams.get('requesterId');
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      return json(await getStatusSnapshot(this.state.storage, { limit: 50 }));
+    }
+
+    if (request.method === 'POST' && url.pathname === '/admin/status/component') {
+      const { requesterId, key, status } = await request.json();
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      if (!STATUS_COMPONENTS.some((c) => c.key === key)) return json({ error: 'unknown_component' }, 400);
+      if (!STATUS_VALUES.includes(status)) return json({ error: 'invalid_status' }, 400);
+      await this.state.storage.put(`platformComponentStatus:${key}`, status);
+      return json(await getStatusSnapshot(this.state.storage, { limit: 50 }));
+    }
+
+    // Posting an incident with no incidentId starts a new one; passing an
+    // existing incidentId appends a timestamped update to it instead (the
+    // normal flow: "investigating" -> "identified" -> "monitoring" ->
+    // "resolved", each step its own dated line, nothing ever overwritten).
+    if (request.method === 'POST' && url.pathname === '/admin/status/incident') {
+      const { requesterId, incidentId, title, severity, status, message } = await request.json();
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      if (!INCIDENT_STATUSES.includes(status)) return json({ error: 'invalid_status' }, 400);
+      if (!message || !String(message).trim()) return json({ error: 'missing_message' }, 400);
+      const now = new Date().toISOString();
+
+      if (incidentId) {
+        const inc = await this.state.storage.get(`statusIncident:${incidentId}`);
+        if (!inc) return json({ error: 'not_found' }, 404);
+        inc.status = status;
+        inc.updates.push({ ts: now, status, message: String(message).trim().slice(0, 2000) });
+        if (status === 'resolved') inc.resolvedAt = now;
+        await this.state.storage.put(`statusIncident:${incidentId}`, inc);
+        return json({ ok: true, incident: inc });
+      }
+
+      if (!title || !String(title).trim()) return json({ error: 'missing_title' }, 400);
+      const id = crypto.randomUUID();
+      const inc = {
+        id,
+        title: String(title).trim().slice(0, 200),
+        severity: INCIDENT_SEVERITIES.includes(severity) ? severity : 'minor',
+        status,
+        createdAt: now,
+        resolvedAt: status === 'resolved' ? now : null,
+        updates: [{ ts: now, status, message: String(message).trim().slice(0, 2000) }],
+      };
+      await this.state.storage.put(`statusIncident:${id}`, inc);
+      const ids = (await this.state.storage.get('statusIncidentIds')) || [];
+      ids.unshift(id);
+      // Cap history so this doesn't grow unbounded over years of operation;
+      // 200 incidents is generous for a page whose entire point is recency.
+      if (ids.length > 200) {
+        const dropped = ids.splice(200);
+        for (const dropId of dropped) await this.state.storage.delete(`statusIncident:${dropId}`);
+      }
+      await this.state.storage.put('statusIncidentIds', ids);
+      return json({ ok: true, incident: inc });
+    }
+
     // ---- Mandatory PIN change (closes the "admin already knows the PIN"
     // window for roster-issued accounts) ----
     // Authenticated by knowing the CURRENT pin hash (same trust model as
@@ -6286,6 +6391,50 @@ export default {
         return registryStub.fetch('https://internal/admin/reset-device', {
           method: 'POST',
           body: JSON.stringify({ requesterId: who.userId, userId: body.userId }),
+        });
+      }
+
+      // Public status page data — deliberately no pinHash/auth check, see
+      // the Registry handler's comment on /internal/status-public.
+      if (request.method === 'GET' && url.pathname === '/api/status') {
+        return registryStub.fetch('https://internal/internal/status-public');
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/admin/status') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        return registryStub.fetch(`https://internal/admin/status?requesterId=${encodeURIComponent(who.userId)}`);
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/admin/status/component') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/admin/status/component', {
+          method: 'POST',
+          body: JSON.stringify({ requesterId: who.userId, key: body.key, status: body.status }),
+        });
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/admin/status/incident') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/admin/status/incident', {
+          method: 'POST',
+          body: JSON.stringify({
+            requesterId: who.userId, incidentId: body.incidentId, title: body.title,
+            severity: body.severity, status: body.status, message: body.message,
+          }),
         });
       }
 

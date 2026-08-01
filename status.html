@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Status — PArA PIN</title>
+<style>
+  :root{
+    --bg-0:#050608; --bg-1:#0a0d12; --text-hi:#f2f5f7; --text-mid:#9aa5ad; --text-low:#5f6a72;
+    --glass:rgba(255,255,255,0.055); --glass-brd:rgba(255,255,255,0.09);
+    --ice:#00d4ff; --fire:#ff6a00;
+    --ok:#2ecc71; --warn:#f5a623; --bad:#ff5a5a;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg-0); color:var(--text-hi);
+    font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    line-height:1.65;
+  }
+  .wrap{ max-width:720px; margin:0 auto; padding:56px 24px 80px; }
+  .back{ display:inline-block; margin-bottom:28px; font-size:13px; color:var(--text-mid); text-decoration:none; }
+  .back:hover{ color:var(--text-hi); }
+  .wordmark{
+    font-size:14px; font-weight:700; letter-spacing:.14em; margin-bottom:8px;
+    background:linear-gradient(90deg, var(--ice), #cfd8dd 45%, var(--fire));
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+  }
+  h1{ font-size:28px; margin:0 0 6px; }
+  .updated{ font-size:13px; color:var(--text-low); margin-bottom:32px; }
+  a{ color:var(--ice); }
+
+  .banner{
+    display:flex; align-items:center; gap:12px; padding:16px 18px; border-radius:12px;
+    background:var(--glass); border:1px solid var(--glass-brd); margin-bottom:28px;
+  }
+  .dot{ width:10px; height:10px; border-radius:50%; flex-shrink:0; }
+  .dot.operational{ background:var(--ok); box-shadow:0 0 10px rgba(46,204,113,.6); }
+  .dot.degraded{ background:var(--warn); box-shadow:0 0 10px rgba(245,166,35,.6); }
+  .dot.outage{ background:var(--bad); box-shadow:0 0 10px rgba(255,90,90,.6); }
+  .banner-text{ font-size:15px; font-weight:600; }
+
+  h2{ font-size:16px; margin:36px 0 12px; color:var(--text-hi); }
+  .components{ display:flex; flex-direction:column; gap:1px; border-radius:12px; overflow:hidden; border:1px solid var(--glass-brd); }
+  .component-row{
+    display:flex; align-items:center; justify-content:space-between; padding:13px 16px;
+    background:var(--glass); font-size:14px; color:var(--text-mid);
+  }
+  .component-row .label{ color:var(--text-hi); }
+  .component-status{ display:flex; align-items:center; gap:8px; font-size:12.5px; }
+  .component-status.operational{ color:var(--ok); }
+  .component-status.degraded{ color:var(--warn); }
+  .component-status.outage{ color:var(--bad); }
+
+  .incident{ padding:16px 18px; border-radius:12px; background:var(--glass); border:1px solid var(--glass-brd); margin-bottom:12px; }
+  .incident-head{ display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:4px; flex-wrap:wrap; }
+  .incident-title{ font-size:14.5px; font-weight:600; color:var(--text-hi); }
+  .badge{ font-size:11px; padding:2px 8px; border-radius:999px; text-transform:uppercase; letter-spacing:.04em; flex-shrink:0; }
+  .badge.minor{ background:rgba(245,166,35,.15); color:var(--warn); }
+  .badge.major{ background:rgba(255,90,90,.15); color:var(--bad); }
+  .badge.critical{ background:rgba(255,90,90,.25); color:var(--bad); }
+  .incident-updates{ margin-top:10px; display:flex; flex-direction:column; gap:8px; }
+  .incident-update{ font-size:13px; color:var(--text-mid); padding-left:12px; border-left:2px solid var(--glass-brd); }
+  .incident-update .u-status{ color:var(--text-hi); font-weight:600; text-transform:capitalize; }
+  .incident-update .u-ts{ color:var(--text-low); font-size:11.5px; margin-left:6px; }
+  .empty{ font-size:13.5px; color:var(--text-low); padding:8px 0; }
+  .note{
+    margin-top:44px; padding:16px 18px; border-radius:12px; background:var(--glass);
+    border:1px solid var(--glass-brd); font-size:12.5px; color:var(--text-low);
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="back" href="/">&larr; Back to PArA PIN</a>
+  <div class="wordmark">PArA PIN</div>
+  <h1>Status</h1>
+  <div class="updated" id="lastChecked">Checking&hellip;</div>
+
+  <div class="banner" id="overallBanner">
+    <div class="dot operational" id="overallDot"></div>
+    <div class="banner-text" id="overallText">Loading status&hellip;</div>
+  </div>
+
+  <h2>Components</h2>
+  <div class="components" id="componentsList"></div>
+
+  <h2>Incident history</h2>
+  <div id="incidentsList"><div class="empty">Loading&hellip;</div></div>
+
+  <div class="note">This page reflects the platform's own reported status, refreshed automatically every 30 seconds. For anything urgent, contact <a href="mailto:infra@parasyte.cloud">infra@parasyte.cloud</a>.</div>
+</div>
+<script>
+  const STATUS_LABEL = { operational: 'Operational', degraded: 'Degraded', outage: 'Outage' };
+
+  function escapeHtml(s){
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+  function formatTs(iso){
+    try {
+      return new Date(iso).toLocaleString(undefined, { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' });
+    } catch(e){ return iso; }
+  }
+
+  async function loadStatus(){
+    let data;
+    try {
+      const res = await fetch('/api/status');
+      data = await res.json();
+    } catch(e){
+      document.getElementById('overallText').textContent = "Couldn't reach the status service. Try again shortly.";
+      document.getElementById('lastChecked').textContent = 'Last checked: just now (failed)';
+      return;
+    }
+
+    const dot = document.getElementById('overallDot');
+    const text = document.getElementById('overallText');
+    dot.className = 'dot ' + data.overall;
+    text.textContent = data.overall === 'operational'
+      ? 'All systems operational'
+      : (data.overall === 'degraded' ? 'Some systems degraded' : 'Active outage');
+
+    const compList = document.getElementById('componentsList');
+    compList.innerHTML = '';
+    (data.components || []).forEach(c => {
+      const row = document.createElement('div');
+      row.className = 'component-row';
+      row.innerHTML = `<span class="label">${escapeHtml(c.label)}</span>
+        <span class="component-status ${c.status}"><span class="dot ${c.status}" style="width:7px;height:7px;"></span>${STATUS_LABEL[c.status] || c.status}</span>`;
+      compList.appendChild(row);
+    });
+
+    const incList = document.getElementById('incidentsList');
+    const incidents = data.incidents || [];
+    if (!incidents.length){
+      incList.innerHTML = '<div class="empty">No incidents reported. This history covers the platform\'s full track record so far.</div>';
+    } else {
+      incList.innerHTML = '';
+      incidents.forEach(inc => {
+        const el = document.createElement('div');
+        el.className = 'incident';
+        const updatesHtml = (inc.updates || []).slice().reverse().map(u => `
+          <div class="incident-update"><span class="u-status">${escapeHtml(u.status)}</span><span class="u-ts">${formatTs(u.ts)}</span><br>${escapeHtml(u.message)}</div>
+        `).join('');
+        el.innerHTML = `
+          <div class="incident-head">
+            <div class="incident-title">${escapeHtml(inc.title)}</div>
+            <div class="badge ${escapeHtml(inc.severity)}">${escapeHtml(inc.severity)}</div>
+          </div>
+          <div class="incident-updates">${updatesHtml}</div>
+        `;
+        incList.appendChild(el);
+      });
+    }
+
+    document.getElementById('lastChecked').textContent = 'Last checked: ' + new Date().toLocaleTimeString();
+  }
+
+  loadStatus();
+  setInterval(loadStatus, 30000);
+</script>
+</body>
+</html>
