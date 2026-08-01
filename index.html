@@ -208,7 +208,7 @@
     position:fixed; inset:0; z-index:15; overflow-y:auto; background:var(--bg-0);
     display:flex; flex-direction:column; align-items:center;
   }
-  .fd-nav{ width:100%; max-width:960px; display:flex; align-items:center; justify-content:space-between; padding:20px 24px; box-sizing:border-box; }
+  .fd-nav{ width:100%; max-width:960px; display:flex; align-items:center; justify-content:space-between; padding:calc(20px + env(safe-area-inset-top,0px)) 24px 20px; box-sizing:border-box; }
   .fd-wordmark{
     font-size:15px; font-weight:700; letter-spacing:.14em;
     background:linear-gradient(90deg, var(--ice), #cfd8dd 45%, var(--fire));
@@ -619,7 +619,7 @@
   .icon-btn{
     width:32px; height:32px; border-radius:50%; display:flex; align-items:center; justify-content:center;
     background:rgba(var(--tint-rgb),0.04); border:1px solid var(--glass-brd); cursor:pointer; color:var(--text-mid);
-    transition:all .15s ease; font-size:16px;
+    transition:all .15s ease; font-size:16px; flex-shrink:0;
   }
   .icon-btn:hover{ color:var(--text-hi); border-color:var(--glass-brd-hi); background:rgba(var(--tint-rgb),0.08); }
   #secureSendBtn.armed{ color:#0a0d12; background:linear-gradient(135deg, var(--ice), var(--fire)); border-color:transparent; }
@@ -643,11 +643,20 @@
      sliding-highlight-capsule technique as the bottom nav's #navActivePill,
      just scoped smaller to this bar. */
   .chat-filter-bar{
-    position:relative; display:flex; gap:6px; margin:0 16px 10px; padding:4px;
+    position:relative; display:flex; gap:4px; margin:0 16px 10px; padding:4px;
     border-radius:999px; background:rgba(var(--tint-rgb),0.05); border:1px solid var(--glass-brd);
-    overflow-x:auto; scrollbar-width:none;
+    /* Five pills (All/Unread/Groups/Pinned/Archived) don't always fit a
+       narrow desktop sidebar. A touch user can swipe to reveal the rest,
+       but a mouse user has no equivalent gesture, so a fully hidden
+       scrollbar left "Archived" silently clipped with no visible way to
+       reach it — this looked like a rendering bug, not overflow. A thin
+       visible scrollbar gives desktop users the same affordance touch
+       users already had. */
+    overflow-x:auto; scrollbar-width:thin;
   }
-  .chat-filter-bar::-webkit-scrollbar{ display:none; }
+  .chat-filter-bar::-webkit-scrollbar{ height:4px; }
+  .chat-filter-bar::-webkit-scrollbar-thumb{ background:rgba(var(--tint-rgb),0.18); border-radius:999px; }
+  .chat-filter-bar::-webkit-scrollbar-track{ background:transparent; }
   .chat-filter-pill-highlight{
     position:absolute; top:4px; bottom:4px; left:4px; width:50px; opacity:0; z-index:0;
     border-radius:999px; background:rgba(var(--tint-rgb),0.16);
@@ -656,7 +665,7 @@
     pointer-events:none;
   }
   .chat-filter-pill{
-    position:relative; z-index:1; flex-shrink:0; padding:7px 14px; border-radius:999px;
+    position:relative; z-index:1; flex-shrink:0; padding:7px 12px; border-radius:999px;
     font-size:12px; font-weight:600; color:var(--text-mid); cursor:pointer; white-space:nowrap;
     transition:color .15s ease;
   }
@@ -1283,7 +1292,13 @@
     .roster-entry{ flex-wrap:wrap; row-gap:8px; padding:10px 4px; }
     .roster-entry-info{ flex:1 1 100%; }
   }
-  .btn{ padding:9px 18px; border-radius:999px; font-size:13px; font-weight:600; cursor:pointer; border:1px solid var(--glass-brd); background:rgba(var(--tint-rgb),0.04); color:var(--text-hi); }
+  /* flex-shrink:0 + white-space:nowrap: a .btn sitting next to a flex:1
+     input (Ask HR, Create key, Invite by PIN, etc.) would otherwise get
+     squeezed by the input hogging space, wrapping its label onto a second
+     line and distorting the pill into a stretched blob instead of a clean
+     stadium shape. Buttons should hold their natural size or wrap onto
+     their own line (see flex-wrap on those rows), never get deformed. */
+  .btn{ padding:9px 18px; border-radius:999px; font-size:13px; font-weight:600; cursor:pointer; border:1px solid var(--glass-brd); background:rgba(var(--tint-rgb),0.04); color:var(--text-hi); flex-shrink:0; white-space:nowrap; }
   .btn:hover{ background:rgba(var(--tint-rgb),0.09); }
   .btn.primary{ background:linear-gradient(135deg, var(--ice), var(--fire)); border:none; color:#0a0d12; }
   .btn.primary:hover{ filter:brightness(1.08); }
@@ -2004,9 +2019,9 @@
       <div class="contact-pick" id="workspaceMembersList" style="max-height:none;"></div>
       <div id="workspaceInviteSection" style="display:none;">
         <div class="hint">Invite by PIN (they must already have a PArA PIN account), or invite someone brand new by name/email.</div>
-        <div style="display:flex; gap:8px; align-items:center;">
-          <input type="text" id="workspaceInvitePinInput" placeholder="1234567" inputmode="numeric" maxlength="7" style="flex:1;">
-          <div class="btn" id="workspaceInvitePinBtn">Add</div>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <input type="text" id="workspaceInvitePinInput" placeholder="1234567" inputmode="numeric" maxlength="7" style="flex:1; min-width:120px;">
+          <div class="btn" id="workspaceInvitePinBtn" style="flex-shrink:0; white-space:nowrap;">Add</div>
         </div>
         <input type="text" id="workspaceInviteNameInput" placeholder="Full name (for a brand-new person)" style="margin-top:8px;">
         <input type="text" id="workspaceInviteEmailInput" placeholder="Email (optional, sends their PIN)" style="margin-top:8px;">
@@ -2059,9 +2074,9 @@
         <div style="margin-bottom:20px; padding:12px; border-radius:14px; background:rgba(var(--tint-rgb),0.05); border:1px solid var(--glass-brd);">
           <h3 style="margin-top:0;">Ask HR</h3>
           <div class="hint" style="margin-bottom:8px;">Your leave balance, policy, manager, upcoming holidays: ask in plain language.</div>
-          <div style="display:flex; gap:8px;">
-            <input type="text" id="hrAskInput" placeholder="e.g. How many sick days do I have left?" style="flex:1;">
-            <div class="btn primary" id="hrAskBtn">Ask</div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <input type="text" id="hrAskInput" placeholder="e.g. How many sick days do I have left?" style="flex:1; min-width:160px;">
+            <div class="btn primary" id="hrAskBtn" style="flex-shrink:0; white-space:nowrap;">Ask</div>
           </div>
           <div id="hrAskAnswer" style="display:none; margin-top:10px; padding:10px; border-radius:10px; background:rgba(var(--tint-rgb),0.05); font-size:13px; line-height:1.5;"></div>
           <div class="hint" id="hrAskError" style="display:none; color:#ff6a6a; margin-top:8px;"></div>
@@ -2464,9 +2479,9 @@
       <section class="admin-console-section" data-section="developer" style="display:none;">
         <h3>API keys</h3>
         <div class="hint">Server-to-server access for integrations: roster read/write and the analytics summary only, never chat content (messages stay end-to-end encrypted and this API has no way to read or send them).</div>
-        <div style="display:flex; gap:8px; margin:8px 0 12px;">
-          <input type="text" id="apiKeyNameInput" placeholder="Key name (e.g. \"HRIS sync\")" style="flex:1;">
-          <div class="btn primary" id="apiKeyCreateBtn">Create key</div>
+        <div style="display:flex; gap:8px; margin:8px 0 12px; flex-wrap:wrap;">
+          <input type="text" id="apiKeyNameInput" placeholder="Key name (e.g. \"HRIS sync\")" style="flex:1; min-width:160px;">
+          <div class="btn primary" id="apiKeyCreateBtn" style="flex-shrink:0; white-space:nowrap;">Create key</div>
         </div>
         <div id="apiKeyNewBox" class="roster-new-pin" style="display:none;"></div>
         <div id="apiKeyList" style="display:flex; flex-direction:column; gap:6px;"></div>
