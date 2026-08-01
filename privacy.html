@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy — PArA PIN</title>
+<style>
+  :root{
+    --bg-0:#050608; --bg-1:#0a0d12; --text-hi:#f2f5f7; --text-mid:#9aa5ad; --text-low:#5f6a72;
+    --glass:rgba(255,255,255,0.055); --glass-brd:rgba(255,255,255,0.09);
+    --ice:#00d4ff; --fire:#ff6a00;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg-0); color:var(--text-hi);
+    font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    line-height:1.65;
+  }
+  .wrap{ max-width:720px; margin:0 auto; padding:56px 24px 80px; }
+  .back{ display:inline-block; margin-bottom:28px; font-size:13px; color:var(--text-mid); text-decoration:none; }
+  .back:hover{ color:var(--text-hi); }
+  .wordmark{
+    font-size:14px; font-weight:700; letter-spacing:.14em; margin-bottom:8px;
+    background:linear-gradient(90deg, var(--ice), #cfd8dd 45%, var(--fire));
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+  }
+  h1{ font-size:28px; margin:0 0 6px; }
+  .updated{ font-size:13px; color:var(--text-low); margin-bottom:36px; }
+  h2{ font-size:18px; margin:36px 0 10px; color:var(--text-hi); }
+  p, li{ font-size:14.5px; color:var(--text-mid); }
+  ul{ padding-left:20px; }
+  li{ margin-bottom:6px; }
+  a{ color:var(--ice); }
+  .note{
+    margin-top:44px; padding:16px 18px; border-radius:12px; background:var(--glass);
+    border:1px solid var(--glass-brd); font-size:12.5px; color:var(--text-low);
+  }
+  strong{ color:var(--text-hi); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="back" href="/">&larr; Back to PArA PIN</a>
+  <div class="wordmark">PArA PIN</div>
+  <h1>Privacy Policy</h1>
+  <div class="updated">Last updated: August 1, 2026</div>
+
+  <p>This policy explains what information PArA PIN ("we," "us") collects when you use the app, why we collect it, and what we do (and don't do) with it. It applies to the PArA PIN app, its desktop/web versions, and any connected mobile apps.</p>
+
+  <h2>The short version</h2>
+  <p>Chat messages are end-to-end encrypted on your device before they ever reach our servers &mdash; we store and relay ciphertext we cannot read, not plaintext. We collect the account, workspace, and device information needed to run the service (below), we don't sell your data to anyone, and a small number of clearly opt-in features (Smart Replies, Ask HR, meeting summaries) send specific content to Cloudflare's AI models to work, described in detail below.</p>
+
+  <h2>Information we collect</h2>
+  <p><strong>Account information:</strong> your display name, avatar, a one-way hash of your PIN (we never store or see your raw PIN), and, if you choose to verify one, your email address.</p>
+  <p><strong>Workspace &amp; HR information:</strong> if your account belongs to a workspace, that workspace's admins may enter or you may enter job title, department, manager, hire date, leave balances, and (if used) compensation fields. This data is scoped to that workspace and visible to its admins/HR roles per the permissions your workspace configures.</p>
+  <p><strong>Device &amp; security information:</strong> a per-device identifier, approximate device/browser type, and last-seen timestamps, used to power device trust, remote logout, and new-device/new-location sign-in alerts. We use your connection's approximate location (derived from IP) only for that alerting, not for tracking.</p>
+  <p><strong>Usage &amp; analytics:</strong> workspace admins can see aggregate usage and call analytics for their own workspace (e.g. message counts, call durations). We do not build cross-workspace profiles of individual people for advertising or any purpose unrelated to running the service.</p>
+  <p><strong>Payment information:</strong> subscription payments (Premium, workspace billing) are processed by <a href="https://paystack.com" target="_blank" rel="noopener">Paystack</a>. We receive confirmation that a payment succeeded or failed and a subscription reference &mdash; we do not receive or store your card details.</p>
+  <p><strong>Content you send through opt-in AI features:</strong> see the next section.</p>
+
+  <h2>What we don't see: end-to-end encryption</h2>
+  <p>Chat messages are encrypted on your device before being sent. Our servers relay that ciphertext to the recipient's device(s) and store it encrypted &mdash; we have no way to read message content in the ordinary course of using the app.</p>
+  <p>Two things work differently, deliberately, and only when you opt in:</p>
+  <ul>
+    <li><strong>Smart Replies</strong> (off by default): if you turn this on, the last few messages in a conversation you're actively viewing are sent, unencrypted, to Cloudflare's AI to suggest quick replies. Turning it off stops this immediately.</li>
+    <li><strong>Ask HR</strong>: your HR/leave data (already visible to your workspace per the section above) is used to answer your question via Cloudflare's AI. This does not involve chat message content.</li>
+    <li><strong>Meeting recordings &amp; summaries</strong> (only if you choose to record a meeting): group video calls are relayed live through Cloudflare's infrastructure to connect participants, the same way any video calling service works &mdash; this is not end-to-end encrypted the way chat is. If a recording is made and summarized, that audio is processed by Cloudflare's AI to produce a transcript, summary, and action items.</li>
+  </ul>
+
+  <h2>How we use information</h2>
+  <ul>
+    <li>To operate the core service: authentication, message delivery, calls/meetings, notifications.</li>
+    <li>To provide workspace features: HR/leave management, org charts, roster, admin analytics, audit logging.</li>
+    <li>To secure accounts: device trust, MFA, threat/new-location alerts, rate-limiting abuse.</li>
+    <li>To process payments and manage subscriptions.</li>
+    <li>To operate opt-in AI features, only when you've turned them on.</li>
+    <li>To comply with a workspace's configured data retention policy or legal hold, where applicable.</li>
+  </ul>
+
+  <h2>Who we share information with</h2>
+  <p>We don't sell personal information. We share it only with the infrastructure providers needed to run the service:</p>
+  <ul>
+    <li><strong>Cloudflare</strong> &mdash; hosting, storage, and the AI models used for the opt-in features above.</li>
+    <li><strong>Paystack</strong> &mdash; payment processing for subscriptions.</li>
+    <li>Any integration your workspace admin explicitly configures via the public API or webhooks (roster and analytics data only &mdash; that API has no access to chat content).</li>
+  </ul>
+  <p>We may disclose information if required by law, or to protect the rights, safety, or property of PArA PIN, our users, or the public.</p>
+
+  <h2>Data retention</h2>
+  <p>Workspace admins can configure a retention window after which older messages are automatically deleted, and can place a specific person's data under legal hold to exempt it from that deletion (e.g. during a dispute or investigation). Absent a workspace-specific policy, we retain data for as long as your account or workspace is active.</p>
+
+  <h2>Your choices and rights</h2>
+  <ul>
+    <li>Smart Replies and location sharing are off by default and can be turned off at any time in Settings.</li>
+    <li>Workspace admins can export HR/org data from within the app.</li>
+    <li>To request a copy of your personal data, or to request deletion of your account, contact us (below) &mdash; this is currently handled directly by our team rather than a self-serve button in the app.</li>
+  </ul>
+
+  <h2>Children's privacy</h2>
+  <p>PArA PIN is intended for workplace use by adults. We do not knowingly collect information from children.</p>
+
+  <h2>International data</h2>
+  <p>We run on Cloudflare's global network, which may process and store data in multiple regions in order to deliver the service quickly wherever you are.</p>
+
+  <h2>Changes to this policy</h2>
+  <p>We'll update the date at the top of this page when this policy changes. Material changes will be communicated through the app.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about this policy, or requests regarding your data: <a href="mailto:infra@parasyte.cloud">infra@parasyte.cloud</a></p>
+
+  <div class="note">This page is a plain-language description of our current data practices, written to be accurate about how the product actually works. It is not a substitute for review by a qualified lawyer in your jurisdiction before being relied on as a binding legal document, particularly for GDPR, CCPA, or other region-specific compliance requirements.</div>
+</div>
+</body>
+</html>
