@@ -1346,6 +1346,15 @@
           });
         }
       }
+      if (b.samlEnabled && b.orgId) {
+        var samlBtn = document.getElementById('samlSignInBtn');
+        if (samlBtn) {
+          samlBtn.style.display = 'block';
+          samlBtn.addEventListener('click', function(){
+            location.href = '/api/sso/saml/start?orgId=' + encodeURIComponent(b.orgId);
+          });
+        }
+      }
     });
   }
   // Set by /api/sso/callback redirecting back here after a failed OIDC
@@ -1510,6 +1519,7 @@
   <div id="lockReset">Reset local PIN</div>
   <div id="emailSignInLink" style="text-align:center; margin-top:14px; font-size:12px; color:var(--text-mid); cursor:pointer; text-decoration:underline;">Sign in with email instead</div>
   <div id="ssoSignInBtn" class="btn primary" style="display:none; margin:14px auto 0; max-width:260px;">Sign in with SSO</div>
+  <div id="samlSignInBtn" class="btn primary" style="display:none; margin:10px auto 0; max-width:260px;">Sign in with SAML SSO</div>
   <div id="ssoErrorMsg" style="display:none; text-align:center; margin-top:10px; font-size:12px; color:#ff6a6a;">Something went wrong signing in with SSO. Try again, or use your PIN.</div>
 </div>
 
@@ -2014,6 +2024,19 @@
           </label>
           <div class="btn primary" id="ssoSaveBtn">Save SSO settings</div>
           <div class="hint" id="ssoSaveStatus" style="display:none; margin-top:8px;"></div>
+        </div>
+        <div style="border-top:1px solid var(--border); padding-top:12px; margin-top:12px;">
+          <div class="hint" style="margin-bottom:6px;">SAML 2.0: for identity providers that don't speak OIDC (older Azure AD/ADFS setups in particular). Shows a "Sign in with SAML SSO" button on this workspace's custom login domain above. Give your IdP the metadata URL: <span id="samlMetadataUrlHint" style="color:var(--text-hi); word-break:break-all;"></span></div>
+          <input type="text" id="samlIdpEntityIdInput" placeholder="IdP Entity ID / Issuer" style="margin-bottom:8px;">
+          <input type="text" id="samlIdpSsoUrlInput" placeholder="IdP Single Sign-On URL, e.g. https://idp.example.com/sso" style="margin-bottom:8px;">
+          <textarea id="samlIdpCertificateInput" placeholder="IdP signing certificate (PEM, including -----BEGIN CERTIFICATE----- / -----END CERTIFICATE-----)" style="width:100%; min-height:80px; margin-bottom:8px; font-family:monospace; font-size:12px;"></textarea>
+          <div class="hint" id="samlCertHint" style="margin-bottom:8px;"></div>
+          <label class="settings-row" style="margin-bottom:8px;">
+            <span>Enable SAML for this workspace</span>
+            <input type="checkbox" id="samlEnabledToggle">
+          </label>
+          <div class="btn primary" id="samlSaveBtn">Save SAML settings</div>
+          <div class="hint" id="samlSaveStatus" style="display:none; margin-top:8px;"></div>
         </div>
         <div id="workspaceBillingSection" style="display:none; border-top:1px solid var(--border); padding-top:12px; margin-top:12px;">
           <div class="settings-row">
@@ -4585,6 +4608,7 @@
       document.getElementById('workspaceCountrySelect').value = org.country || '';
       document.getElementById('workspaceCustomDomainInput').value = org.customDomain || '';
       loadSsoSettings(org.id);
+      loadSamlSettings(org.id);
     }
     // Cancel needs true org-admin server-side (isOrgAdmin), a manage_workspace
     // grant alone isn't enough to disable the whole workspace's billing, so
@@ -4808,6 +4832,52 @@
     statusEl.textContent = 'Saved.';
     statusEl.style.color = '#7ee08a';
     loadSsoSettings(activeWorkspaceForMembers.id);
+  });
+
+  // ---------------- SSO (SAML 2.0) workspace settings ----------------
+  async function loadSamlSettings(orgId){
+    document.getElementById('samlMetadataUrlHint').textContent = `${location.origin}/api/sso/saml/metadata?orgId=${orgId}`;
+    const r = await apiFetch(`/org/saml?orgId=${encodeURIComponent(orgId)}`);
+    const certHint = document.getElementById('samlCertHint');
+    if (!r.ok || !r.body){
+      document.getElementById('samlIdpEntityIdInput').value = '';
+      document.getElementById('samlIdpSsoUrlInput').value = '';
+      document.getElementById('samlIdpCertificateInput').value = '';
+      document.getElementById('samlEnabledToggle').checked = false;
+      certHint.textContent = '';
+      return;
+    }
+    document.getElementById('samlIdpEntityIdInput').value = r.body.idpEntityId || '';
+    document.getElementById('samlIdpSsoUrlInput').value = r.body.idpSsoUrl || '';
+    document.getElementById('samlIdpCertificateInput').value = '';
+    document.getElementById('samlIdpCertificateInput').placeholder = r.body.hasCertificate
+      ? 'A certificate is already saved. Leave blank to keep it, or paste a new one to replace it.'
+      : 'IdP signing certificate (PEM, including -----BEGIN CERTIFICATE----- / -----END CERTIFICATE-----)';
+    document.getElementById('samlEnabledToggle').checked = !!r.body.enabled;
+    certHint.textContent = r.body.hasCertificate ? 'A signing certificate is already saved.' : 'Not set yet.';
+  }
+  document.getElementById('samlSaveBtn').addEventListener('click', async ()=>{
+    if (!activeWorkspaceForMembers) return;
+    const statusEl = document.getElementById('samlSaveStatus');
+    const idpEntityId = document.getElementById('samlIdpEntityIdInput').value.trim();
+    const idpSsoUrl = document.getElementById('samlIdpSsoUrlInput').value.trim();
+    const idpCertificate = document.getElementById('samlIdpCertificateInput').value.trim();
+    const enabled = document.getElementById('samlEnabledToggle').checked;
+    statusEl.style.display = 'block';
+    statusEl.style.color = '';
+    statusEl.textContent = 'Saving…';
+    const r = await apiFetch('/org/saml', { method: 'POST', body: JSON.stringify({ orgId: activeWorkspaceForMembers.id, idpEntityId, idpSsoUrl, idpCertificate: idpCertificate || undefined, enabled }) });
+    if (!r.ok){
+      statusEl.textContent = r.body && r.body.error === 'invalid_idp_sso_url' ? 'The IdP Single Sign-On URL must be a full https:// URL.'
+        : r.body && r.body.error === 'invalid_certificate' ? "That doesn't look like a valid PEM certificate."
+        : r.body && r.body.error === 'incomplete_config' ? 'Fill in the entity ID, SSO URL, and certificate before enabling.'
+        : "Couldn't save. Try again.";
+      statusEl.style.color = '#ff6a6a';
+      return;
+    }
+    statusEl.textContent = 'Saved.';
+    statusEl.style.color = '#7ee08a';
+    loadSamlSettings(activeWorkspaceForMembers.id);
   });
 
   // ==================== Arrivo People (HR module, Phase 1) ====================

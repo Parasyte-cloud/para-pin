@@ -667,6 +667,46 @@ async function verifySamlResponse(xml, trustedCertPem, { expectedAudience, expec
   return { ok: true, nameId, audience, notBefore, notOnOrAfter };
 }
 
+// ---- SP-side helpers used by /api/sso/saml/* below ----
+// This app's SAML entity ID and ACS URL are both derived, never stored —
+// same per-org URL shape used to generate and verify against everywhere,
+// so there's no separate config value that could drift out of sync with
+// the actual routes.
+function samlSpEntityId(origin, orgId) { return `${origin}/api/sso/saml/metadata?orgId=${encodeURIComponent(orgId)}`; }
+function samlAcsUrl(origin, orgId) { return `${origin}/api/sso/saml/acs?orgId=${encodeURIComponent(orgId)}`; }
+
+// HTTP-Redirect binding requires the AuthnRequest to be deflate-compressed
+// (raw DEFLATE, no zlib/gzip header) before base64. CompressionStream is
+// natively available in Workers, no library needed.
+async function deflateRawBase64(str) {
+  const cs = new CompressionStream('deflate-raw');
+  const writer = cs.writable.getWriter();
+  const done = writer.write(new TextEncoder().encode(str)).then(() => writer.close());
+  const [buf] = await Promise.all([new Response(cs.readable).arrayBuffer(), done]);
+  return arrayBufferToBase64(buf);
+}
+
+function buildSamlAuthnRequest({ id, issueInstant, destination, issuer, acsUrl }) {
+  return `<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="${id}" Version="2.0" IssueInstant="${issueInstant}" Destination="${samlEscapeAttr(destination)}" AssertionConsumerServiceURL="${samlEscapeAttr(acsUrl)}" ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"><saml:Issuer>${samlEscapeText(issuer)}</saml:Issuer></samlp:AuthnRequest>`;
+}
+
+function buildSamlSpMetadata({ entityId, acsUrl }) {
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="${samlEscapeAttr(entityId)}"><md:SPSSODescriptor AuthnRequestsSigned="false" WantAssertionsSigned="true" protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"><md:NameIDFormat>urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress</md:NameIDFormat><md:AssertionConsumerService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="${samlEscapeAttr(acsUrl)}" index="0" isDefault="true"/></md:SPSSODescriptor></md:EntityDescriptor>`;
+}
+
+// Pulled out of verifySamlResponse's own parsing so the ACS handler can
+// look up which AuthnRequest this is answering (via /internal/saml/load-
+// request) BEFORE running full signature verification — the InResponseTo
+// value itself carries no trust until the signature checks out, but the
+// lookup is what confirms the response is even claiming to answer a
+// request this SP actually issued, cheap enough to check first.
+function extractSamlResponseInResponseTo(xml) {
+  let doc;
+  try { doc = samlXmlParser.parse(xml); } catch { return null; }
+  const responseNode = samlFindFirst(doc, 'Response');
+  return responseNode ? samlGetAttr(responseNode, 'InResponseTo') : null;
+}
+
 // ==================== Public API keys + webhooks ====================
 // A small, deliberately narrow "developer platform": API keys authenticate
 // against the same global roster/admin system the built-in admin console
@@ -1462,6 +1502,28 @@ async function sendAdminWelcomeEmail(env, { to, name, orgName }) {
       const body = await res.text().catch(() => '');
       return { sent: false, error: `status ${res.status}${body ? ': ' + body.slice(0, 200) : ''}` };
     }
+    return { sent: true };
+  } catch (e) {
+    return { sent: false, error: e && e.message ? e.message : 'unknown error' };
+  }
+}
+// ---- Proactive error alerting ----
+// Reuses the same Resend setup as every other transactional email here,
+// sent to a separate operator address (ALERT_EMAIL, set via `wrangler
+// secret put`) rather than any workspace admin — this is about the
+// platform itself breaking, not something any customer should see. Gated
+// on ALERT_EMAIL being set at all so this stays a silent no-op (not a
+// thrown error) for anyone who hasn't configured it yet, same pattern as
+// RESEND_API_KEY/RESEND_FROM_EMAIL below it.
+async function sendAlertEmail(env, { subject, text }) {
+  if (!env.ALERT_EMAIL || !env.RESEND_API_KEY || !env.RESEND_FROM_EMAIL) return { sent: false, error: 'alerting_not_configured' };
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: env.RESEND_FROM_EMAIL, to: [env.ALERT_EMAIL], subject, text }),
+    });
+    if (!res.ok) return { sent: false, error: `status ${res.status}` };
     return { sent: true };
   } catch (e) {
     return { sent: false, error: e && e.message ? e.message : 'unknown error' };
@@ -4385,6 +4447,42 @@ export class Registry {
       return json(rl);
     }
 
+    // ---- Proactive error alerting ----
+    // Fired (fire-and-forget, via ctx.waitUntil, never awaited inline) from
+    // the top-level fetch() handler's outermost catch block, so this sees
+    // every uncaught exception across the entire /api/* surface without
+    // needing to be threaded through each individual route by hand. Keeps
+    // a short rolling window rather than emailing on every single error —
+    // a burst (5+ in 15 minutes) is what actually indicates something's
+    // broken, one isolated exception usually isn't. Once a burst fires an
+    // alert, the window resets and a 30-minute cooldown applies, so a
+    // sustained outage sends one email roughly every half hour instead of
+    // one per request.
+    if (request.method === 'POST' && url.pathname === '/internal/record-error') {
+      const { context, message } = await request.json().catch(() => ({}));
+      const now = Date.now();
+      const state = (await this.state.storage.get('errorAlertState')) || { recentErrors: [], lastAlertSentAt: 0 };
+      state.recentErrors = (state.recentErrors || []).filter((e) => now - e.ts < 15 * 60 * 1000);
+      state.recentErrors.push({ ts: now, context: String(context || 'unknown').slice(0, 200), message: String(message || '').slice(0, 500) });
+
+      const burstThreshold = 5;
+      const cooldownMs = 30 * 60 * 1000;
+      if (state.recentErrors.length >= burstThreshold && now - (state.lastAlertSentAt || 0) > cooldownMs) {
+        const byContext = {};
+        for (const e of state.recentErrors) byContext[e.context] = (byContext[e.context] || 0) + 1;
+        const summary = Object.entries(byContext).map(([c, n]) => `  ${c}: ${n}`).join('\n');
+        const latest = state.recentErrors[state.recentErrors.length - 1];
+        await sendAlertEmail(this.env, {
+          subject: `PArA PIN: ${state.recentErrors.length} server errors in the last 15 minutes`,
+          text: `${state.recentErrors.length} uncaught server errors in the last 15 minutes.\n\nBy route:\n${summary}\n\nMost recent (${latest.context}):\n${latest.message}\n\nCheck the Cloudflare dashboard (Workers & Pages > para-pin > Logs) for full detail. Next alert (if errors continue) won't fire for at least 30 minutes.`,
+        });
+        state.lastAlertSentAt = now;
+        state.recentErrors = []; // reset the window so a sustained outage doesn't re-trigger on every subsequent request
+      }
+      await this.state.storage.put('errorAlertState', state);
+      return json({ ok: true });
+    }
+
     // ---- SSO (OIDC) internal handlers ----
     // Everything here is only ever called by the outer worker's own
     // /api/sso/start and /api/sso/callback (which do the actual OIDC
@@ -4433,12 +4531,17 @@ export class Registry {
     // "this person belongs here" signal than merely knowing an email
     // address, provisioning them into the workspace is the actual point of
     // enterprise SSO.
+    // Shared by both OIDC (/api/sso/callback) and SAML (/api/sso/saml/acs)
+    // once EITHER protocol has produced a verified, trustworthy email —
+    // from that point on the two flows are identical, so this doesn't care
+    // which one got it there, only that at least one is actually enabled
+    // for this org (never trust a caller-supplied "which protocol" claim).
     if (request.method === 'POST' && url.pathname === '/internal/sso/complete') {
       const { email, orgId } = await request.json();
       const normalized = (email || '').trim().toLowerCase();
       if (!normalized || !orgId) return json({ error: 'missing_fields' }, 400);
       const org = await this.state.storage.get(`org:${orgId}`);
-      if (!org || !org.ssoEnabled) return json({ error: 'sso_not_enabled' }, 400);
+      if (!org || !(org.ssoEnabled || org.samlEnabled)) return json({ error: 'sso_not_enabled' }, 400);
 
       let userId = await this.state.storage.get(`emailIndex:${normalized}`);
       const token = crypto.randomUUID() + crypto.randomUUID();
@@ -4451,6 +4554,36 @@ export class Registry {
       }
       await this.state.storage.put(`magicLink:${token}`, record);
       return json({ ok: true, token });
+    }
+
+    // ---- SSO (SAML) internal handlers ----
+    // Mirrors the OIDC internal handlers directly above: only ever called
+    // by this worker's own /api/sso/saml/start and /api/sso/saml/acs (see
+    // their comments in the top-level fetch() export), never reachable
+    // directly from a browser.
+    if (request.method === 'GET' && url.pathname === '/internal/saml/config') {
+      const orgId = url.searchParams.get('orgId');
+      const org = orgId ? await this.state.storage.get(`org:${orgId}`) : null;
+      if (!org || !org.samlEnabled) return json({ ok: false });
+      return json({ ok: true, idpEntityId: org.samlIdpEntityId, idpSsoUrl: org.samlIdpSsoUrl, idpCertificate: org.samlIdpCertificate });
+    }
+    // Same one-time, short-lived, delete-on-read pattern as ssoState above,
+    // keyed by the AuthnRequest's own ID rather than a separate `state`
+    // param — SAML's InResponseTo on the way back IS that ID, so it does
+    // double duty as both the CSRF/replay token and the request-response
+    // binding verifySamlResponse() checks.
+    if (request.method === 'POST' && url.pathname === '/internal/saml/save-request') {
+      const { id, orgId } = await request.json();
+      if (!id || !orgId) return json({ error: 'missing_fields' }, 400);
+      await this.state.storage.put(`samlRequest:${id}`, { orgId, expires: Date.now() + 10 * 60 * 1000 });
+      return json({ ok: true });
+    }
+    if (request.method === 'GET' && url.pathname === '/internal/saml/load-request') {
+      const id = url.searchParams.get('id');
+      const record = id ? await this.state.storage.get(`samlRequest:${id}`) : null;
+      if (record) await this.state.storage.delete(`samlRequest:${id}`); // one-time use regardless of outcome below
+      if (!record || Date.now() > record.expires) return json({ ok: false });
+      return json({ ok: true, orgId: record.orgId });
     }
 
     // ---- Webhooks ----
@@ -4503,7 +4636,7 @@ export class Registry {
       if (!orgId) return json({ ok: false });
       const org = await this.state.storage.get(`org:${orgId}`);
       if (!org) return json({ ok: false });
-      return json({ ok: true, orgId: org.id, name: org.name, logoUrl: org.logoUrl || null, ssoEnabled: !!org.ssoEnabled });
+      return json({ ok: true, orgId: org.id, name: org.name, logoUrl: org.logoUrl || null, ssoEnabled: !!org.ssoEnabled, samlEnabled: !!org.samlEnabled });
     }
 
     // ---- Public API (/api/v1/*) internal handlers ----
@@ -5749,6 +5882,27 @@ export class MeetingRoom {
   }
 }
 
+// Named exports purely so tests/ can import and exercise these functions
+// directly (see tests/README.md) — this changes nothing about how Wrangler
+// bundles or runs the actual Worker (the default export below is still
+// exactly what's deployed; unused named exports don't ship in the bundle).
+// Deliberately limited to pure, hand-rolled logic with no Durable Object
+// storage or network dependency, the same functions this project's various
+// "verified against real generated test vectors" comments already describe
+// being checked ad hoc during development — this just makes those checks
+// permanent and re-runnable instead of one-off.
+export {
+  sha256Hex,
+  base32Encode, base32Decode, generateTotpSecret, totpCodeForCounter, verifyTotpCode,
+  cborDecode, parseAuthenticatorData, coseKeyToEcPoint, derSignatureToRaw, verifyWebauthnAssertion, buffersEqual,
+  parseJwt, verifyOidcIdToken,
+  extractSpkiFromCertDer, pemToDer, b64ToBuf, importRsaSpkiKey, excC14n, verifySamlResponse,
+  samlSpEntityId, samlAcsUrl, deflateRawBase64, buildSamlAuthnRequest, buildSamlSpMetadata, extractSamlResponseInResponseTo,
+  signVapidJWT, encryptWebPushPayload,
+  csvEscape, toCsv, sanitizeAvatarUrl,
+  arrayBufferToBase64, bufToB64url, b64urlToBuf,
+};
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -5787,7 +5941,7 @@ export default {
               // their OWN branded page, not a stranger, but there's no
               // reason to skip escaping just because the blast radius is
               // already small.
-              const brandingJson = JSON.stringify({ orgId: brand.orgId, name: brand.name, logoUrl: brand.logoUrl, ssoEnabled: brand.ssoEnabled }).replace(/</g, '\\u003c');
+              const brandingJson = JSON.stringify({ orgId: brand.orgId, name: brand.name, logoUrl: brand.logoUrl, ssoEnabled: brand.ssoEnabled, samlEnabled: brand.samlEnabled }).replace(/</g, '\\u003c');
               const safeName = String(brand.name || 'PArA PIN').replace(/&/g, '&amp;').replace(/</g, '&lt;');
               html = html.replace('</head>', `<script>window.__PARAPIN_BRANDING__=${brandingJson};</script></head>`);
               html = html.replace(/<title>[^<]*<\/title>/, `<title>${safeName}</title>`);
@@ -7384,6 +7538,93 @@ export default {
         }
       }
 
+      // ==================== SSO (SAML 2.0) ====================
+      // SP-initiated, HTTP-Redirect binding for the request out, HTTP-POST
+      // binding for the response back (the two standard, universally-
+      // supported combinations). Once /api/sso/saml/acs has a verified
+      // identity, it hands off to the exact same /internal/sso/complete
+      // magic-link bootstrap the OIDC callback above uses — see that
+      // endpoint's comment for why the two protocols converge there.
+      if (request.method === 'GET' && url.pathname === '/api/sso/saml/metadata') {
+        const orgId = url.searchParams.get('orgId');
+        if (!orgId) return json({ error: 'missing_org_id' }, 400);
+        const xml = buildSamlSpMetadata({
+          entityId: samlSpEntityId(url.origin, orgId),
+          acsUrl: samlAcsUrl(url.origin, orgId),
+        });
+        return new Response(xml, { headers: { 'content-type': 'application/samlmetadata+xml' } });
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/sso/saml/start') {
+        const orgId = url.searchParams.get('orgId');
+        if (!orgId) return json({ error: 'missing_org_id' }, 400);
+        const configRes = await registryStub.fetch(`https://internal/internal/saml/config?orgId=${encodeURIComponent(orgId)}`);
+        const config = await configRes.json();
+        if (!config.ok) return json({ error: 'saml_not_configured' }, 400);
+        try {
+          const id = '_' + crypto.randomUUID().replace(/-/g, '');
+          await registryStub.fetch('https://internal/internal/saml/save-request', {
+            method: 'POST',
+            body: JSON.stringify({ id, orgId }),
+          });
+          const authnRequest = buildSamlAuthnRequest({
+            id,
+            issueInstant: new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
+            destination: config.idpSsoUrl,
+            issuer: samlSpEntityId(url.origin, orgId),
+            acsUrl: samlAcsUrl(url.origin, orgId),
+          });
+          const encoded = await deflateRawBase64(authnRequest);
+          const redirectUrl = new URL(config.idpSsoUrl);
+          redirectUrl.searchParams.set('SAMLRequest', encoded);
+          redirectUrl.searchParams.set('RelayState', orgId);
+          return new Response(null, { status: 302, headers: { Location: redirectUrl.toString() } });
+        } catch (e) {
+          return new Response(null, { status: 302, headers: { Location: `${url.origin}/?ssoError=1` } });
+        }
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/sso/saml/acs') {
+        const orgId = url.searchParams.get('orgId');
+        const errorFallback = () => new Response(null, { status: 302, headers: { Location: `${url.origin}/?ssoError=1` } });
+        if (!orgId) return errorFallback();
+        try {
+          const form = await request.formData();
+          const samlResponseB64 = form.get('SAMLResponse');
+          if (!samlResponseB64) return errorFallback();
+          const xml = new TextDecoder().decode(b64ToBuf(String(samlResponseB64)));
+
+          const inResponseTo = extractSamlResponseInResponseTo(xml);
+          if (!inResponseTo) return errorFallback();
+          const reqRes = await registryStub.fetch(`https://internal/internal/saml/load-request?id=${encodeURIComponent(inResponseTo)}`);
+          const reqData = await reqRes.json();
+          if (!reqData.ok || reqData.orgId !== orgId) return errorFallback();
+
+          const configRes = await registryStub.fetch(`https://internal/internal/saml/config?orgId=${encodeURIComponent(orgId)}`);
+          const config = await configRes.json();
+          if (!config.ok) return errorFallback();
+
+          const result = await verifySamlResponse(xml, config.idpCertificate, {
+            expectedAudience: samlSpEntityId(url.origin, orgId),
+            expectedAcsUrl: samlAcsUrl(url.origin, orgId),
+            expectedInResponseTo: inResponseTo,
+            now: new Date(),
+          });
+          if (!result.ok) return errorFallback();
+
+          const completeRes = await registryStub.fetch('https://internal/internal/sso/complete', {
+            method: 'POST',
+            body: JSON.stringify({ email: result.nameId, orgId }),
+          });
+          const complete = await completeRes.json();
+          if (!complete.ok) return errorFallback();
+
+          return new Response(null, { status: 302, headers: { Location: `${url.origin}/auth/confirm?token=${encodeURIComponent(complete.token)}` } });
+        } catch (e) {
+          return errorFallback();
+        }
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/org/leave') {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
@@ -7819,6 +8060,14 @@ export default {
 
       return json({ error: 'not_found' }, 404);
     } catch (err) {
+      // Fire-and-forget: never lets alerting itself slow down or fail the
+      // actual error response being returned to the caller. See
+      // /internal/record-error's comment for the burst/cooldown logic.
+      const alertPromise = registryStub.fetch('https://internal/internal/record-error', {
+        method: 'POST',
+        body: JSON.stringify({ context: url.pathname, message: String(err && err.stack || err) }),
+      }).catch(() => {});
+      if (ctx && ctx.waitUntil) ctx.waitUntil(alertPromise);
       return json({ error: 'server_error', message: String(err && err.message || err) }, 500);
     }
   },

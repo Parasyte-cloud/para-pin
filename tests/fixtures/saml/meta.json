@@ -1,0 +1,12 @@
+{
+  "assertionId": "_aaaaaaaa1111111111111111111111",
+  "responseId": "_bbbbbbbb2222222222222222222222",
+  "notBefore": "2026-08-01T18:47:09Z",
+  "notOnOrAfter": "2026-08-01T18:53:09Z",
+  "issueInstant": "2026-08-01T18:48:09Z",
+  "audience": "https://chat.parasyte.cloud/api/sso/saml/metadata?orgId=org_ridearrivo",
+  "acsUrl": "https://chat.parasyte.cloud/api/sso/saml/acs?orgId=org_ridearrivo",
+  "idpEntityId": "https://test-idp.example.com/entity",
+  "inResponseTo": "_requestid1234567890abcdef",
+  "nameId": "employee@ridearrivo.com"
+}

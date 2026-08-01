@@ -2,7 +2,11 @@
   "name": "para-pin",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "description": "PArA PIN: Cloudflare Worker + Durable Objects team chat/calls/HR app.",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
   "dependencies": {
     "fast-xml-parser": "^5.0.0"
   },

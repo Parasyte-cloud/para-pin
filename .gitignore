@@ -3,4 +3,5 @@ ios/
 android/
 .DS_Store
 *.zip
-index.html.bak
+*.bak
+*.bak2
