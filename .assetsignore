@@ -5,6 +5,7 @@
 # shipped as a "static asset" and hit the 25MB per-file limit).
 node_modules/
 mobile/
+mobile-app/
 .git/
 .wrangler/
 .gitignore
