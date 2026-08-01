@@ -5970,6 +5970,15 @@ export default {
               html = html.replace(/<title>[^<]*<\/title>/, `<title>${safeName}</title>`);
               const newHeaders = new Headers(assetRes.headers);
               newHeaders.delete('content-length'); // stale for the rewritten body length, let the runtime recompute it
+              // Custom-domain HTML is dynamically branded per hostname on
+              // every request — this must never be cached by the browser or
+              // Cloudflare's edge (the static asset's own Cache-Control,
+              // inherited above via `new Headers(assetRes.headers)`, is
+              // meant for the generic unbranded shell and would otherwise
+              // have every visitor to a given edge POP served whatever the
+              // FIRST person there happened to get, branded or not, stale
+              // for as long as that asset's max-age holds).
+              newHeaders.set('Cache-Control', 'private, no-store, must-revalidate');
               return new Response(html, { status: assetRes.status, headers: newHeaders });
             }
           } catch (e) {
@@ -5980,7 +5989,14 @@ export default {
             console.log('[branding-debug] threw', String(e && e.stack || e));
           }
         }
-        return assetRes;
+        // Same no-cache reasoning as above: even the unbranded fallthrough
+        // must be re-checked against the branding lookup on every request,
+        // an edge-cached copy from before a custom domain's branding was
+        // configured (or from a request that happened to hit brand.ok===false)
+        // would otherwise keep being served indefinitely.
+        const fallthroughHeaders = new Headers(assetRes.headers);
+        fallthroughHeaders.set('Cache-Control', 'private, no-store, must-revalidate');
+        return new Response(assetRes.body, { status: assetRes.status, headers: fallthroughHeaders });
       }
       return env.ASSETS.fetch(request);
     }
@@ -7690,7 +7706,7 @@ export default {
         const body = await request.json().catch(() => ({}));
         return registryStub.fetch('https://internal/org/hr/profile', {
           method: 'POST',
-          body: JSON.stringify({ pinHash, orgId: body.orgId, targetUserId: body.targetUserId, personal: body.personal, job: body.job, hireDate: body.hireDate }),
+          body: JSON.stringify({ pinHash, orgId: body.orgId, targetUserId: body.targetUserId, personal: body.personal, job: body.job, hireDate: body.hireDate, compensation: body.compensation }),
         });
       }
 
