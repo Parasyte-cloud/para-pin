@@ -1301,6 +1301,7 @@
   .btn{ padding:9px 18px; border-radius:999px; font-size:13px; font-weight:600; cursor:pointer; border:1px solid var(--glass-brd); background:rgba(var(--tint-rgb),0.04); color:var(--text-hi); flex-shrink:0; white-space:nowrap; }
   .btn:hover{ background:rgba(var(--tint-rgb),0.09); }
   .btn.primary{ background:linear-gradient(135deg, var(--ice), var(--fire)); border:none; color:#0a0d12; }
+  .btn.saved{ background:rgba(var(--tint-rgb),0.03); border:1px solid var(--glass-brd); color:var(--text-mid); cursor:default; opacity:0.75; }
   .btn.primary:hover{ filter:brightness(1.08); }
   .btn.primary:disabled{ opacity:.4; cursor:not-allowed; filter:none; }
 
@@ -2000,7 +2001,7 @@
             <input type="text" id="workspaceBrandNameInput" placeholder="Workspace name" maxlength="60">
             <div class="hint" id="workspaceBrandHint" style="margin-top:4px;">Tap the logo to change it. Rename, then Save.</div>
           </div>
-          <div class="btn" id="workspaceBrandSaveBtn" style="flex-shrink:0;">Save</div>
+          <div class="btn primary" id="workspaceBrandSaveBtn" style="flex-shrink:0; display:none;">Save</div>
         </div>
         <label class="settings-row" style="margin-top:10px;">
           <span>Allow email sign-in for this workspace</span>
@@ -4638,6 +4639,7 @@
       document.getElementById('workspaceEmailDomainInput').value = org.emailDomain || '';
       document.getElementById('workspaceCountrySelect').value = org.country || '';
       document.getElementById('workspaceCustomDomainInput').value = org.customDomain || '';
+      resetWorkspaceBrandSaveBtn();
       loadSsoSettings(org.id);
       loadSamlSettings(org.id);
     }
@@ -4788,6 +4790,39 @@
     workspaceLogoFileInput.click();
   });
 
+  // Save button starts hidden (see the field-population block above, which
+  // calls resetWorkspaceBrandSaveBtn on every open) and only appears once
+  // something's actually been changed from what was last loaded/saved — no
+  // point offering a Save action when there's nothing to save. On a
+  // successful save it flips to a greyed-out, disabled "Saved" state for a
+  // moment (visible confirmation the click registered) and then hides
+  // again, since the form is back to a clean, nothing-to-save state.
+  let workspaceBrandSaveTimer = null;
+  function resetWorkspaceBrandSaveBtn(){
+    clearTimeout(workspaceBrandSaveTimer);
+    const btn = document.getElementById('workspaceBrandSaveBtn');
+    btn.style.display = 'none';
+    btn.classList.remove('saved');
+    btn.classList.add('primary');
+    btn.textContent = 'Save';
+  }
+  function markWorkspaceBrandDirty(){
+    clearTimeout(workspaceBrandSaveTimer);
+    const btn = document.getElementById('workspaceBrandSaveBtn');
+    btn.style.display = '';
+    btn.classList.remove('saved');
+    btn.classList.add('primary');
+    btn.textContent = 'Save';
+  }
+  [
+    'workspaceBrandNameInput', 'workspaceEmailAuthToggle', 'workspaceEmailDomainInput',
+    'workspaceCountrySelect', 'workspaceCustomDomainInput',
+  ].forEach(id=>{
+    const el = document.getElementById(id);
+    el.addEventListener('input', markWorkspaceBrandDirty);
+    el.addEventListener('change', markWorkspaceBrandDirty);
+  });
+
   document.getElementById('workspaceBrandSaveBtn').addEventListener('click', async ()=>{
     if (!activeWorkspaceForMembers) return;
     const hintEl = document.getElementById('workspaceBrandHint');
@@ -4805,6 +4840,11 @@
       hintEl.style.color = '#ff6a6a';
       return;
     }
+    const savedBtn = document.getElementById('workspaceBrandSaveBtn');
+    savedBtn.classList.remove('primary');
+    savedBtn.classList.add('saved');
+    savedBtn.textContent = 'Saved';
+    workspaceBrandSaveTimer = setTimeout(()=>{ savedBtn.style.display = 'none'; }, 1400);
     activeWorkspaceForMembers.name = r.body.org.name;
     activeWorkspaceForMembers.allowEmailAuth = r.body.org.allowEmailAuth;
     activeWorkspaceForMembers.emailDomain = r.body.org.emailDomain;
