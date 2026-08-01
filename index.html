@@ -2011,8 +2011,12 @@
         <div class="hint" id="workspaceEmailDomainHint" style="margin-top:4px;">Anyone with a matching company email can request a sign-in link and join automatically, no invite needed. Leave blank to only let existing verified members' emails work.</div>
         <select id="workspaceCountrySelect" style="margin-top:10px; width:100%;"></select>
         <div class="hint" style="margin-top:4px;">Used to populate the public holidays calendar in People & HR.</div>
-        <input type="text" id="workspaceCustomDomainInput" placeholder="Custom login domain, e.g. chat.yourcompany.com" style="margin-top:10px;">
-        <div class="hint" style="margin-top:4px;">Point this domain at PArA (add it as a Custom Domain on the Worker in your Cloudflare dashboard first), and the sign-in screen there shows this workspace's name and logo before anyone signs in. The domain-hosting step itself has to be done in Cloudflare, not here.</div>
+        <div style="display:flex; gap:8px; margin-top:10px;">
+          <input type="text" id="workspaceCustomDomainInput" placeholder="Custom login domain, e.g. chat.yourcompany.com" style="flex:1;">
+          <div class="btn" id="workspaceCustomDomainAddBtn" style="flex-shrink:0; white-space:nowrap;">Add</div>
+        </div>
+        <div class="hint" style="margin-top:4px;">Point each domain at PArA (add it as a Custom Domain on the Worker in your Cloudflare dashboard first), and the sign-in screen there shows this workspace's name and logo before anyone signs in. The domain-hosting step itself has to be done in Cloudflare, not here. You can add more than one.</div>
+        <div id="workspaceCustomDomainsList" style="display:flex; flex-direction:column; gap:6px; margin-top:8px;"></div>
         <div style="border-top:1px solid var(--border); padding-top:12px; margin-top:12px;">
           <div class="hint" style="margin-bottom:6px;">Single sign-on (OpenID Connect): works with Google Workspace, Microsoft Entra ID, Okta, or any OIDC-compliant identity provider. Shows a "Sign in with SSO" button on this workspace's custom login domain above.</div>
           <input type="text" id="ssoIssuerInput" placeholder="Issuer URL, e.g. https://accounts.google.com" style="margin-bottom:8px;">
@@ -4638,7 +4642,8 @@
       document.getElementById('workspaceEmailAuthToggle').checked = !!org.allowEmailAuth;
       document.getElementById('workspaceEmailDomainInput').value = org.emailDomain || '';
       document.getElementById('workspaceCountrySelect').value = org.country || '';
-      document.getElementById('workspaceCustomDomainInput').value = org.customDomain || '';
+      document.getElementById('workspaceCustomDomainInput').value = '';
+      renderWorkspaceCustomDomains(org.customDomains || (org.customDomain ? [org.customDomain] : []));
       resetWorkspaceBrandSaveBtn();
       loadSsoSettings(org.id);
       loadSamlSettings(org.id);
@@ -4816,7 +4821,7 @@
   }
   [
     'workspaceBrandNameInput', 'workspaceEmailAuthToggle', 'workspaceEmailDomainInput',
-    'workspaceCountrySelect', 'workspaceCustomDomainInput',
+    'workspaceCountrySelect',
   ].forEach(id=>{
     const el = document.getElementById(id);
     el.addEventListener('input', markWorkspaceBrandDirty);
@@ -4831,8 +4836,7 @@
     const allowEmailAuth = document.getElementById('workspaceEmailAuthToggle').checked;
     const emailDomain = document.getElementById('workspaceEmailDomainInput').value.trim();
     const country = document.getElementById('workspaceCountrySelect').value;
-    const customDomain = document.getElementById('workspaceCustomDomainInput').value.trim();
-    const r = await apiFetch('/org/update', { method: 'POST', body: JSON.stringify({ orgId: activeWorkspaceForMembers.id, name, allowEmailAuth, emailDomain, country, customDomain }) });
+    const r = await apiFetch('/org/update', { method: 'POST', body: JSON.stringify({ orgId: activeWorkspaceForMembers.id, name, allowEmailAuth, emailDomain, country }) });
     if (!r.ok || !r.body || !r.body.org){
       hintEl.textContent = r.body && r.body.error === 'domain_taken' ? 'That domain is already claimed by another workspace.'
         : r.body && r.body.error === 'invalid_domain' ? 'Enter a valid domain, e.g. company.com.'
@@ -4849,18 +4853,63 @@
     activeWorkspaceForMembers.allowEmailAuth = r.body.org.allowEmailAuth;
     activeWorkspaceForMembers.emailDomain = r.body.org.emailDomain;
     activeWorkspaceForMembers.country = r.body.org.country;
-    activeWorkspaceForMembers.customDomain = r.body.org.customDomain;
     const myOrg = myOrgs.find(o => o.id === activeWorkspaceForMembers.id);
     if (myOrg){
       myOrg.name = r.body.org.name;
       myOrg.allowEmailAuth = r.body.org.allowEmailAuth;
       myOrg.emailDomain = r.body.org.emailDomain;
       myOrg.country = r.body.org.country;
-      myOrg.customDomain = r.body.org.customDomain;
     }
     document.getElementById('workspaceMembersTitle').textContent = r.body.org.name + ' members';
     updateWorkspaceBar();
     hintEl.textContent = 'Saved.'; hintEl.style.color = '#7ee08a';
+  });
+
+  // Custom login domains: unlike the fields above, these save immediately
+  // on Add/Remove (mirrors the webhooks/API-keys list pattern elsewhere in
+  // this modal) rather than being batched into the main Save button, since
+  // each is really its own independent record server-side, not a field on
+  // the org's row.
+  function renderWorkspaceCustomDomains(domains){
+    const listEl = document.getElementById('workspaceCustomDomainsList');
+    listEl.innerHTML = (domains && domains.length) ? domains.map(d => `
+      <div class="settings-row" style="padding:6px 10px; background:rgba(var(--tint-rgb),0.03); border:1px solid var(--glass-brd); border-radius:8px; color:var(--text-mid);">
+        <span style="word-break:break-all;">${escapeHtml(d)}</span>
+        <span class="btn" style="padding:3px 9px; font-size:12px; flex-shrink:0; margin-left:8px;" data-remove-custom-domain="${escapeHtml(d)}">Remove</span>
+      </div>
+    `).join('') : '';
+  }
+  document.getElementById('workspaceCustomDomainAddBtn').addEventListener('click', async ()=>{
+    if (!activeWorkspaceForMembers) return;
+    const input = document.getElementById('workspaceCustomDomainInput');
+    const domain = input.value.trim();
+    if (!domain) return;
+    const hintEl = document.getElementById('workspaceBrandHint');
+    const r = await apiFetch('/org/custom-domains/add', { method: 'POST', body: JSON.stringify({ orgId: activeWorkspaceForMembers.id, domain }) });
+    if (!r.ok || !r.body || !r.body.customDomains){
+      hintEl.textContent = r.body && r.body.error === 'domain_taken' ? 'That domain is already claimed by another workspace.'
+        : r.body && r.body.error === 'invalid_domain' ? 'Enter a valid domain, e.g. company.com.'
+        : "Couldn't add that domain. Try again.";
+      hintEl.style.color = '#ff6a6a';
+      return;
+    }
+    input.value = '';
+    activeWorkspaceForMembers.customDomains = r.body.customDomains;
+    const myOrg = myOrgs.find(o => o.id === activeWorkspaceForMembers.id);
+    if (myOrg) myOrg.customDomains = r.body.customDomains;
+    renderWorkspaceCustomDomains(r.body.customDomains);
+    hintEl.textContent = 'Domain added.'; hintEl.style.color = '#7ee08a';
+  });
+  document.getElementById('workspaceCustomDomainsList').addEventListener('click', async (e)=>{
+    const domain = e.target && e.target.dataset && e.target.dataset.removeCustomDomain;
+    if (!domain || !activeWorkspaceForMembers) return;
+    if (!confirm(`Remove ${domain} as a login domain for this workspace?`)) return;
+    const r = await apiFetch('/org/custom-domains/remove', { method: 'POST', body: JSON.stringify({ orgId: activeWorkspaceForMembers.id, domain }) });
+    if (!r.ok || !r.body || !r.body.customDomains){ showSessionBanner("Couldn't remove that domain. Try again."); return; }
+    activeWorkspaceForMembers.customDomains = r.body.customDomains;
+    const myOrg = myOrgs.find(o => o.id === activeWorkspaceForMembers.id);
+    if (myOrg) myOrg.customDomains = r.body.customDomains;
+    renderWorkspaceCustomDomains(r.body.customDomains);
   });
 
   // ---------------- SSO (OIDC) workspace settings ----------------

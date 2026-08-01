@@ -1830,7 +1830,7 @@ export class Registry {
       const orgs = [{ id: null, name: 'Personal' }];
       for (const oid of myOrgIds) {
         const org = await this.state.storage.get(`org:${oid}`);
-        if (org) orgs.push({ id: org.id, name: org.name, logoUrl: org.logoUrl || null, allowEmailAuth: !!org.allowEmailAuth, emailDomain: org.emailDomain || null, country: org.country || null, isAdmin: await isOrgAdmin(this.state.storage, org.id, user.id) });
+        if (org) orgs.push({ id: org.id, name: org.name, logoUrl: org.logoUrl || null, allowEmailAuth: !!org.allowEmailAuth, emailDomain: org.emailDomain || null, country: org.country || null, customDomains: getOrgCustomDomains(org), isAdmin: await isOrgAdmin(this.state.storage, org.id, user.id) });
       }
 
       // Device metadata (a friendly guessed label + last-seen timestamp) for
@@ -2908,7 +2908,7 @@ export class Registry {
     // be exactly this app's own /api/media/<uuid> shape), since it gets
     // interpolated client-side into a CSS url("...") the same way those do.
     if (request.method === 'POST' && url.pathname === '/org/update') {
-      const { pinHash, orgId, name, logoUrl, allowEmailAuth, emailDomain, country, customDomain } = await request.json();
+      const { pinHash, orgId, name, logoUrl, allowEmailAuth, emailDomain, country } = await request.json();
       const me = await this.state.storage.get(`user:${pinHash}`);
       if (!me) return json({ error: 'not_registered' }, 401);
       if (!orgId || !(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_workspace'))) {
@@ -2944,42 +2944,10 @@ export class Registry {
         if (normalizedDomain) await this.state.storage.put(`orgDomainIndex:${normalizedDomain}`, org.id);
         org.emailDomain = normalizedDomain;
       }
-      // Custom login domain: a separate concept from emailDomain above —
-      // that one detects which workspace an @company.com address belongs
-      // to during self-serve signup, this one is "when a browser hits
-      // chat.acmecorp.com, which workspace's logo/name should the PIN
-      // screen show before anyone's even signed in." Same uniqueness-index
-      // pattern (one hostname can't be claimed by two workspaces), a
-      // separate index because the two are looked up in completely
-      // different code paths (this one keyed by request hostname at the
-      // top of fetch(), not by an email's domain suffix). Actually pointing
-      // a real domain here (CNAME/custom hostname in Cloudflare) is
-      // something only the account owner can do outside this app — this
-      // just makes the app respond correctly once that's done.
-      if (customDomain !== undefined) {
-        const normalizedHost = customDomain ? String(customDomain).trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '') : null;
-        console.log('[customdomain-debug]', JSON.stringify({ orgId, rawCustomDomain: customDomain, normalizedHost }));
-        if (normalizedHost && !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(normalizedHost)) {
-          console.log('[customdomain-debug] rejected: failed format regex');
-          return json({ error: 'invalid_domain' }, 400);
-        }
-        if (normalizedHost) {
-          const claimedBy = await this.state.storage.get(`orgHostnameIndex:${normalizedHost}`);
-          console.log('[customdomain-debug] claimedBy', JSON.stringify({ claimedBy, orgId: org.id }));
-          if (claimedBy && claimedBy !== org.id) return json({ error: 'domain_taken' }, 409);
-        }
-        if (org.customDomain && org.customDomain !== normalizedHost) {
-          const owner = await this.state.storage.get(`orgHostnameIndex:${org.customDomain}`);
-          if (owner === org.id) await this.state.storage.delete(`orgHostnameIndex:${org.customDomain}`);
-        }
-        if (normalizedHost) await this.state.storage.put(`orgHostnameIndex:${normalizedHost}`, org.id);
-        org.customDomain = normalizedHost;
-        console.log('[customdomain-debug] wrote org.customDomain =', org.customDomain);
-      }
       await this.state.storage.put(`org:${orgId}`, org);
       const changedFields = [
         name !== undefined && 'name', logoUrl !== undefined && 'logo', allowEmailAuth !== undefined && 'email sign-in',
-        country !== undefined && 'country', emailDomain !== undefined && 'email domain', customDomain !== undefined && 'custom login domain',
+        country !== undefined && 'country', emailDomain !== undefined && 'email domain',
       ].filter(Boolean);
       if (changedFields.length) {
         await appendAuditLog(this.state.storage, orgId, {
@@ -2988,6 +2956,85 @@ export class Registry {
         });
       }
       return json({ org });
+    }
+
+    // ---- Custom login domains (branded sign-in) ----
+    // A workspace can claim more than one hostname now (e.g. a staging
+    // domain alongside the real one) — separate add/remove endpoints
+    // rather than one "replace the whole list" call, same pattern as
+    // webhooks/API keys elsewhere in this console, and it means adding one
+    // domain can never accidentally clobber another that was already there.
+    //
+    // A separate concept from emailDomain above — that one detects which
+    // workspace an @company.com address belongs to during self-serve
+    // signup, this one is "when a browser hits chat.acmecorp.com, which
+    // workspace's logo/name should the PIN screen show before anyone's
+    // even signed in." Same uniqueness-index pattern (one hostname can't be
+    // claimed by two workspaces), a separate index because the two are
+    // looked up in completely different code paths (this one keyed by
+    // request hostname at the top of fetch(), not by an email's domain
+    // suffix). Actually pointing a real domain here (CNAME/custom hostname
+    // in Cloudflare) is something only the account owner can do outside
+    // this app — this just makes the app respond correctly once that's done.
+    //
+    // `org.customDomains` is the array; `org.customDomain` (singular) is a
+    // pre-existing single-string field from before this supported more than
+    // one — getOrgCustomDomains() below folds it in as a migration so any
+    // workspace that already had one set doesn't lose it.
+    function getOrgCustomDomains(org) {
+      if (Array.isArray(org.customDomains)) return org.customDomains;
+      return org.customDomain ? [org.customDomain] : [];
+    }
+    if (request.method === 'POST' && url.pathname === '/org/custom-domains/add') {
+      const { pinHash, orgId, domain } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_workspace'))) {
+        return json({ error: 'forbidden' }, 403);
+      }
+      const org = await this.state.storage.get(`org:${orgId}`);
+      if (!org) return json({ error: 'not_found' }, 404);
+      const normalizedHost = domain ? String(domain).trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '') : null;
+      if (!normalizedHost || !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(normalizedHost)) {
+        return json({ error: 'invalid_domain' }, 400);
+      }
+      const claimedBy = await this.state.storage.get(`orgHostnameIndex:${normalizedHost}`);
+      if (claimedBy && claimedBy !== org.id) return json({ error: 'domain_taken' }, 409);
+      const domains = getOrgCustomDomains(org);
+      if (!domains.includes(normalizedHost)) domains.push(normalizedHost);
+      org.customDomains = domains;
+      delete org.customDomain; // fully migrated onto the array field now
+      await this.state.storage.put(`orgHostnameIndex:${normalizedHost}`, org.id);
+      await this.state.storage.put(`org:${orgId}`, org);
+      await appendAuditLog(this.state.storage, orgId, {
+        actorId: me.id, actorName: me.displayName || 'Someone', action: 'workspace_settings_changed',
+        details: `Added custom login domain: ${normalizedHost}`,
+      });
+      return json({ ok: true, customDomains: org.customDomains });
+    }
+    if (request.method === 'POST' && url.pathname === '/org/custom-domains/remove') {
+      const { pinHash, orgId, domain } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_workspace'))) {
+        return json({ error: 'forbidden' }, 403);
+      }
+      const org = await this.state.storage.get(`org:${orgId}`);
+      if (!org) return json({ error: 'not_found' }, 404);
+      const normalizedHost = domain ? String(domain).trim().toLowerCase() : null;
+      const domains = getOrgCustomDomains(org).filter((d) => d !== normalizedHost);
+      org.customDomains = domains;
+      delete org.customDomain;
+      if (normalizedHost) {
+        const owner = await this.state.storage.get(`orgHostnameIndex:${normalizedHost}`);
+        if (owner === org.id) await this.state.storage.delete(`orgHostnameIndex:${normalizedHost}`);
+      }
+      await this.state.storage.put(`org:${orgId}`, org);
+      await appendAuditLog(this.state.storage, orgId, {
+        actorId: me.id, actorName: me.displayName || 'Someone', action: 'workspace_settings_changed',
+        details: `Removed custom login domain: ${normalizedHost}`,
+      });
+      return json({ ok: true, customDomains: org.customDomains });
     }
 
     // ---- SSO (OpenID Connect) config ----
@@ -5932,9 +5979,10 @@ export default {
 
     if (!url.pathname.startsWith('/api/')) {
       // ---- Branded custom domains ----
-      // If a workspace has claimed this hostname (see /org/update's
-      // customDomain field — the actual DNS/Cloudflare Custom Hostname
-      // wiring that routes real traffic here is a one-time account-level
+      // If a workspace has claimed this hostname (see /org/custom-domains/
+      // add — a workspace can claim more than one — the actual DNS/
+      // Cloudflare Custom Hostname wiring that routes real traffic here is
+      // a one-time account-level
       // step outside this code), inject its name/logo into the HTML shell
       // server-side before it's ever sent, so even the very first paint —
       // the PIN lock screen, before anyone's signed in — already shows
@@ -7402,7 +7450,31 @@ export default {
         if (!body.orgId) return json({ error: 'missing_org_id' }, 400);
         return registryStub.fetch('https://internal/org/update', {
           method: 'POST',
-          body: JSON.stringify({ pinHash, orgId: body.orgId, name: body.name, logoUrl: body.logoUrl, allowEmailAuth: body.allowEmailAuth, emailDomain: body.emailDomain, country: body.country, customDomain: body.customDomain }),
+          body: JSON.stringify({ pinHash, orgId: body.orgId, name: body.name, logoUrl: body.logoUrl, allowEmailAuth: body.allowEmailAuth, emailDomain: body.emailDomain, country: body.country }),
+        });
+      }
+
+      // Custom login domains — see /org/custom-domains/add|remove in the
+      // Registry DO. Separate from /api/org/update now: a workspace can
+      // have more than one, added/removed one at a time.
+      if (request.method === 'POST' && url.pathname === '/api/org/custom-domains/add') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        if (!body.orgId) return json({ error: 'missing_org_id' }, 400);
+        return registryStub.fetch('https://internal/org/custom-domains/add', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, orgId: body.orgId, domain: body.domain }),
+        });
+      }
+      if (request.method === 'POST' && url.pathname === '/api/org/custom-domains/remove') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        if (!body.orgId) return json({ error: 'missing_org_id' }, 400);
+        return registryStub.fetch('https://internal/org/custom-domains/remove', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, orgId: body.orgId, domain: body.domain }),
         });
       }
 
