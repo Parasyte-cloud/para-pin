@@ -5271,6 +5271,10 @@ export default {
             const registryStub = env.REGISTRY.get(env.REGISTRY.idFromName('global-registry-v1'));
             const brandRes = await registryStub.fetch(`https://internal/internal/org-by-hostname?hostname=${encodeURIComponent(url.hostname)}`);
             const brand = await brandRes.json();
+            // Temporary diagnostic logging, safe to leave (never touches the
+            // response, only wrangler tail), remove once the branding lookup
+            // is confirmed working end to end for a real custom domain.
+            console.log('[branding-debug]', JSON.stringify({ hostname: url.hostname, brandStatus: brandRes.status, brand }));
             if (brand.ok) {
               let html = await assetRes.text();
               // Escaped against breaking out of either the <script> block
@@ -5293,6 +5297,7 @@ export default {
             // unreachable, malformed response, whatever) falls straight
             // through to serving the normal, unbranded page below rather
             // than breaking the login screen entirely over a cosmetic feature.
+            console.log('[branding-debug] threw', String(e && e.stack || e));
           }
         }
         return assetRes;
