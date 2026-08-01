@@ -2,6 +2,11 @@
 // Two DO classes:
 //   Registry  (singleton), users, chat membership index
 //   ChatRoom  (one per chat id), messages + realtime WebSocket fan-out
+//
+// The only npm dependency this project has (see package.json) is
+// fast-xml-parser, used solely for SAML SSO's XML-DSig verification below —
+// see the "SSO (SAML 2.0)" section for why it's needed and how it's used.
+import { XMLParser } from 'fast-xml-parser';
 
 async function sha256Hex(str) {
   const data = new TextEncoder().encode(str);
@@ -270,20 +275,23 @@ async function verifyWebauthnAssertion(x, y, authenticatorDataBuf, clientDataJSO
 }
 
 // ==================== SSO (OpenID Connect) ====================
-// Generic OIDC only — deliberately not SAML. SAML's signature verification
-// means hand-rolling XML canonicalization (C14N) before checking anything,
-// a much larger and easier-to-get-subtly-wrong surface than OIDC's
-// JSON+JWT, with no vetted library available given this project's no-
-// build-step constraint. OIDC in exchange covers the same ground (Google
-// Workspace, Microsoft Entra ID, Okta, Auth0, OneLogin, and anything else
-// speaking the standard) through one implementation: fetch the provider's
-// published discovery document and public keys, verify a signed ID token
-// against them. See the comment above verifyOidcIdToken for the specific
-// signature-forgery defenses this includes; correctness here was verified
-// against real RSA-signed tokens (valid signature, tampered payload, wrong
-// issuer/audience/nonce, expired, unknown key, and a token forged with an
-// entirely different keypair) before this ever touched the actual OIDC
-// round-trip in /api/sso/start and /api/sso/callback below.
+// Generic OIDC, covering Google Workspace, Microsoft Entra ID, Okta, Auth0,
+// OneLogin, and anything else speaking the standard, through one
+// implementation: fetch the provider's published discovery document and
+// public keys, verify a signed ID token against them. See the comment above
+// verifyOidcIdToken for the specific signature-forgery defenses this
+// includes; correctness here was verified against real RSA-signed tokens
+// (valid signature, tampered payload, wrong issuer/audience/nonce, expired,
+// unknown key, and a token forged with an entirely different keypair)
+// before this ever touched the actual OIDC round-trip in /api/sso/start and
+// /api/sso/callback below.
+//
+// SAML 2.0 is handled separately, see "SSO (SAML 2.0)" further down — it
+// used to be deliberately out of scope here (hand-rolling XML
+// canonicalization before checking anything is a much larger and easier-
+// to-get-subtly-wrong surface than OIDC's JSON+JWT), but some enterprise
+// IdPs (older Azure AD/ADFS setups in particular) only speak SAML, so it's
+// now implemented too, held to the same verification standard.
 
 // Fetches and caches (Cloudflare's own edge cache, via the `cf` fetch
 // option — no separate KV/DO storage needed for something this provider-
@@ -342,6 +350,321 @@ async function verifyOidcIdToken(idToken, { jwks, issuer, audience, nonce }) {
   if (nonce && payload.nonce !== nonce) throw new Error('bad_nonce');
   if (!payload.email) throw new Error('no_email_claim');
   return payload;
+}
+
+// ==================== SSO (SAML 2.0) ====================
+// SP-initiated SAML for enterprise IdPs that don't speak OIDC (mainly
+// older Azure AD/ADFS deployments). This is a meaningfully bigger
+// verification surface than OIDC's JWT check above: SAML's signature
+// covers an XML subtree, and confirming a signature is valid means first
+// canonicalizing that subtree byte-for-byte the same way the signer did
+// (XML Exclusive Canonicalization, "exc-c14n") before hashing it — get the
+// canonicalization even slightly wrong and you silently verify against the
+// wrong bytes.
+//
+// Cloudflare Workers has no DOMParser (confirmed via testing — this rules
+// out the standard `xmldsigjs`/`xml-crypto` npm packages, both require a
+// DOM), so this hand-rolls exc-c14n against a structural, order-preserving
+// parse from fast-xml-parser (`preserveOrder: true`, the one and only npm
+// dependency this project has — see package.json) rather than against a
+// DOM tree. All actual cryptography (SHA-256 digest, RSA-SHA256 signature
+// verification) runs on Web Crypto, never hand-rolled.
+//
+// Five specific ways this class of code most commonly breaks, and how each
+// is defended against here:
+//  1. Trusting whatever X.509 cert is embedded in the response's own
+//     <KeyInfo> instead of the admin-configured trusted cert
+//     (org.samlIdpCertificate) — verifySamlResponse() below only ever
+//     imports and verifies against the admin-configured cert; the
+//     embedded KeyInfo cert, if present, is never read.
+//  2. "XML signature wrapping" — an attacker adds a second, differently-
+//     signed-or-unsigned <Assertion> alongside the legitimately signed
+//     one, hoping code reads identity from the wrong one. Defended by
+//     resolving the signed element strictly via the Signature's own
+//     <Reference URI="#..."> back to the matching ID attribute, then
+//     reading NameID/Conditions/etc. only from that exact element — never
+//     "the first/last Assertion in the document."
+//  3. Replay — InResponseTo on both the Response and the
+//     SubjectConfirmationData must match the AuthnRequest ID this SP
+//     itself generated for that login attempt.
+//  4. Missing Conditions checks — NotBefore/NotOnOrAfter (time window) and
+//     AudienceRestriction (this SP's entity ID) are enforced.
+//  5. Missing Destination/Recipient checks — both must match this org's
+//     actual ACS URL, or a response minted for a different SP could be
+//     replayed here.
+// Verified against real fixtures before ever touching a live IdP: assertions
+// genuinely signed with `xml-crypto` (a spec-compliant, DOM-based reference
+// implementation, used only as a Node-side test-fixture generator, never
+// shipped here) covering a valid signature, a post-signing tampered
+// assertion (digest mismatch), a signature forged with a different keypair
+// (rejected against the trusted cert), and a signature-wrapping attempt
+// (resolved to the correct, legitimately-signed identity, not the
+// attacker-injected one) — each behaved as intended.
+
+// ---- Minimal ASN.1 DER reader, just enough to pull the
+// SubjectPublicKeyInfo (SPKI) substructure out of a full X.509 certificate,
+// since crypto.subtle.importKey('spki', ...) wants that substructure alone,
+// not the whole certificate. ----
+function derReadLength(buf, offset) {
+  let b = buf[offset];
+  offset++;
+  if ((b & 0x80) === 0) return { length: b, offset };
+  const numBytes = b & 0x7f;
+  let length = 0;
+  for (let i = 0; i < numBytes; i++) { length = (length << 8) | buf[offset]; offset++; }
+  return { length, offset };
+}
+function derReadTLV(buf, offset) {
+  const tag = buf[offset];
+  const { length, offset: contentStart } = derReadLength(buf, offset + 1);
+  return { tag, contentStart, contentLen: length, end: contentStart + length };
+}
+// Extracts the DER bytes of the SubjectPublicKeyInfo SEQUENCE from within a
+// Certificate DER. X.509 Certificate ::= SEQUENCE { tbsCertificate, ... },
+// tbsCertificate ::= SEQUENCE { [0]version(opt), serialNumber, signature,
+// issuer, validity, subject, subjectPublicKeyInfo, ...(optional extras) }.
+function extractSpkiFromCertDer(certDer) {
+  const cert = derReadTLV(certDer, 0);
+  const tbs = derReadTLV(certDer, cert.contentStart);
+  let p = tbs.contentStart;
+  let field = derReadTLV(certDer, p);
+  if (field.tag === 0xa0) { p = field.end; field = derReadTLV(certDer, p); } // skip optional version -> now field=serialNumber
+  const remainingFields = ['signatureAlgorithm', 'issuer', 'validity', 'subject', 'subjectPublicKeyInfo'];
+  for (let i = 0; i < remainingFields.length; i++) {
+    p = field.end;
+    field = derReadTLV(certDer, p);
+  }
+  return certDer.slice(p, field.end); // field is now subjectPublicKeyInfo; return its full TLV
+}
+function b64ToBuf(b64) {
+  const bin = atob(b64.replace(/\s+/g, ''));
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  return buf;
+}
+function pemToDer(pem) {
+  const b64 = pem.replace(/-----BEGIN [^-]+-----/, '').replace(/-----END [^-]+-----/, '').replace(/\s+/g, '');
+  return b64ToBuf(b64);
+}
+async function importRsaSpkiKey(certPem) {
+  const spkiDer = extractSpkiFromCertDer(pemToDer(certPem));
+  return crypto.subtle.importKey('spki', spkiDer, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
+}
+
+// ---- Hand-rolled W3C Exclusive XML Canonicalization (exc-c14n, no
+// comments, no InclusiveNamespaces PrefixList) over a fast-xml-parser
+// `preserveOrder` tree. `matchFn(tag, attrs)` locates the element to
+// canonicalize; `excludeTag`, if given, strips a same-named direct child
+// before serializing (the enveloped-signature transform: the Signature
+// element doesn't canonicalize itself). ----
+function samlEscapeText(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\r/g, '&#xD;');
+}
+function samlEscapeAttr(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')
+    .replace(/\t/g, '&#x9;').replace(/\n/g, '&#xA;').replace(/\r/g, '&#xD;');
+}
+function samlTagKey(node) {
+  for (const k of Object.keys(node)) if (k !== ':@') return k;
+  return null;
+}
+function samlSplitPrefix(name) {
+  const i = name.indexOf(':');
+  return i === -1 ? { prefix: '', local: name } : { prefix: name.slice(0, i), local: name.slice(i + 1) };
+}
+function excC14n(fullTree, matchFn, opts) {
+  opts = opts || {};
+  let output = null;
+
+  function walk(nodes, nsContext) {
+    for (const node of nodes) {
+      if (output !== null) return;
+      if (node['#text'] !== undefined) continue;
+      const tag = samlTagKey(node);
+      if (!tag) continue;
+      const attrs = node[':@'] || {};
+      const ownNs = { ...nsContext };
+      for (const [k, v] of Object.entries(attrs)) {
+        const name = k.slice(2);
+        if (name === 'xmlns') ownNs[''] = v;
+        else if (name.startsWith('xmlns:')) ownNs[name.slice(6)] = v;
+      }
+      if (matchFn(tag, attrs)) { output = serialize(node, ownNs, {}); return; }
+      walk(node[tag], ownNs);
+    }
+  }
+
+  function serialize(node, nsContext, rendered) {
+    const tag = samlTagKey(node);
+    const attrs = node[':@'] || {};
+    const ownNs = { ...nsContext };
+    for (const [k, v] of Object.entries(attrs)) {
+      const name = k.slice(2);
+      if (name === 'xmlns') ownNs[''] = v;
+      else if (name.startsWith('xmlns:')) ownNs[name.slice(6)] = v;
+    }
+
+    // Visibly-utilized namespaces: the element's own prefix, plus any
+    // prefixed attribute's prefix (unprefixed attributes are never in a
+    // namespace per the XML Namespaces spec).
+    const utilized = new Map();
+    const { prefix: elemPrefix } = samlSplitPrefix(tag);
+    if (elemPrefix || ownNs[''] !== undefined) {
+      const uri = ownNs[elemPrefix] ?? (elemPrefix === '' ? ownNs[''] : undefined);
+      if (uri !== undefined) utilized.set(elemPrefix, uri);
+    }
+    const attrEntries = [];
+    for (const [k, v] of Object.entries(attrs)) {
+      const name = k.slice(2);
+      if (name === 'xmlns' || name.startsWith('xmlns:')) continue;
+      const { prefix, local } = samlSplitPrefix(name);
+      if (prefix) { const uri = ownNs[prefix]; if (uri !== undefined) utilized.set(prefix, uri); }
+      attrEntries.push({ prefix, local, value: v });
+    }
+
+    const newRendered = { ...rendered };
+    const nsDecls = [];
+    for (const [prefix, uri] of utilized) {
+      if (rendered[prefix] !== uri) { nsDecls.push({ prefix, uri }); newRendered[prefix] = uri; }
+    }
+    nsDecls.sort((a, b) => a.prefix.localeCompare(b.prefix));
+    attrEntries.sort((a, b) => {
+      const auri = a.prefix ? (ownNs[a.prefix] || '') : '';
+      const buri = b.prefix ? (ownNs[b.prefix] || '') : '';
+      if (auri !== buri) return auri.localeCompare(buri);
+      return a.local.localeCompare(b.local);
+    });
+
+    let out = '<' + tag;
+    for (const d of nsDecls) out += d.prefix === '' ? ` xmlns="${samlEscapeAttr(d.uri)}"` : ` xmlns:${d.prefix}="${samlEscapeAttr(d.uri)}"`;
+    for (const a of attrEntries) out += ` ${a.prefix ? a.prefix + ':' + a.local : a.local}="${samlEscapeAttr(a.value)}"`;
+    out += '>';
+
+    for (const child of node[tag] || []) {
+      if (child['#text'] !== undefined) { out += samlEscapeText(child['#text']); continue; }
+      const childTag = samlTagKey(child);
+      if (!childTag) continue;
+      if (opts.excludeTag && childTag === opts.excludeTag) continue;
+      out += serialize(child, ownNs, newRendered);
+    }
+    out += `</${tag}>`;
+    return out;
+  }
+
+  walk(fullTree, {});
+  return output;
+}
+
+// ---- Structural helpers over a preserveOrder tree (no XPath available) ----
+function samlGetAttr(node, name) { return (node[':@'] || {})['@_' + name]; }
+function samlFindFirst(nodes, tag) {
+  for (const node of nodes) {
+    if (node['#text'] !== undefined) continue;
+    const t = samlTagKey(node);
+    if (!t) continue;
+    if (t === tag || t.endsWith(':' + tag)) return node;
+    const r = samlFindFirst(node[t] || [], tag);
+    if (r) return r;
+  }
+  return null;
+}
+function samlGetText(node) {
+  if (!node) return null;
+  const t = samlTagKey(node);
+  for (const c of node[t] || []) if (c['#text'] !== undefined) return c['#text'];
+  return null;
+}
+
+const samlXmlParser = new XMLParser({
+  preserveOrder: true, ignoreAttributes: false, attributeNamePrefix: '@_',
+  parseAttributeValue: false, trimValues: false,
+});
+
+// Verifies a decoded SAMLResponse XML string against an admin-configured
+// trusted IdP certificate (never the response's own embedded KeyInfo cert),
+// and the standard SP-side replay/window/audience/recipient checks. Returns
+// `{ ok:false, error }` on any failure, `{ ok:true, nameId, ... }` only once
+// every check has passed. See the risk-by-risk breakdown in the comment
+// above this section.
+async function verifySamlResponse(xml, trustedCertPem, { expectedAudience, expectedAcsUrl, expectedInResponseTo, now } = {}) {
+  let doc;
+  try { doc = samlXmlParser.parse(xml); } catch { return { ok: false, error: 'malformed_xml' }; }
+
+  const responseNode = samlFindFirst(doc, 'Response');
+  if (!responseNode) return { ok: false, error: 'no_response_element' };
+  const statusCode = samlGetAttr(samlFindFirst([responseNode], 'StatusCode'), 'Value');
+  if (statusCode && statusCode !== 'urn:oasis:names:tc:SAML:2.0:status:Success') return { ok: false, error: 'idp_status_failure' };
+
+  const sigNode = samlFindFirst(doc, 'Signature');
+  if (!sigNode) return { ok: false, error: 'no_signature' };
+  const signedInfoNode = samlFindFirst([sigNode], 'SignedInfo');
+  const refNode = samlFindFirst([signedInfoNode], 'Reference');
+  const refUri = samlGetAttr(refNode, 'URI');
+  if (!refUri || !refUri.startsWith('#')) return { ok: false, error: 'bad_reference_uri' };
+  const targetId = refUri.slice(1);
+
+  // Resolve the SIGNED element strictly by the ID the signature itself
+  // references — never by tag name — this is the signature-wrapping defense.
+  let targetNode = null;
+  (function findById(nodes) {
+    for (const node of nodes) {
+      if (targetNode) return;
+      if (node['#text'] !== undefined) continue;
+      const t = samlTagKey(node);
+      if (!t) continue;
+      if (samlGetAttr(node, 'ID') === targetId) { targetNode = node; return; }
+      findById(node[t] || []);
+    }
+  })(doc);
+  if (!targetNode) return { ok: false, error: 'signed_id_not_found' };
+  const targetTag = samlTagKey(targetNode);
+  if (targetTag !== 'saml:Assertion' && !targetTag.endsWith(':Assertion')) return { ok: false, error: 'signed_element_not_assertion' };
+
+  // 1. Digest check: canonicalize the signed Assertion (enveloped-signature
+  //    transform: strip its own Signature child) and compare to DigestValue.
+  const assertionC14n = excC14n(doc, (tag, attrs) => attrs['@_ID'] === targetId, { excludeTag: 'Signature' });
+  const expectedDigest = samlGetText(samlFindFirst([signedInfoNode], 'DigestValue'));
+  const digestBuf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(assertionC14n));
+  const digestB64 = arrayBufferToBase64(digestBuf);
+  if (!expectedDigest || digestB64 !== expectedDigest) return { ok: false, error: 'digest_mismatch' };
+
+  // 2. Signature check: canonicalize SignedInfo, verify RSA-SHA256 against
+  //    the admin-configured trusted cert (never the embedded KeyInfo cert).
+  const signedInfoC14n = excC14n(doc, (tag) => tag === 'SignedInfo');
+  const sigValueB64 = samlGetText(samlFindFirst([sigNode], 'SignatureValue'));
+  if (!sigValueB64) return { ok: false, error: 'no_signature_value' };
+  let pubKey;
+  try { pubKey = await importRsaSpkiKey(trustedCertPem); } catch { return { ok: false, error: 'bad_trusted_cert' }; }
+  const sigOk = await crypto.subtle.verify(
+    'RSASSA-PKCS1-v1_5', pubKey, b64ToBuf(sigValueB64), new TextEncoder().encode(signedInfoC14n)
+  );
+  if (!sigOk) return { ok: false, error: 'signature_invalid' };
+
+  // 3. Only now read identity/conditions data, and only from targetNode —
+  //    the element the (now-verified) signature actually covers.
+  const nameId = samlGetText(samlFindFirst([targetNode], 'NameID'));
+  const conditions = samlFindFirst([targetNode], 'Conditions');
+  const notBefore = samlGetAttr(conditions, 'NotBefore');
+  const notOnOrAfter = samlGetAttr(conditions, 'NotOnOrAfter');
+  const audience = samlGetText(samlFindFirst([conditions], 'Audience'));
+  const subjConfData = samlFindFirst([targetNode], 'SubjectConfirmationData');
+  const inResponseTo = samlGetAttr(subjConfData, 'InResponseTo');
+  const recipient = samlGetAttr(subjConfData, 'Recipient');
+  const responseInResponseTo = samlGetAttr(responseNode, 'InResponseTo');
+  const destination = samlGetAttr(responseNode, 'Destination');
+
+  const nowTs = now || new Date();
+  if (!nameId) return { ok: false, error: 'no_name_id' };
+  if (notBefore && nowTs < new Date(notBefore)) return { ok: false, error: 'not_yet_valid' };
+  if (notOnOrAfter && nowTs >= new Date(notOnOrAfter)) return { ok: false, error: 'expired' };
+  if (expectedAudience && audience !== expectedAudience) return { ok: false, error: 'audience_mismatch' };
+  if (expectedAcsUrl && recipient !== expectedAcsUrl) return { ok: false, error: 'recipient_mismatch' };
+  if (expectedAcsUrl && destination !== expectedAcsUrl) return { ok: false, error: 'destination_mismatch' };
+  if (expectedInResponseTo && inResponseTo !== expectedInResponseTo) return { ok: false, error: 'in_response_to_mismatch' };
+  if (expectedInResponseTo && responseInResponseTo !== expectedInResponseTo) return { ok: false, error: 'response_in_response_to_mismatch' };
+
+  return { ok: true, nameId, audience, notBefore, notOnOrAfter };
 }
 
 // ==================== Public API keys + webhooks ====================
@@ -2641,6 +2964,77 @@ export class Registry {
         details: 'Updated: SSO configuration',
       });
       return json({ ok: true, enabled: !!org.ssoEnabled, issuer: org.ssoIssuer || '', clientId: org.ssoClientId || '', hasClientSecret: !!org.ssoClientSecret });
+    }
+
+    // ---- SSO (SAML 2.0) config ----
+    // Same shape and same write-only-secret-ish treatment as /org/sso above,
+    // adapted for SAML's fields: idpEntityId (the IdP's Issuer value),
+    // idpSsoUrl (where this SP sends AuthnRequests), and idpCertificate
+    // (the IdP's signing cert, pasted by the admin — this, not anything
+    // embedded in a SAMLResponse, is what verifySamlResponse() trusts).
+    // The SP's own entity ID and ACS URL are derived, not stored — see
+    // /api/sso/saml/metadata and /api/sso/saml/acs (added alongside the
+    // rest of the SAML request/response flow).
+    if (request.method === 'GET' && url.pathname === '/org/saml') {
+      const pinHash = url.searchParams.get('pinHash');
+      const orgId = url.searchParams.get('orgId');
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_workspace'))) {
+        return json({ error: 'forbidden' }, 403);
+      }
+      const org = await this.state.storage.get(`org:${orgId}`);
+      if (!org) return json({ error: 'not_found' }, 404);
+      return json({
+        enabled: !!org.samlEnabled,
+        idpEntityId: org.samlIdpEntityId || '',
+        idpSsoUrl: org.samlIdpSsoUrl || '',
+        hasCertificate: !!org.samlIdpCertificate,
+      });
+    }
+    if (request.method === 'POST' && url.pathname === '/org/saml') {
+      const { pinHash, orgId, enabled, idpEntityId, idpSsoUrl, idpCertificate } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_workspace'))) {
+        return json({ error: 'forbidden' }, 403);
+      }
+      const org = await this.state.storage.get(`org:${orgId}`);
+      if (!org) return json({ error: 'not_found' }, 404);
+      if (idpEntityId !== undefined) org.samlIdpEntityId = idpEntityId ? String(idpEntityId).trim().slice(0, 500) : null;
+      if (idpSsoUrl !== undefined) {
+        const normalizedUrl = idpSsoUrl ? String(idpSsoUrl).trim() : null;
+        if (normalizedUrl && !/^https:\/\/.+/.test(normalizedUrl)) return json({ error: 'invalid_idp_sso_url' }, 400);
+        org.samlIdpSsoUrl = normalizedUrl;
+      }
+      // Same "blank/omitted leaves it alone, only a real value overwrites"
+      // treatment as ssoClientSecret above — the settings form never
+      // redisplays a pasted cert either.
+      if (idpCertificate) {
+        const certPem = String(idpCertificate).trim();
+        // Cheap sanity check before storing: it must actually be a PEM
+        // certificate block and its DER must parse far enough to yield an
+        // SPKI (importRsaSpkiKey walks the full ASN.1 structure), otherwise
+        // this would silently store something verifySamlResponse can never
+        // succeed against.
+        if (!/-----BEGIN CERTIFICATE-----[\s\S]+-----END CERTIFICATE-----/.test(certPem)) {
+          return json({ error: 'invalid_certificate' }, 400);
+        }
+        try { await importRsaSpkiKey(certPem); } catch { return json({ error: 'invalid_certificate' }, 400); }
+        org.samlIdpCertificate = certPem.slice(0, 8000);
+      }
+      if (enabled !== undefined) {
+        if (enabled && (!org.samlIdpEntityId || !org.samlIdpSsoUrl || !org.samlIdpCertificate)) {
+          return json({ error: 'incomplete_config' }, 400);
+        }
+        org.samlEnabled = !!enabled;
+      }
+      await this.state.storage.put(`org:${orgId}`, org);
+      await appendAuditLog(this.state.storage, orgId, {
+        actorId: me.id, actorName: me.displayName || 'Someone', action: 'workspace_settings_changed',
+        details: 'Updated: SAML SSO configuration',
+      });
+      return json({ ok: true, enabled: !!org.samlEnabled, idpEntityId: org.samlIdpEntityId || '', idpSsoUrl: org.samlIdpSsoUrl || '', hasCertificate: !!org.samlIdpCertificate });
     }
 
     // Public holidays for the org's country, keyed off org.country (set via
@@ -6660,6 +7054,44 @@ export default {
         return registryStub.fetch('https://internal/org/update', {
           method: 'POST',
           body: JSON.stringify({ pinHash, orgId: body.orgId, name: body.name, logoUrl: body.logoUrl, allowEmailAuth: body.allowEmailAuth, emailDomain: body.emailDomain, country: body.country }),
+        });
+      }
+
+      // SSO (OIDC) config passthrough — was missing (the settings UI has
+      // been calling this since SSO shipped, silently 404ing); adding it
+      // alongside the SAML mirror below since both were touched together.
+      if (request.method === 'GET' && url.pathname === '/api/org/sso') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const orgId = url.searchParams.get('orgId') || '';
+        return registryStub.fetch(`https://internal/org/sso?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}`);
+      }
+      if (request.method === 'POST' && url.pathname === '/api/org/sso') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        if (!body.orgId) return json({ error: 'missing_org_id' }, 400);
+        return registryStub.fetch('https://internal/org/sso', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, orgId: body.orgId, enabled: body.enabled, issuer: body.issuer, clientId: body.clientId, clientSecret: body.clientSecret }),
+        });
+      }
+
+      // SSO (SAML) config passthrough — see /org/saml in the Registry DO.
+      if (request.method === 'GET' && url.pathname === '/api/org/saml') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const orgId = url.searchParams.get('orgId') || '';
+        return registryStub.fetch(`https://internal/org/saml?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}`);
+      }
+      if (request.method === 'POST' && url.pathname === '/api/org/saml') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        if (!body.orgId) return json({ error: 'missing_org_id' }, 400);
+        return registryStub.fetch('https://internal/org/saml', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, orgId: body.orgId, enabled: body.enabled, idpEntityId: body.idpEntityId, idpSsoUrl: body.idpSsoUrl, idpCertificate: body.idpCertificate }),
         });
       }
 

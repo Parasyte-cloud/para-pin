@@ -3,6 +3,10 @@
   "appName": "PArA PIN",
   "webDir": "www",
   "backgroundColor": "#050608",
+  "server": {
+    "url": "https://chat.parasyte.cloud",
+    "cleartext": false
+  },
   "ios": {
     "contentInset": "always",
     "backgroundColor": "#050608"

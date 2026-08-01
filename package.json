@@ -1,0 +1,14 @@
+{
+  "name": "para-pin",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PArA PIN: Cloudflare Worker + Durable Objects team chat/calls/HR app.",
+  "dependencies": {
+    "fast-xml-parser": "^5.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Parasyte-cloud/para-pin.git"
+  },
+  "license": "ISC"
+}
