@@ -195,6 +195,69 @@
   #lockReset{ font-size:11px; color:var(--text-low); cursor:pointer; text-decoration:underline; text-underline-offset:3px; }
   #lockReset:hover{ color:var(--text-mid); }
 
+  /* ================= FRONT DOOR (marketing landing, generic hosts only) ================= */
+  /* Shown once per browser (localStorage flag, see the decision script near
+     the top of <body>) before the PIN lock screen, for anyone landing cold
+     on the generic app hosts. Branded custom-domain workspaces skip this
+     entirely — their own branding on the lock screen already IS their front
+     door — as does anyone arriving mid-flow (magic-link/SSO token in the
+     URL) or a returning visitor who's already dismissed it once. */
+  html.no-frontdoor #frontDoor{ display:none; }
+  html:not(.no-frontdoor) #lock{ display:none; }
+  #frontDoor{
+    position:fixed; inset:0; z-index:15; overflow-y:auto; background:var(--bg-0);
+    display:flex; flex-direction:column; align-items:center;
+  }
+  .fd-nav{ width:100%; max-width:960px; display:flex; align-items:center; justify-content:space-between; padding:20px 24px; box-sizing:border-box; }
+  .fd-wordmark{
+    font-size:15px; font-weight:700; letter-spacing:.14em;
+    background:linear-gradient(90deg, var(--ice), #cfd8dd 45%, var(--fire));
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+  }
+  .fd-hero{ width:100%; max-width:720px; padding:56px 24px 40px; text-align:center; box-sizing:border-box; }
+  .fd-hero h1{ font-size:36px; line-height:1.15; font-weight:800; margin:0 0 16px; color:var(--text-hi); }
+  .fd-hero p{ font-size:15px; line-height:1.6; color:var(--text-mid); max-width:520px; margin:0 auto 28px; }
+  .fd-cta-row{ display:flex; gap:12px; justify-content:center; flex-wrap:wrap; }
+  .fd-cta-row .btn{ padding:12px 26px; font-size:14px; }
+  .fd-section{ width:100%; max-width:960px; padding:36px 24px; box-sizing:border-box; }
+  .fd-section h2{ font-size:20px; font-weight:700; color:var(--text-hi); text-align:center; margin:0 0 8px; }
+  .fd-section .fd-sub{ font-size:13px; color:var(--text-mid); text-align:center; max-width:480px; margin:0 auto 28px; }
+  .fd-features{ display:grid; grid-template-columns:repeat(3,1fr); gap:16px; }
+  .fd-feature{ background:var(--glass); border:1px solid var(--glass-brd); border-radius:16px; padding:18px; }
+  .fd-feature .fd-icon{ font-size:22px; margin-bottom:10px; }
+  .fd-feature h3{ font-size:14px; font-weight:700; color:var(--text-hi); margin:0 0 6px; }
+  .fd-feature p{ font-size:12px; line-height:1.5; color:var(--text-mid); margin:0; }
+  .fd-mock{ background:var(--glass); border:1px solid var(--glass-brd); border-radius:20px; padding:20px; display:grid; grid-template-columns:1fr 1.4fr; gap:16px; align-items:stretch; }
+  .fd-mock-list{ display:flex; flex-direction:column; gap:8px; }
+  .fd-mock-row{ display:flex; align-items:center; gap:8px; padding:8px; border-radius:10px; background:rgba(var(--tint-rgb),0.04); }
+  .fd-mock-dot{ width:26px; height:26px; border-radius:50%; background:linear-gradient(135deg, var(--ice), var(--fire)); flex-shrink:0; }
+  .fd-mock-lines{ flex:1; display:flex; flex-direction:column; gap:4px; }
+  .fd-mock-line{ height:6px; border-radius:3px; background:rgba(var(--tint-rgb),0.14); }
+  .fd-mock-line.short{ width:45%; }
+  .fd-mock-chat{ display:flex; flex-direction:column; justify-content:flex-end; gap:8px; }
+  .fd-bubble{ max-width:70%; padding:9px 13px; border-radius:14px; font-size:11px; color:var(--text-mid); background:rgba(var(--tint-rgb),0.06); border:1px solid var(--glass-brd); }
+  .fd-bubble.me{ align-self:flex-end; background:linear-gradient(135deg, rgba(0,212,255,0.16), rgba(255,106,0,0.12)); color:var(--text-hi); border-color:transparent; }
+  .fd-tiers{ display:grid; grid-template-columns:repeat(3,1fr); gap:16px; }
+  .fd-tier{ background:var(--glass); border:1px solid var(--glass-brd); border-radius:16px; padding:22px 18px; display:flex; flex-direction:column; gap:12px; }
+  .fd-tier.highlight{ border-color:var(--ice); box-shadow:0 0 0 1px rgba(0,212,255,0.25), 0 12px 30px rgba(0,0,0,0.3); }
+  .fd-tier h3{ font-size:15px; font-weight:700; color:var(--text-hi); margin:0; }
+  .fd-tier .fd-tier-tag{ font-size:11px; color:var(--text-mid); margin:-8px 0 0; }
+  .fd-tier ul{ list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:8px; }
+  .fd-tier li{ font-size:12px; color:var(--text-mid); padding-left:18px; position:relative; }
+  .fd-tier li::before{ content:'✓'; position:absolute; left:0; color:var(--ice); font-weight:700; }
+  .fd-footer{ width:100%; max-width:960px; padding:40px 24px 56px; text-align:center; box-sizing:border-box; }
+  .fd-footer .btn{ padding:12px 30px; }
+  .fd-footer .fd-fine{ margin-top:16px; font-size:11px; color:var(--text-low); }
+  @media (max-width:720px){
+    .fd-features{ grid-template-columns:1fr 1fr; }
+    .fd-tiers{ grid-template-columns:1fr; }
+    .fd-mock{ grid-template-columns:1fr; }
+    .fd-hero h1{ font-size:28px; }
+  }
+  @media (max-width:480px){
+    .fd-features{ grid-template-columns:1fr; }
+  }
+
   /* ================= APP SHELL ================= */
   #app{ position:fixed; inset:0; z-index:2; display:none; flex-direction:column; }
   #app.show{ display:flex; }
@@ -1281,10 +1344,133 @@
       if (el) el.style.display = 'block';
     });
   }
+
+  // Decide, before first paint, whether this visit sees the marketing front
+  // door or goes straight to the PIN lock screen like before it existed.
+  // Skipped for: branded custom-domain workspaces (their own branding on the
+  // lock screen already is a front door), a browser that's dismissed this
+  // before, and anyone arriving mid-flow via a link that already carries
+  // them somewhere specific (magic-link/SSO token, SSO error, the one-time
+  // admin bootstrap key) — marketing copy would just be noise in those cases.
+  (function(){
+    var params = new URLSearchParams(location.search);
+    var skip = !!window.__PARAPIN_BRANDING__
+      || localStorage.getItem('parapin_seen_frontdoor') === '1'
+      || params.has('token') || params.has('ssoError') || params.has('admin-key');
+    if (skip) document.documentElement.classList.add('no-frontdoor');
+  })();
 </script>
 
 <div id="bgfx"></div>
 <div class="grain"></div>
+
+<!-- ============ FRONT DOOR (marketing landing) ============ -->
+<!-- Sits in front of the PIN lock screen for a cold visit on the generic
+     app hosts, see the pre-paint decision script above for exactly when
+     it's skipped. Deliberately self-contained: its own small script block
+     right below, not dependent on the big app script finishing first, so
+     it stays fast and functional even before the rest of the app loads. -->
+<div id="frontDoor">
+  <div class="fd-nav">
+    <div class="fd-wordmark">PArA PIN</div>
+    <div class="btn" id="fdNavSignIn">Sign in</div>
+  </div>
+
+  <div class="fd-hero">
+    <h1>Encrypted team chat, calls, and HR — one app, one PIN.</h1>
+    <p>PArA PIN is a private workspace for your team: end-to-end encrypted messaging, video meetings with AI summaries, and the HR tools to run a whole company on. No phone number required — just a 7-digit PIN.</p>
+    <div class="fd-cta-row">
+      <div class="btn primary" id="fdHeroCta">Get started</div>
+      <div class="btn" id="fdHeroSecondary">Already have an account? Sign in</div>
+    </div>
+  </div>
+
+  <div class="fd-section">
+    <h2>Everything a real workspace needs</h2>
+    <div class="fd-sub">Not a chat app with extras bolted on — messaging, meetings, and HR share the same account, the same admin console, and the same security model.</div>
+    <div class="fd-features">
+      <div class="fd-feature"><div class="fd-icon">🔒</div><h3>End-to-end encrypted</h3><p>Chat messages are encrypted on-device. The server relays ciphertext only — never plaintext, never a backdoor.</p></div>
+      <div class="fd-feature"><div class="fd-icon">🎥</div><h3>Meetings & calls</h3><p>1:1 and group video calls, with optional AI transcripts, summaries, and action items after each meeting.</p></div>
+      <div class="fd-feature"><div class="fd-icon">🏢</div><h3>Workspaces & HR</h3><p>Org chart, leave requests, public holidays, compensation fields, and CSV bulk import for onboarding a whole roster at once.</p></div>
+      <div class="fd-feature"><div class="fd-icon">🛡️</div><h3>Enterprise security</h3><p>TOTP and passkey MFA, device trust with remote logout, new-location alerts, and Generic OIDC single sign-on.</p></div>
+      <div class="fd-feature"><div class="fd-icon">📊</div><h3>Admin analytics</h3><p>Usage and call analytics, a full audit log, granular per-role permissions, and retention/legal-hold controls.</p></div>
+      <div class="fd-feature"><div class="fd-icon">🔌</div><h3>API & webhooks</h3><p>A REST API and signed webhooks for roster and analytics data, so PArA plugs into whatever you already run.</p></div>
+    </div>
+  </div>
+
+  <div class="fd-section">
+    <h2>Built for how a team actually works</h2>
+    <div class="fd-sub">A quick look at what's inside.</div>
+    <div class="fd-mock">
+      <div class="fd-mock-list">
+        <div class="fd-mock-row"><div class="fd-mock-dot"></div><div class="fd-mock-lines"><div class="fd-mock-line"></div><div class="fd-mock-line short"></div></div></div>
+        <div class="fd-mock-row"><div class="fd-mock-dot"></div><div class="fd-mock-lines"><div class="fd-mock-line"></div><div class="fd-mock-line short"></div></div></div>
+        <div class="fd-mock-row"><div class="fd-mock-dot"></div><div class="fd-mock-lines"><div class="fd-mock-line"></div><div class="fd-mock-line short"></div></div></div>
+        <div class="fd-mock-row"><div class="fd-mock-dot"></div><div class="fd-mock-lines"><div class="fd-mock-line"></div><div class="fd-mock-line short"></div></div></div>
+      </div>
+      <div class="fd-mock-chat">
+        <div class="fd-bubble">Standup notes are in the workspace doc</div>
+        <div class="fd-bubble me">Got it, reviewing now</div>
+        <div class="fd-bubble">Meeting summary is ready — 3 action items</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="fd-section">
+    <h2>Free to start, room to grow</h2>
+    <div class="fd-sub">Personal accounts are free. Premium and Workspace plans add the team and enterprise features above — see exact pricing once you're signed in.</div>
+    <div class="fd-tiers">
+      <div class="fd-tier">
+        <h3>Free</h3>
+        <div class="fd-tier-tag">For anyone, no workspace needed</div>
+        <ul>
+          <li>Encrypted 1:1 and group chats</li>
+          <li>Voice & video calls</li>
+          <li>PIN + device-trust login</li>
+        </ul>
+      </div>
+      <div class="fd-tier highlight">
+        <h3>Premium</h3>
+        <div class="fd-tier-tag">Per person, cancel anytime</div>
+        <ul>
+          <li>Bigger file & media uploads</li>
+          <li>Cross-device sync</li>
+          <li>AI smart replies</li>
+          <li>Premium themes</li>
+        </ul>
+      </div>
+      <div class="fd-tier">
+        <h3>Workspace</h3>
+        <div class="fd-tier-tag">For a whole team or company</div>
+        <ul>
+          <li>Org chart, HR & leave tools</li>
+          <li>SSO, MFA, device trust</li>
+          <li>Admin analytics & audit log</li>
+          <li>API access & webhooks</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="fd-footer">
+    <div class="btn primary" id="fdFooterCta">Get started with PArA PIN</div>
+    <div class="fd-fine">Already part of a workspace? Sign in with the same button — you'll land on your team's usual PIN screen.</div>
+  </div>
+</div>
+<script>
+  document.addEventListener('DOMContentLoaded', function(){
+    var fd = document.getElementById('frontDoor');
+    if (!fd) return;
+    function enterApp(){
+      localStorage.setItem('parapin_seen_frontdoor', '1');
+      document.documentElement.classList.add('no-frontdoor');
+    }
+    ['fdNavSignIn', 'fdHeroCta', 'fdHeroSecondary', 'fdFooterCta'].forEach(function(id){
+      var el = document.getElementById(id);
+      if (el) el.addEventListener('click', enterApp);
+    });
+  });
+</script>
 
 <!-- ============ LOCK SCREEN ============ -->
 <div id="lock">
@@ -1806,6 +1992,13 @@
           </label>
           <div class="btn primary" id="ssoSaveBtn">Save SSO settings</div>
           <div class="hint" id="ssoSaveStatus" style="display:none; margin-top:8px;"></div>
+        </div>
+        <div id="workspaceBillingSection" style="display:none; border-top:1px solid var(--border); padding-top:12px; margin-top:12px;">
+          <div class="settings-row">
+            <span>Billing</span>
+            <span id="workspaceBillingStatus">—</span>
+          </div>
+          <div class="btn settings-row-action" id="workspaceBillingCancelBtn" style="display:none;">Cancel subscription</div>
         </div>
       </div>
       <div class="contact-pick" id="workspaceMembersList" style="max-height:none;"></div>
@@ -2354,6 +2547,9 @@
         </div>
         <div class="settings-row settings-row-action" id="settingsPremiumUpgradeBtn">
           <span>Upgrade to Premium</span><span>✨</span>
+        </div>
+        <div class="settings-row settings-row-action" id="settingsPremiumCancelBtn" style="display:none;">
+          <span>Cancel subscription</span><span>✕</span>
         </div>
         <div class="hint">Bigger file uploads today. Cross-device sync, AI features, and premium themes land here as they ship.</div>
       </section>
@@ -4193,6 +4389,22 @@
     openModal('workspaceLockedOverlay');
   }
 
+  async function refreshWorkspaceBillingStatus(orgId){
+    const statusEl = document.getElementById('workspaceBillingStatus');
+    const cancelBtn = document.getElementById('workspaceBillingCancelBtn');
+    const r = await apiFetch(`/billing/status?orgId=${encodeURIComponent(orgId)}`);
+    const status = (r.ok && r.body && r.body.billingStatus) || 'none';
+    statusEl.textContent = status === 'active' ? 'Active' : status === 'past_due' ? 'Payment issue' : status === 'canceled' ? 'Canceled' : 'Not active';
+    cancelBtn.style.display = status === 'active' ? 'flex' : 'none';
+    cancelBtn.dataset.orgId = orgId;
+  }
+  document.getElementById('workspaceBillingCancelBtn').addEventListener('click', async ()=>{
+    const orgId = document.getElementById('workspaceBillingCancelBtn').dataset.orgId;
+    if (!confirm('Cancel this workspace\'s subscription? This takes effect immediately — there\'s no grace period, so the workspace loses paid access right away.')) return;
+    const r = await apiFetch('/org/billing/cancel', { method: 'POST', body: JSON.stringify({ orgId }) });
+    if (r.ok) refreshWorkspaceBillingStatus(orgId);
+    else alert("Couldn't cancel. Try again.");
+  });
   document.getElementById('workspaceReactivateBtn').addEventListener('click', async ()=>{
     const btn = document.getElementById('workspaceReactivateBtn');
     const orgId = btn.dataset.orgId;
@@ -4325,6 +4537,12 @@
       document.getElementById('workspaceCustomDomainInput').value = org.customDomain || '';
       loadSsoSettings(org.id);
     }
+    // Cancel needs true org-admin server-side (isOrgAdmin), a manage_workspace
+    // grant alone isn't enough to disable the whole workspace's billing, so
+    // this is gated tighter than the branding fields just above.
+    const billingSection = document.getElementById('workspaceBillingSection');
+    billingSection.style.display = (org.id && org.isAdmin) ? 'block' : 'none';
+    if (org.id && org.isAdmin) refreshWorkspaceBillingStatus(org.id);
     document.getElementById('workspaceInviteError').style.display = 'none';
     document.getElementById('workspaceInvitePinInput').value = '';
     document.getElementById('workspaceInviteNameInput').value = '';
@@ -8596,17 +8814,24 @@
   async function refreshPremiumStatus(){
     const statusEl = document.getElementById('settingsPremiumStatus');
     const upgradeBtn = document.getElementById('settingsPremiumUpgradeBtn');
+    const cancelBtn = document.getElementById('settingsPremiumCancelBtn');
     const r = await apiFetch('/billing/premium/status');
     const status = (r.ok && r.body && r.body.premiumStatus) || 'none';
-    if (status === 'lifetime'){ statusEl.textContent = 'Premium (lifetime)'; upgradeBtn.style.display = 'none'; }
-    else if (status === 'active'){ statusEl.textContent = 'Premium (monthly)'; upgradeBtn.style.display = 'none'; }
-    else if (status === 'past_due'){ statusEl.textContent = 'Premium (payment issue)'; upgradeBtn.style.display = 'flex'; }
-    else { statusEl.textContent = 'Free'; upgradeBtn.style.display = 'flex'; }
+    if (status === 'lifetime'){ statusEl.textContent = 'Premium (lifetime)'; upgradeBtn.style.display = 'none'; cancelBtn.style.display = 'none'; }
+    else if (status === 'active'){ statusEl.textContent = 'Premium (monthly)'; upgradeBtn.style.display = 'none'; cancelBtn.style.display = 'flex'; }
+    else if (status === 'past_due'){ statusEl.textContent = 'Premium (payment issue)'; upgradeBtn.style.display = 'flex'; cancelBtn.style.display = 'none'; }
+    else { statusEl.textContent = 'Free'; upgradeBtn.style.display = 'flex'; cancelBtn.style.display = 'none'; }
   }
   document.getElementById('settingsPremiumUpgradeBtn').addEventListener('click', ()=>{
     document.getElementById('premiumUpgradeEmailInput').value = myEmail || '';
     document.getElementById('premiumUpgradeError').style.display = 'none';
     openModal('premiumUpgradeOverlay');
+  });
+  document.getElementById('settingsPremiumCancelBtn').addEventListener('click', async ()=>{
+    if (!confirm('Cancel PArA Premium? This takes effect immediately — there is no grace period, so bigger uploads and other Premium features stop right away.')) return;
+    const r = await apiFetch('/billing/premium/cancel', { method: 'POST' });
+    if (r.ok) refreshPremiumStatus();
+    else alert("Couldn't cancel. Try again.");
   });
   async function startPremiumCheckout(path){
     const email = document.getElementById('premiumUpgradeEmailInput').value.trim();

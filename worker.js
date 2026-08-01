@@ -1197,6 +1197,39 @@ async function paystackInitTransaction(env, { email, orgId, userId, purpose, cal
   return { ok: true, authorizationUrl: respBody.data.authorization_url, reference: respBody.data.reference };
 }
 
+// Cancels a Paystack subscription from this end (as opposed to the person
+// canceling from Paystack's own hosted customer portal, or a payment simply
+// failing — both of which already reach this app via the subscription.disable
+// webhook and /billing/deactivate above). Paystack's own /subscription/disable
+// endpoint requires an `email_token` alongside the subscription code, which
+// isn't something this app stores, it has to be fetched fresh from Paystack's
+// GET /subscription/:code first. Cancelling here still ends up going through
+// the exact same subscription.disable webhook Paystack sends either way, this
+// function just triggers that from inside the app instead of waiting for
+// someone to find Paystack's own portal.
+async function paystackDisableSubscription(env, subscriptionCode) {
+  if (!env.PAYSTACK_SECRET_KEY) return { ok: false, error: 'paystack_not_configured' };
+  if (!subscriptionCode) return { ok: false, error: 'no_subscription_on_file' };
+  const getRes = await fetch(`https://api.paystack.co/subscription/${encodeURIComponent(subscriptionCode)}`, {
+    headers: { 'Authorization': `Bearer ${env.PAYSTACK_SECRET_KEY}` },
+  });
+  const getBody = await getRes.json().catch(() => ({}));
+  const emailToken = getBody && getBody.data && getBody.data.email_token;
+  if (!getRes.ok || !getBody.status || !emailToken) {
+    return { ok: false, error: (getBody && getBody.message) || 'could_not_load_subscription' };
+  }
+  const disableRes = await fetch('https://api.paystack.co/subscription/disable', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${env.PAYSTACK_SECRET_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code: subscriptionCode, token: emailToken }),
+  });
+  const disableBody = await disableRes.json().catch(() => ({}));
+  if (!disableRes.ok || !disableBody.status) {
+    return { ok: false, error: (disableBody && disableBody.message) || 'disable_failed' };
+  }
+  return { ok: true };
+}
+
 export class Registry {
   constructor(state, env) {
     this.state = state;
@@ -2322,6 +2355,39 @@ export class Registry {
       return json({ ok: true, orgId });
     }
 
+    // Self-serve cancel, admin-only (isOrgAdmin specifically, not just a
+    // manage_workspace grant — same higher bar as /org/permissions/set,
+    // this is a financial/destructive action, not routine workspace
+    // upkeep). Locks the workspace immediately rather than "at the end of
+    // the current billing period" — this app's billingStatus is a plain
+    // active/not switch with no proration concept behind it, so the UI
+    // copy asking to confirm this needs to say exactly that, not imply a
+    // grace period that doesn't actually exist here.
+    if (request.method === 'POST' && url.pathname === '/org/billing/cancel') {
+      const { pinHash, orgId } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgAdmin(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+      const org = await this.state.storage.get(`org:${orgId}`);
+      if (!org) return json({ error: 'not_found' }, 404);
+      if (org.billingStatus !== 'active') return json({ error: 'not_active' }, 400);
+      if (!org.paystackSubscriptionCode) return json({ error: 'no_subscription_on_file' }, 400);
+      const result = await paystackDisableSubscription(this.env, org.paystackSubscriptionCode);
+      if (!result.ok) return json({ error: result.error || 'cancel_failed' }, 502);
+      // Optimistic local update rather than waiting on Paystack's own
+      // subscription.disable webhook to come back around (it will too,
+      // that's fine, /billing/deactivate above is idempotent either way) —
+      // the person who just clicked "cancel" shouldn't see the workspace
+      // sit there looking active for however long that round-trip takes.
+      org.billingStatus = 'canceled';
+      await this.state.storage.put(`org:${orgId}`, org);
+      await appendAuditLog(this.state.storage, orgId, {
+        actorId: me.id, actorName: me.displayName || 'Someone', action: 'billing_deactivated',
+        details: 'Subscription canceled from the app',
+      });
+      return json({ ok: true });
+    }
+
     // ---- Premium (per-user) billing ----
     // Mirrors the workspace billing endpoints above almost exactly, just
     // keyed by userId instead of orgId, and stored on the user record
@@ -2378,6 +2444,24 @@ export class Registry {
         await this.state.storage.put(`user:${pinHash}`, user);
       }
       return json({ ok: true, userId });
+    }
+
+    // Self-serve, own-account-only (no permission check beyond "is this
+    // your own pinHash" — nobody else's business to cancel your Premium).
+    // Lifetime has no subscription to cancel, same reasoning as the
+    // deactivate handler just above.
+    if (request.method === 'POST' && url.pathname === '/billing/premium/cancel') {
+      const { pinHash } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      if (user.premiumStatus === 'lifetime') return json({ error: 'lifetime_not_cancelable' }, 400);
+      if (user.premiumStatus !== 'active') return json({ error: 'not_active' }, 400);
+      if (!user.premiumSubscriptionCode) return json({ error: 'no_subscription_on_file' }, 400);
+      const result = await paystackDisableSubscription(this.env, user.premiumSubscriptionCode);
+      if (!result.ok) return json({ error: result.error || 'cancel_failed' }, 502);
+      user.premiumStatus = 'none';
+      await this.state.storage.put(`user:${pinHash}`, user);
+      return json({ ok: true });
     }
 
     if (request.method === 'GET' && url.pathname === '/billing/premium/status') {
@@ -3464,6 +3548,17 @@ export class Registry {
       if (!q) return json({ error: 'missing_question' }, 400);
       if (!this.env.AI) return json({ error: 'ai_not_configured' }, 501);
 
+      // Each call is a real Cloudflare AI inference (real cost, real latency),
+      // and unlike the PIN-brute-force limiters above this isn't guarding a
+      // security boundary, it's guarding a wallet: nothing stops one person
+      // (or a bug in the client retry loop) from hammering this in a tight
+      // loop otherwise. 20 questions per 10 minutes is generous for an actual
+      // person asking HR questions, not for a script.
+      const aiRl = await checkRateLimit(this.state.storage, `ai-hr:${me.id}`, {
+        maxAttempts: 20, windowMs: 10 * 60 * 1000, lockoutMs: 10 * 60 * 1000,
+      });
+      if (!aiRl.allowed) return json({ error: 'rate_limited', retryAfterMs: aiRl.retryAfterMs }, 429);
+
       const employee = await getEmployee(this.state.storage, orgId, me.id);
       const ledger = await getLeaveLedger(this.state.storage, orgId, me.id);
       const entitlements = await getOrgLeaveEntitlements(this.state.storage, orgId);
@@ -3533,6 +3628,15 @@ export class Registry {
       if (!me) return json({ error: 'not_registered' }, 401);
       if (!this.env.AI) return json({ error: 'ai_not_configured' }, 501);
       if (!Array.isArray(messages) || !messages.length) return json({ error: 'missing_messages' }, 400);
+
+      // Same wallet-guard reasoning as /org/hr/assistant above. Smart Replies
+      // can fire once per received message while the toggle is on, so this
+      // allows a noticeably higher ceiling than the HR assistant (a busy chat
+      // is normal usage here, not abuse) while still capping runaway loops.
+      const aiRl = await checkRateLimit(this.state.storage, `ai-replies:${me.id}`, {
+        maxAttempts: 60, windowMs: 10 * 60 * 1000, lockoutMs: 5 * 60 * 1000,
+      });
+      if (!aiRl.allowed) return json({ error: 'rate_limited', retryAfterMs: aiRl.retryAfterMs }, 429);
 
       const recent = messages.slice(-5).map((m) => ({
         from: m.fromMe ? 'me' : 'them',
@@ -3868,6 +3972,19 @@ export class Registry {
       keys[idx].lastUsedAt = Date.now();
       await this.state.storage.put('apiKeys', keys);
       return json({ ok: true, keyId: keys[idx].id, keyName: keys[idx].name });
+    }
+
+    // Generic rate-limit check, callable from the outer worker's fetch()
+    // handler (which has no Durable Object storage of its own) for endpoints
+    // that live outside this class entirely — currently just the meeting
+    // summarizer, see /api/meeting/summarize. Thin wrapper around the same
+    // checkRateLimit used for PIN brute-force defense above, just exposed
+    // over the internal-only boundary the rest of this DO already uses.
+    if (request.method === 'POST' && url.pathname === '/internal/check-rate-limit') {
+      const { key, maxAttempts, windowMs, lockoutMs } = await request.json();
+      if (!key || !maxAttempts || !windowMs || !lockoutMs) return json({ allowed: true });
+      const rl = await checkRateLimit(this.state.storage, key, { maxAttempts, windowMs, lockoutMs });
+      return json(rl);
     }
 
     // ---- SSO (OIDC) internal handlers ----
@@ -5339,6 +5456,20 @@ export default {
         const memberCheck = await memberRes.json();
         if (!memberCheck.ok) return json({ error: 'workspace_required' }, 403);
 
+        // Whisper transcription + Llama summarization on a full meeting
+        // recording is the priciest AI call in this app by far, same
+        // wallet-guard reasoning as the HR assistant/Smart Replies limiters,
+        // just enforced through the internal endpoint above since this
+        // handler has no DO storage of its own to check against directly.
+        const aiRl = await registryStub.fetch('https://internal/internal/check-rate-limit', {
+          method: 'POST',
+          body: JSON.stringify({
+            key: `ai-meeting:${who.userId || pinHash}`,
+            maxAttempts: 15, windowMs: 60 * 60 * 1000, lockoutMs: 30 * 60 * 1000,
+          }),
+        }).then((r) => r.json());
+        if (!aiRl.allowed) return json({ error: 'rate_limited', retryAfterMs: aiRl.retryAfterMs }, 429);
+
         const mediaId = body.mediaId;
         if (!mediaId || typeof mediaId !== 'string') return json({ error: 'missing_media_id' }, 400);
 
@@ -6264,6 +6395,17 @@ export default {
         return json({ ok: true, orgId, authorizationUrl: pay.authorizationUrl });
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/org/billing/cancel') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const { orgId } = await request.json().catch(() => ({}));
+        if (!orgId) return json({ error: 'missing_org_id' }, 400);
+        return registryStub.fetch('https://internal/org/billing/cancel', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, orgId }),
+        });
+      }
+
       // ---- Premium (per-user, not per-workspace) billing ----
       // A personal upgrade: larger uploads today, cross-device sync/AI/themes
       // as those actually ship. Two ways to buy it: recurring monthly (a
@@ -6322,6 +6464,15 @@ export default {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
         return registryStub.fetch(`https://internal/billing/premium/status?pinHash=${encodeURIComponent(pinHash)}`);
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/billing/premium/cancel') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        return registryStub.fetch('https://internal/billing/premium/cancel', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash }),
+        });
       }
 
       if (request.method === 'GET' && url.pathname === '/api/billing/status') {
