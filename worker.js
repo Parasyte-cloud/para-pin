@@ -2653,9 +2653,32 @@ export class Registry {
       // but isOrgMember/isOrgAdmin won't actually let anyone use it (chats,
       // roster, Meeting Room, all of it) until the Paystack webhook flips
       // this to 'active'. See isOrgBillingActive.
-      const org = { id: orgId, name: name.trim().slice(0, 60), logoUrl: null, allowEmailAuth: false, emailDomain: null, createdAt: Date.now(), createdBy: me.id, admins: [me.id], billingStatus: 'pending' };
+      //
+      // Exception: the platform's own admins (the global `admins` list that
+      // already gates the Admin Console — a different, platform-wide list
+      // from `org.admins` below, which is per-workspace) skip billing
+      // entirely and get an active workspace immediately. This is the
+      // account owner creating workspaces for demos/testing/internal use,
+      // not a way for a regular customer to avoid paying — every other
+      // account still goes through /billing/checkout-new's Paystack flow
+      // untouched, this only short-circuits it when the creator is already
+      // trusted with the Admin Console.
+      const platformAdmins = (await this.state.storage.get('admins')) || [];
+      const skipBilling = platformAdmins.includes(me.id);
+      const org = {
+        id: orgId, name: name.trim().slice(0, 60), logoUrl: null, allowEmailAuth: false, emailDomain: null,
+        createdAt: Date.now(), createdBy: me.id, admins: [me.id],
+        billingStatus: skipBilling ? 'active' : 'pending',
+        billingActivatedAt: skipBilling ? Date.now() : null,
+      };
       await this.state.storage.put(`org:${orgId}`, org);
       await addUserToOrg(this.state.storage, orgId, me.id);
+      if (skipBilling) {
+        await appendAuditLog(this.state.storage, orgId, {
+          actorId: me.id, actorName: me.displayName || 'Someone', action: 'billing_activated',
+          details: 'Billing skipped (platform admin)',
+        });
+      }
       return json({ org });
     }
 
@@ -7057,6 +7080,13 @@ export default {
         const createBody = await createRes.json();
         if (!createRes.ok || !createBody.org) return json(createBody, createRes.status);
         const orgId = createBody.org.id;
+        // A platform admin's workspace comes back already 'active' (see
+        // /org/create's skipBilling branch) — nothing left to do, skip
+        // Paystack entirely rather than charging the account owner to
+        // create their own demo/test workspaces.
+        if (createBody.org.billingStatus === 'active') {
+          return json({ ok: true, orgId, skippedPayment: true });
+        }
         const pay = await paystackInitTransaction(env, {
           email,
           orgId,

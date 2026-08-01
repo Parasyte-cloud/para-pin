@@ -4419,6 +4419,23 @@
         manageBtn.textContent = org.isAdmin ? 'Manage' : 'Members';
         manageBtn.onclick = (e)=>{ e.stopPropagation(); openWorkspaceMembers(org); };
         row.appendChild(manageBtn);
+
+        const leaveBtn = document.createElement('div');
+        leaveBtn.className = 'btn';
+        leaveBtn.style.padding = '4px 10px';
+        leaveBtn.style.fontSize = '11.5px';
+        leaveBtn.style.marginLeft = '6px';
+        leaveBtn.textContent = 'Leave';
+        leaveBtn.onclick = async (e)=>{
+          e.stopPropagation();
+          if (!confirm(`Leave "${org.name}"? You can only rejoin if an admin invites you back.`)) return;
+          const r = await apiFetch('/org/leave', { method: 'POST', body: JSON.stringify({ orgId: org.id }) });
+          if (!r.ok){ showSessionBanner("Couldn't leave that workspace. Try again."); return; }
+          myOrgs = myOrgs.filter(o => o.id !== org.id);
+          if ((activeOrgId || null) === org.id) switchWorkspace(null);
+          renderWorkspaceList();
+        };
+        row.appendChild(leaveBtn);
       }
       row.onclick = ()=> switchWorkspace(org.id || null);
       list.appendChild(row);
@@ -4524,10 +4541,24 @@
     saveBtn.textContent = 'Redirecting…';
     const r = await apiFetch('/billing/checkout-new', { method: 'POST', body: JSON.stringify({ name, email }) });
     saveBtn.textContent = 'Continue to payment';
-    if (!r.ok || !r.body.authorizationUrl){
+    if (!r.ok){
       errEl.textContent = r.body && r.body.error === 'paystack_plan_not_configured'
         ? 'Billing isn\'t set up yet, ask your admin to configure Paystack.'
         : 'Could not start checkout. Try again.';
+      errEl.style.display = 'block';
+      return;
+    }
+    // Platform admins get an already-active workspace back with no
+    // Paystack redirect needed (see /org/create's skipBilling branch) — a
+    // full reload is the simplest way to pick up the new workspace in
+    // myOrgs, the switcher, everything, same end state as coming back from
+    // a real Paystack redirect, just without the round trip.
+    if (r.body.skippedPayment){
+      window.location.reload();
+      return;
+    }
+    if (!r.body.authorizationUrl){
+      errEl.textContent = 'Could not start checkout. Try again.';
       errEl.style.display = 'block';
       return;
     }
