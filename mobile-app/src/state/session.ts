@@ -12,7 +12,7 @@ import * as Crypto from 'expo-crypto';
 import * as LocalAuthentication from 'expo-local-authentication';
 import { create } from 'zustand';
 import { apiFetch } from '../api/client';
-import type { ApiErrorBody, ChatSummary, OrgSummary } from '../types';
+import type { ApiErrorBody, ChatMessage, ChatSummary, OrgSummary } from '../types';
 
 const DEVICE_ID_KEY = 'parapin_device_id';
 const PIN_HASH_KEY = 'parapin_pin_hash';
@@ -64,7 +64,9 @@ interface SessionState {
   isAdmin: boolean;
   orgs: OrgSummary[];
   chats: ChatSummary[];
-  summaries: Record<string, { unreadCount?: number; lastMessageAt?: number | null }>;
+  // See types.ts's SessionResponse['summaries'] comment — lastMessage was
+  // always present in the server response, just never typed through here.
+  summaries: Record<string, { unreadCount?: number; lastMessageAt?: number | null; lastMessage?: ChatMessage | null }>;
   pinnedChatIds: string[];
 
   hydrate: () => Promise<void>;

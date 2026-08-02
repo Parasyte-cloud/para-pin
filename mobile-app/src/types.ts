@@ -37,7 +37,12 @@ export interface SessionResponse {
   mustChangePin: boolean;
   trustedDeviceCount: number;
   chats: ChatSummary[];
-  summaries: Record<string, { unreadCount?: number; lastMessageAt?: number | null }>;
+  // `lastMessage` was already coming back in this response (worker.js's
+  // /session handler builds it per-chat via the ChatRoom DO's /summary,
+  // worker.js:1972-1981) but this type only ever declared the two fields
+  // the chat list actually used — the raw (still-encrypted) last message
+  // was there at runtime the whole time, just never typed/read.
+  summaries: Record<string, { unreadCount?: number; lastMessageAt?: number | null; lastMessage?: ChatMessage | null }>;
   pinnedChatIds: string[];
   orgs: OrgSummary[];
 }

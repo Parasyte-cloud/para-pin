@@ -24,7 +24,7 @@ function sortByTs(msgs: ChatMessage[]): ChatMessage[] {
 // multi-device shipped) falls back to the legacy pairwise DM key. See
 // ensureLegacyDmKey's own comment for why that fallback only actually
 // succeeds if mobile happens to be an account's very first device.
-async function decryptWithFallback<T>(chat: ChatSummary, primaryKey: Uint8Array, fn: (k: Uint8Array) => T): Promise<T> {
+export async function decryptWithFallback<T>(chat: ChatSummary, primaryKey: Uint8Array, fn: (k: Uint8Array) => T): Promise<T> {
   try {
     return fn(primaryKey);
   } catch (e) {

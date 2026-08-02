@@ -5,6 +5,7 @@ import { useTheme } from '../../src/hooks/useTheme';
 import { useSessionStore } from '../../src/state/session';
 import { initials, colorFromString } from '../../src/utils/avatar';
 import { resolveNames, getCachedName } from '../../src/state/names';
+import { resolvePreview, getCachedPreview } from '../../src/state/previews';
 import type { ChatSummary } from '../../src/types';
 
 // Mirrors index.html's chatDisplayName() (index.html:4030-4034): a DM's
@@ -29,6 +30,8 @@ export default function ChatsScreen() {
   // synchronous, non-reactive Map read (see src/state/names.ts), so
   // nothing re-renders on its own once names come back without this.
   const [namesVersion, setNamesVersion] = useState(0);
+  // Same pattern for decrypted preview text (src/state/previews.ts).
+  const [previewsVersion, setPreviewsVersion] = useState(0);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -57,6 +60,24 @@ export default function ChatsScreen() {
     };
   }, [chats, myUserId]);
 
+  // Decrypts each chat's last message for the preview line — the data
+  // (`summaries[id].lastMessage`) was already coming back from /session,
+  // see types.ts's comment; this just decrypts and caches it per chat,
+  // same idea as ensureNamesLoaded() above but for message content instead
+  // of profile names. Each resolvePreview() call is itself a no-op once
+  // cached (keyed by chatId+messageId), so re-running this on every
+  // summaries change is cheap.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      await Promise.all(chats.map((c) => resolvePreview(c, summaries[c.id]?.lastMessage, myUserId)));
+      if (!cancelled) setPreviewsVersion((v) => v + 1);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [chats, summaries, myUserId]);
+
   const sorted = useMemo(() => {
     const pinnedSet = new Set(pinnedChatIds);
     return [...chats].sort((a, b) => {
@@ -71,6 +92,8 @@ export default function ChatsScreen() {
     ({ item }: { item: ChatSummary }) => {
       const name = displayName(item, myUserId);
       const unread = summaries[item.id]?.unreadCount ?? 0;
+      const lastMessage = summaries[item.id]?.lastMessage;
+      const preview = getCachedPreview(item.id, lastMessage?.id) ?? (lastMessage ? 'Decrypting…' : 'No messages yet');
       const avatarColor = colorFromString(item.id, theme.ice, theme.fire);
       return (
         <Pressable
@@ -85,11 +108,7 @@ export default function ChatsScreen() {
               {name}
             </Text>
             <Text style={[styles.preview, { color: theme.textLow }]} numberOfLines={1}>
-              {/* Messages are end-to-end encrypted server-side (see
-                  worker.js's ChatRoom DO comments) — a plaintext preview
-                  requires the on-device E2EE key work planned for Phase 2,
-                  not yet implemented here. */}
-              Encrypted message
+              {preview}
             </Text>
           </View>
           {unread > 0 && (
@@ -107,7 +126,7 @@ export default function ChatsScreen() {
     // that cache in. myUserId is a real dependency: which member counts as
     // "the other one" depends on it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [summaries, theme, myUserId, namesVersion]
+    [summaries, theme, myUserId, namesVersion, previewsVersion]
   );
 
   return (
@@ -116,7 +135,7 @@ export default function ChatsScreen() {
         data={sorted}
         keyExtractor={(item) => item.id}
         renderItem={renderItem}
-        extraData={namesVersion}
+        extraData={`${namesVersion}:${previewsVersion}`}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.ice} />
         }

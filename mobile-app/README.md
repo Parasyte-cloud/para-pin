@@ -774,4 +774,31 @@ None of these four required a new dependency or lockfile change.
 Verified: `tsc --noEmit` clean, `node --check worker.js` clean (index.html's
 resync-button JS was checked by hand — no build step for that file).
 
+## Chat list preview text ("Encrypted message" for every row)
+
+Closed the one gap explicitly left open in the previous round. Turned out
+to need far less than expected: `POST /session`'s response already
+included `summaries[chatId].lastMessage` — the raw (still-encrypted) last
+message per chat, built server-side via each `ChatRoom` DO's `/summary`
+route (worker.js:1972-1981) specifically so a client doesn't have to
+fetch full history just to render a list — but neither `types.ts`'s
+`SessionResponse` nor `state/session.ts`'s store typed that field, so it
+was sitting in the response, at runtime, completely unused.
+
+New `src/state/previews.ts` decrypts and caches it per chat (mirrors
+web's `lastMsg()`/`previewText()`, index.html:4054-4075: same "You: "
+prefix, same deleted/protected/attachment-kind copy, same privacy rule
+that a protected message never shows in a preview even to whoever sent
+it), reusing `state/messages.ts`'s existing `decryptWithFallback` (now
+exported) so this takes the identical legacy-DM-key fallback path full
+message decryption does. `app/(tabs)/index.tsx` resolves every visible
+chat's preview in one `useEffect`, same `namesVersion`-style manual
+re-render bump as the name-resolution fix from the previous round.
+
+A chat whose key isn't resolvable yet on this device (see the "Re-sync
+keys" fix from the previous round) now honestly shows "Decrypting…"
+instead of a stuck "Encrypted message" — same underlying limitation, just
+truthful about what's actually happening instead of a permanent-looking
+placeholder.
+
 Verified: `tsc --noEmit` clean.
