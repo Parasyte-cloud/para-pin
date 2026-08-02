@@ -71,10 +71,10 @@ interface SessionState {
   submitPin: (
     pin: string,
     opts?: { displayName?: string }
-  ) => Promise<{ ok: true } | { ok: false; error: ApiErrorBody | null }>;
+  ) => Promise<{ ok: true } | { ok: false; error: ApiErrorBody | null; status: number }>;
   refreshSession: () => Promise<boolean>;
   unlockWithBiometric: () => Promise<boolean>;
-  unlockWithPin: (pin: string) => Promise<{ ok: true } | { ok: false; error: ApiErrorBody | null }>;
+  unlockWithPin: (pin: string) => Promise<{ ok: true } | { ok: false; error: ApiErrorBody | null; status: number }>;
   setBiometricEnabled: (enabled: boolean) => Promise<boolean>;
   logout: () => Promise<void>;
 }
@@ -158,12 +158,24 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set({ isLoading: true });
     const res = await apiFetch('/session', {
       method: 'POST',
-      skipAuth: true, // the hash we're sending IS the credential being established
+      // worker.js's authHash() (see worker.js:830) only ever reads the
+      // X-Para-Pin-Hash header or a ?pinHash= query param — it never looks
+      // at the request body. apiFetch's own automatic header injection
+      // only pulls from the ALREADY-STORED session pinHash, which doesn't
+      // exist yet on a fresh submit (this hash IS what's about to become
+      // that stored value). The old `skipAuth: true` here just skipped
+      // sending the header entirely and relied on the body alone, which
+      // the server never looks at for auth — every submit was rejected
+      // with a 401 missing_pin_hash before ever reaching real account
+      // logic. Send it explicitly instead, same as web's initSession()
+      // (index.html:3235-3240) setting myPinHash before its own /session
+      // call so its header-injection has something to pick up.
+      headers: { 'X-Para-Pin-Hash': pinHash },
       body: JSON.stringify({ pinHash, deviceId, displayName: opts?.displayName }),
     });
     set({ isLoading: false });
     if (!res.ok) {
-      return { ok: false, error: res.body };
+      return { ok: false, error: res.body, status: res.status };
     }
     await SecureStore.setItemAsync(PIN_HASH_KEY, pinHash);
     const body = res.body as any;
@@ -196,16 +208,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // server rate-limit attempt on it — this is a LOCAL re-entry check
       // only (mirrors the web app's local vault gate); the real
       // authenticated request below still uses the correct stored hash.
-      return { ok: false, error: { error: 'wrong_pin' } };
+      return { ok: false, error: { error: 'wrong_pin' }, status: 0 };
     }
     set({ isLoading: true });
     const res = await apiFetch('/session', {
       method: 'POST',
-      skipAuth: true,
+      // Same fix as submitPin above — send the hash explicitly rather than
+      // relying on skipAuth's now-removed body-only behavior, which the
+      // server never actually reads for auth.
+      headers: { 'X-Para-Pin-Hash': attemptedHash },
       body: JSON.stringify({ pinHash: attemptedHash, deviceId: deviceId ?? (await getOrCreateDeviceId()) }),
     });
     set({ isLoading: false });
-    if (!res.ok) return { ok: false, error: res.body };
+    if (!res.ok) return { ok: false, error: res.body, status: res.status };
     const body = res.body as any;
     set({
       isLocked: false,

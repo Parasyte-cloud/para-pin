@@ -22,21 +22,31 @@ export const API_BASE_URL =
 
 interface ApiFetchOptions extends Omit<RequestInit, 'body'> {
   body?: string | FormData | Blob;
-  skipAuth?: boolean;
 }
 
 export async function apiFetch<T = unknown>(
   path: string,
   opts: ApiFetchOptions = {}
 ): Promise<ApiResult<T>> {
-  const { skipAuth, headers: optHeaders, ...rest } = opts;
+  const { headers: optHeaders, ...rest } = opts;
   const pinHash = useSessionStore.getState().pinHash;
 
   const headers: Record<string, string> = {
     'content-type': 'application/json',
     ...(optHeaders as Record<string, string> | undefined),
   };
-  if (pinHash && !skipAuth) headers['X-Para-Pin-Hash'] = pinHash;
+  // Only fill in from the stored session pinHash if the caller didn't
+  // already set the header explicitly — submitPin/unlockWithPin do, with
+  // their freshly computed hash, since the store doesn't have it yet
+  // (submitPin is establishing a brand-new credential; unlockWithPin is
+  // re-entering with a just-typed one). There used to be a `skipAuth` flag
+  // here that just omitted the header entirely for those two calls instead
+  // — worker.js's authHash() (worker.js:830) only ever reads this header
+  // or a ?pinHash= query param, never the request body, so skipping the
+  // header meant the server rejected every one of those calls with a 401
+  // before the body's pinHash was ever looked at. Removed; explicit
+  // per-call headers now, same as any other option in opts.
+  if (pinHash && !headers['X-Para-Pin-Hash']) headers['X-Para-Pin-Hash'] = pinHash;
 
   let res: Response;
   try {
