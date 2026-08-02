@@ -1,25 +1,10 @@
 import { useCallback, useMemo, useState } from 'react';
 import { View, Text, FlatList, Pressable, StyleSheet, RefreshControl } from 'react-native';
+import { router } from 'expo-router';
 import { useTheme } from '../../src/hooks/useTheme';
 import { useSessionStore } from '../../src/state/session';
+import { initials, colorFromString } from '../../src/utils/avatar';
 import type { ChatSummary } from '../../src/types';
-
-function initials(name: string): string {
-  return name
-    .split(' ')
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((p) => p[0]?.toUpperCase())
-    .join('') || '?';
-}
-
-// Deterministic-ish color from a string, same idea as index.html's
-// colorFor() helper — just enough so avatars aren't all one flat color.
-function colorFromString(str: string, ice: string, fire: string): string {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
-  return Math.abs(hash) % 2 === 0 ? ice : fire;
-}
 
 export default function ChatsScreen() {
   const theme = useTheme();
@@ -52,10 +37,8 @@ export default function ChatsScreen() {
       const avatarColor = colorFromString(item.id, theme.ice, theme.fire);
       return (
         <Pressable
+          onPress={() => router.push(`/chat/${item.id}`)}
           style={({ pressed }) => [styles.row, { borderBottomColor: theme.glassBrd, opacity: pressed ? 0.7 : 1 }]}
-          // Chat detail screen (message thread, E2EE decrypt, live WS) is
-          // Phase 2 — see mobile-app/README.md's roadmap. This scaffold
-          // stops at the list.
         >
           <View style={[styles.avatar, { backgroundColor: avatarColor }]}>
             <Text style={styles.avatarText}>{initials(name)}</Text>

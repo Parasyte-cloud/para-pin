@@ -42,6 +42,58 @@ export interface SessionResponse {
   orgs: OrgSummary[];
 }
 
+export interface MessageAttachment {
+  url: string;
+  width?: number;
+  height?: number;
+  mime?: string;
+  nameCiphertext?: string;
+  nameIv?: string;
+  size?: number;
+  kind?: string;
+  duration?: number;
+  fileIv?: string;
+  // Client-only, populated after this device decrypts it — mirrors
+  // index.html's `.name`/`_decryptedUrl` pattern. `_decryptedUri` is a
+  // local `file://` path (expo-file-system cache dir) rather than a blob
+  // URL, since RN has no equivalent to URL.createObjectURL; `null` means
+  // decryption was attempted and failed, `undefined` means not attempted
+  // (or not yet reached) — see src/state/messages.ts's decryptOneAttachment.
+  name?: string;
+  _decryptedUri?: string | null;
+  _decrypting?: boolean;
+}
+
+export interface ReplyToRef {
+  id: string;
+  fromName?: string;
+  text?: string;
+}
+
+// Mirrors what the ChatRoom DO actually sends/stores (see worker.js's
+// POST /messages handler and its broadcast shape) plus the client-only
+// fields index.html adds during decryption (text, _e2eeDone).
+export interface ChatMessage {
+  id: string;
+  chatId?: string;
+  fromUserId: string;
+  ts: number;
+  ciphertext?: string;
+  iv?: string;
+  alg?: 'dm' | 'group';
+  attachment?: MessageAttachment | null;
+  replyTo?: ReplyToRef | null;
+  protected?: boolean;
+  deleted?: boolean;
+  edited?: boolean;
+  type?: 'system' | 'message';
+  system?: boolean;
+  // Client-only:
+  text?: string;
+  _e2eeDone?: boolean;
+  _pending?: boolean; // optimistic local echo before the server confirms
+}
+
 export interface ApiErrorBody {
   error: string;
   retryAfterMs?: number;
