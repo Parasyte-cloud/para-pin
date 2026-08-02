@@ -1018,6 +1018,42 @@ Verified: `tsc --noEmit` clean.
   inherit`/`text-mid` either way), so these chips now always use
   `theme.glass`/`theme.textHi`/`theme.textLow`/`theme.ice` regardless of
   `mine`.
+
+## Critical fix: iOS EAS build failure (wrong expo-image-picker version)
+
+First real production build attempt after this round's changes failed at
+the Xcode/fastlane step with:
+```
+cannot convert value of type 'Promise.ResolveClosure' ... to expected
+argument type 'EXPromiseResolveBlock'
+cannot find 'EXFatal' in scope
+cannot find 'EXErrorWithMessage' in scope
+```
+Root cause: `expo-image-picker` was installed at **17.0.11** (package.json
+declared `^17.0.9`) instead of the SDK 57-matched **57.0.7** required by
+`expo/bundledNativeModules.json`. `EXFatal`/`EXErrorWithMessage`/the old
+`EXPromiseResolveBlock` signature are pre-Swift-rewrite ExpoModulesCore
+ObjC APIs that a much older expo-image-picker's native iOS code still
+referenced; the actually-installed `expo-modules-core@57.0.8` (Swift,
+`Promise.ResolveClosure`) no longer has them — a straight ABI mismatch
+between one native module and the rest of the SDK 57 tree. Every other
+`expo-*` dependency was double-checked against `bundledNativeModules.json`
+and all matched (`expo-asset`, `expo-audio`, `expo-blur`, `expo-clipboard`,
+`expo-constants`, `expo-crypto`, `expo-file-system`, `expo-linear-gradient`,
+`expo-linking`, `expo-local-authentication`, `expo-notifications`,
+`expo-router`, `expo-secure-store`, `expo-sharing`, `expo-splash-screen`,
+`expo-status-bar`) — this was an isolated, single-package mistake from
+installing it without pinning to the SDK-matched version earlier this
+session, not a systemic issue.
+
+Fixed via `npm install expo-image-picker@57.0.7`. Checked the new
+version's exported API (`build/ImagePicker.d.ts`) against every call site
+this app makes (`launchImageLibraryAsync`, `launchCameraAsync`,
+`requestCameraPermissionsAsync`, `requestMediaLibraryPermissionsAsync`,
+`mediaTypes: ['images']` array syntax) — all identical, so no code changes
+were needed beyond the version bump. `ts.transpileModule()` re-scan of all
+46 `.ts`/`.tsx` files still clean.
+
 - **Bubble width/tail clipping fix**: `MessageBubble.tsx`'s `bubbleCol`
   was `maxWidth:'78%'` against only 10px of list padding
   (`chat/[id].tsx`'s `listContent`) — a right-aligned "mine" bubble had
