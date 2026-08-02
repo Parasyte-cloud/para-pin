@@ -1,10 +1,21 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { View, Text, FlatList, Pressable, StyleSheet, RefreshControl } from 'react-native';
 import { router } from 'expo-router';
 import { useTheme } from '../../src/hooks/useTheme';
 import { useSessionStore } from '../../src/state/session';
 import { initials, colorFromString } from '../../src/utils/avatar';
+import { resolveNames, getCachedName } from '../../src/state/names';
 import type { ChatSummary } from '../../src/types';
+
+// Mirrors index.html's chatDisplayName() (index.html:4030-4034): a DM's
+// `name` is always null server-side (worker.js never sets one) — the
+// display name is the OTHER member's resolved profile name, not something
+// the chat record carries itself. Only a group chat has a real `chat.name`.
+function displayName(chat: ChatSummary, myUserId: string | null): string {
+  if (chat.type === 'group') return chat.name || 'Group';
+  const otherId = chat.memberIds?.find((id) => id !== myUserId);
+  return (otherId && getCachedName(otherId)) || 'PArA PIN user';
+}
 
 export default function ChatsScreen() {
   const theme = useTheme();
@@ -12,13 +23,39 @@ export default function ChatsScreen() {
   const summaries = useSessionStore((s) => s.summaries);
   const pinnedChatIds = useSessionStore((s) => s.pinnedChatIds);
   const refreshSession = useSessionStore((s) => s.refreshSession);
+  const myUserId = useSessionStore((s) => s.userId);
   const [refreshing, setRefreshing] = useState(false);
+  // Bumped after resolveNames() resolves — getCachedName() itself is a
+  // synchronous, non-reactive Map read (see src/state/names.ts), so
+  // nothing re-renders on its own once names come back without this.
+  const [namesVersion, setNamesVersion] = useState(0);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     await refreshSession();
     setRefreshing(false);
   }, [refreshSession]);
+
+  // Same shape as web's ensureNamesLoaded() (index.html:4036-4052): collect
+  // every OTHER member across all chats and resolve whatever isn't cached
+  // yet in one batched /users call, re-run whenever the chat list itself
+  // changes (new chat, membership change).
+  useEffect(() => {
+    const otherIds = new Set<string>();
+    for (const c of chats) {
+      if (c.type === 'group') continue;
+      const otherId = c.memberIds?.find((id) => id !== myUserId);
+      if (otherId) otherIds.add(otherId);
+    }
+    if (!otherIds.size) return;
+    let cancelled = false;
+    resolveNames([...otherIds]).then(() => {
+      if (!cancelled) setNamesVersion((v) => v + 1);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [chats, myUserId]);
 
   const sorted = useMemo(() => {
     const pinnedSet = new Set(pinnedChatIds);
@@ -32,7 +69,7 @@ export default function ChatsScreen() {
 
   const renderItem = useCallback(
     ({ item }: { item: ChatSummary }) => {
-      const name = item.name || (item.type === 'dm' ? 'Direct message' : 'Group');
+      const name = displayName(item, myUserId);
       const unread = summaries[item.id]?.unreadCount ?? 0;
       const avatarColor = colorFromString(item.id, theme.ice, theme.fire);
       return (
@@ -63,7 +100,14 @@ export default function ChatsScreen() {
         </Pressable>
       );
     },
-    [summaries, theme]
+    // namesVersion isn't read directly in the body — displayName() reads
+    // through getCachedName()'s module-level Map, not React state — but it
+    // needs to be a dependency anyway so this callback identity changes
+    // (and FlatList re-renders rows) once resolveNames() actually fills
+    // that cache in. myUserId is a real dependency: which member counts as
+    // "the other one" depends on it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [summaries, theme, myUserId, namesVersion]
   );
 
   return (
@@ -72,6 +116,7 @@ export default function ChatsScreen() {
         data={sorted}
         keyExtractor={(item) => item.id}
         renderItem={renderItem}
+        extraData={namesVersion}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.ice} />
         }

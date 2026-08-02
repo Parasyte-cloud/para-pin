@@ -83,6 +83,7 @@ export default function ChatDetailScreen() {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [keyReady, setKeyReady] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
   const [actionSheetFor, setActionSheetFor] = useState<string | null>(null);
   const [replyTarget, setReplyTarget] = useState<{ id: string; fromName: string; text: string } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -178,9 +179,18 @@ export default function ChatDetailScreen() {
     const text = input.trim();
     if (!text || !chat || sending) return;
     setSending(true);
+    setSendError(null);
     const key = await ensureChatKey(chat);
     if (!key) {
       setSending(false);
+      // Previously a silent no-op — the persistent `!keyReady` banner
+      // above the message list covers the FIRST time a chat's key isn't
+      // ready yet, but gave no feedback for a send attempted mid-wait, and
+      // didn't explain what to do if it stays stuck (a missing chat-key
+      // wrap for this device — see the "Re-sync keys" button added to
+      // web's Settings > Devices list, index.html:9174-9176 — is the
+      // actual fix for that case, not something mobile can self-heal).
+      setSendError("Encryption isn't ready for this chat yet. If this doesn't clear on its own, ask whoever's already signed in on web to hit \"Re-sync keys\" for this device in Settings.");
       return;
     }
     const enc = encryptString(key, text);
@@ -198,6 +208,8 @@ export default function ChatDetailScreen() {
         applyEdit(chat.id, editingId, enc.ciphertext, enc.iv, text);
         setInput('');
         setEditingId(null);
+      } else {
+        setSendError("Couldn't save that edit. Try again.");
       }
       return;
     }
@@ -230,13 +242,20 @@ export default function ChatDetailScreen() {
     if (res.ok && res.body.message) {
       mergeMessages(chat.id, [{ ...res.body.message, text, _e2eeDone: true }]);
     } else {
+      // Previously silently restored the input with zero indication
+      // anything went wrong — put the text back (so nothing's lost) but
+      // now actually say so.
       setInput(text);
+      setSendError(
+        !res.ok && res.networkError ? "Couldn't reach PArA. Check your connection and try again." : "That message didn't send. Try again."
+      );
     }
   }, [input, chat, sending, myUserId, editingId, replyTarget, addOptimistic, removeOptimistic, mergeMessages, applyEdit]);
 
   const onChangeText = useCallback(
     (v: string) => {
       setInput(v);
+      setSendError(null);
       sendTyping();
     },
     [sendTyping]
@@ -379,7 +398,13 @@ export default function ChatDetailScreen() {
     >
       <Stack.Screen
         options={{
-          title: chatTitle,
+          // Bug: this used to always show chatTitle's raw fallback
+          // ("Direct message"/"Group") for every DM, even after names[]
+          // resolved the real peer name a moment later — dmPeerName
+          // already computes the right value (chatTitle is still its own
+          // fallback while resolveNames() hasn't returned yet), this just
+          // wasn't using it.
+          title: dmPeerId ? dmPeerName : chatTitle,
           headerRight: dmPeerId
             ? () => (
                 <View style={styles.headerCallBtns}>
@@ -416,6 +441,16 @@ export default function ChatDetailScreen() {
       />
 
       {typingLabel && <Text style={[styles.typing, { color: theme.textLow }]}>{typingLabel} is typing…</Text>}
+
+      {sendError && (
+        <Pressable
+          onPress={() => setSendError(null)}
+          style={[styles.sendErrorBanner, { backgroundColor: theme.glass, borderColor: theme.danger }]}
+        >
+          <Text style={{ color: theme.danger, fontSize: 12, flex: 1 }}>{sendError}</Text>
+          <Text style={{ color: theme.textLow, fontSize: 12, marginLeft: 8 }}>✕</Text>
+        </Pressable>
+      )}
 
       {(replyTarget || editingId) && (
         <BlurView
@@ -497,6 +532,15 @@ const styles = StyleSheet.create({
   listContent: { paddingHorizontal: 10, paddingVertical: 12, flexGrow: 1, justifyContent: 'flex-end' },
   empty: { transform: [{ scaleY: -1 }], alignItems: 'center', padding: 24 },
   keyBanner: { padding: 8, borderBottomWidth: 1, alignItems: 'center' },
+  sendErrorBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: 12,
+    marginBottom: 6,
+    padding: 8,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
   dateSeparator: { textAlign: 'center', fontSize: 11.5, fontWeight: '600', marginVertical: 10 },
   typing: { fontSize: 11.5, paddingHorizontal: 16, paddingBottom: 2 },
   composerContext: {
