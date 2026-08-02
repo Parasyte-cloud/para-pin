@@ -9173,16 +9173,42 @@
       return `
         <div class="settings-row">
           <span>${escapeHtml(d.label)}${isCurrent ? ' <span style="color:var(--text-mid); font-size:12px;">(this device)</span>' : ''}<br><span class="hint" style="margin:0;">Active ${formatLastSeen(d.lastSeenAt)}</span></span>
-          ${isCurrent ? '' : `<span class="btn" style="padding:4px 10px; font-size:12px;" data-logout-device="${escapeHtml(d.id)}">Log out</span>`}
+          ${isCurrent ? '' : `
+            <span style="display:flex; gap:6px;">
+              <span class="btn" style="padding:4px 10px; font-size:12px;" data-resync-device="${escapeHtml(d.id)}">Re-sync keys</span>
+              <span class="btn" style="padding:4px 10px; font-size:12px;" data-logout-device="${escapeHtml(d.id)}">Log out</span>
+            </span>
+          `}
         </div>
       `;
     }).join('') || '<div class="hint">No devices found.</div>';
   }
   document.getElementById('settingsDeviceList').addEventListener('click', async (e)=>{
-    const id = e.target && e.target.dataset && e.target.dataset.logoutDevice;
-    if (!id) return;
+    const logoutId = e.target && e.target.dataset && e.target.dataset.logoutDevice;
+    const resyncId = e.target && e.target.dataset && e.target.dataset.resyncDevice;
+    if (resyncId){
+      // Hand-fixes the case where a device got trusted (via /device-link/
+      // approve) but never actually received a chat-key wrap for one or
+      // more chats — e.g. rewrapAllChatsForDevice's original fire-and-
+      // forget call (see the approve-device handler above) ran before this
+      // device had uploaded its E2EE public key, or simply failed
+      // silently. That device's ensureChatKey() then returns null forever
+      // for those chats (worker.js's wrap store has no entry for it, and
+      // nothing else ever re-triggers a wrap on its own), which looks
+      // exactly like "can't send/receive messages" with no visible error.
+      // Safe to re-run any time: wrapping an already-wrapped chat again is
+      // a harmless overwrite with the same underlying key, not a rotation.
+      const btn = e.target;
+      const original = btn.textContent;
+      btn.textContent = 'Syncing…';
+      await rewrapAllChatsForDevice(resyncId);
+      btn.textContent = 'Synced ✓';
+      setTimeout(() => { btn.textContent = original; }, 2000);
+      return;
+    }
+    if (!logoutId) return;
     if (!confirm('Log this device out? It will need to be re-approved (or clear MFA again) to sign back in.')) return;
-    const r = await apiFetch('/devices/remove', { method: 'POST', body: JSON.stringify({ id }) });
+    const r = await apiFetch('/devices/remove', { method: 'POST', body: JSON.stringify({ id: logoutId }) });
     if (r.ok) refreshDeviceList();
     else alert("Couldn't log that device out. Try again.");
   });
