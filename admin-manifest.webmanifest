@@ -1,6 +1,6 @@
 {
-  "name": "PArA Admin",
-  "short_name": "PArA Admin",
+  "name": "PArA Ops",
+  "short_name": "PArA Ops",
   "description": "Platform admin console for PArA — workspaces, users, governance, and status.",
   "start_url": "/admin.html",
   "scope": "/",

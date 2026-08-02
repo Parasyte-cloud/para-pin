@@ -5,7 +5,19 @@
 	"assets": {
 		"directory": ".",
 		"binding": "ASSETS",
-		"not_found_handling": "single-page-application"
+		"not_found_handling": "single-page-application",
+		// Without this, Cloudflare's edge serves matched/SPA-fallback assets
+		// straight from cache and never invokes fetch() below at all — which
+		// is exactly what was happening to admin.parasyte.cloud (and, it turns
+		// out, to every branded custom domain too): the edge cached
+		// index.html once for the zone and just kept serving that same
+		// cached bytes for every hostname on every subsequent request,
+		// skipping the hostname-routing/branding logic entirely. Forcing the
+		// Worker to run first for every request is required for host-based
+		// routing to actually take effect; it still calls env.ASSETS.fetch()
+		// itself for anything that isn't admin.parasyte.cloud or a branded
+		// domain, so normal asset caching behavior is unchanged for those.
+		"run_worker_first": true
 	},
 	"durable_objects": {
 		"bindings": [
