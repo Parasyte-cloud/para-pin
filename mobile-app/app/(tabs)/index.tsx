@@ -6,6 +6,8 @@ import { useSessionStore } from '../../src/state/session';
 import { initials, colorFromString } from '../../src/utils/avatar';
 import { resolveNames, getCachedName } from '../../src/state/names';
 import { resolvePreview, getCachedPreview } from '../../src/state/previews';
+import { AuthBackdrop } from '../../src/components/AuthBackdrop';
+import WorkspaceSwitcher from '../../src/components/WorkspaceSwitcher';
 import type { ChatSummary } from '../../src/types';
 
 // Mirrors index.html's chatDisplayName() (index.html:4030-4034): a DM's
@@ -25,6 +27,8 @@ export default function ChatsScreen() {
   const pinnedChatIds = useSessionStore((s) => s.pinnedChatIds);
   const refreshSession = useSessionStore((s) => s.refreshSession);
   const myUserId = useSessionStore((s) => s.userId);
+  const activeOrgId = useSessionStore((s) => s.activeOrgId);
+  const orgs = useSessionStore((s) => s.orgs);
   const [refreshing, setRefreshing] = useState(false);
   // Bumped after resolveNames() resolves — getCachedName() itself is a
   // synchronous, non-reactive Map read (see src/state/names.ts), so
@@ -80,13 +84,17 @@ export default function ChatsScreen() {
 
   const sorted = useMemo(() => {
     const pinnedSet = new Set(pinnedChatIds);
-    return [...chats].sort((a, b) => {
+    // Same scoping rule as worker.js/index.html everywhere else:
+    // `(chat.orgId || null) === (activeOrgId || null)` — Personal is
+    // `null` on both sides, a workspace is its org id on both sides.
+    const scoped = chats.filter((c) => (c.orgId || null) === (activeOrgId || null));
+    return [...scoped].sort((a, b) => {
       const aPinned = pinnedSet.has(a.id) ? 1 : 0;
       const bPinned = pinnedSet.has(b.id) ? 1 : 0;
       if (aPinned !== bPinned) return bPinned - aPinned;
       return (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0);
     });
-  }, [chats, pinnedChatIds]);
+  }, [chats, pinnedChatIds, activeOrgId]);
 
   const renderItem = useCallback(
     ({ item }: { item: ChatSummary }) => {
@@ -129,8 +137,14 @@ export default function ChatsScreen() {
     [summaries, theme, myUserId, namesVersion, previewsVersion]
   );
 
+  const activeOrgName = activeOrgId ? orgs.find((o) => o.id === activeOrgId)?.name || 'this workspace' : null;
+
   return (
-    <View style={[styles.container, { backgroundColor: theme.bg0 }]}>
+    <AuthBackdrop>
+      {/* Only shows the switcher once there's actually somewhere to switch
+          to — a user in zero workspaces sees the plain chat list, same as
+          web hiding the workspace bar for a personal-only account. */}
+      {orgs.length > 0 && <WorkspaceSwitcher />}
       <FlatList
         data={sorted}
         keyExtractor={(item) => item.id}
@@ -142,14 +156,16 @@ export default function ChatsScreen() {
         ListEmptyComponent={
           <View style={styles.empty}>
             <Text style={{ color: theme.textMid, textAlign: 'center' }}>
-              No chats yet. Start one from the web app for now — starting chats natively is coming in
-              a later phase.
+              {activeOrgName
+                ? `No chats in ${activeOrgName} yet. Start one from the web app for now — starting chats natively is coming in a later phase.`
+                : 'No chats yet. Start one from the web app for now — starting chats natively is coming in a later phase.'}
             </Text>
           </View>
         }
         contentContainerStyle={sorted.length === 0 ? styles.emptyContainer : undefined}
+        style={{ flex: 1 }}
       />
-    </View>
+    </AuthBackdrop>
   );
 }
 

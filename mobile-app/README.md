@@ -802,3 +802,130 @@ truthful about what's actually happening instead of a permanent-looking
 placeholder.
 
 Verified: `tsc --noEmit` clean.
+
+## Hard crash on send (build 6, TestFlight) — root cause + fix
+
+Diagnosed from a real device's `.ips` crash log (`EXC_CRASH`/`SIGABRT`,
+faulting thread on `com.meta.react.turbomodulemanager.queue`). The
+backtrace bottoms out in `abort()` reached through
+`-[RCTExceptionsManager reportFatal:stack:exceptionId:extraDataAsJSON:]`
+→ `RCTGetFatalHandler` → `objc_exception_throw` — that's React Native's
+*own* fatal-JS-error reporting path, not a third-party native module
+(`imageIndex` for every frame resolved to `React.framework` or a system
+library). iOS crash reports don't preserve the original JS error
+message/stack, only the native frames of RN reporting it, but the
+mechanism is unambiguous: some JS-level exception during/around the send
+flow went uncaught, and RN's release build treats a sufficiently fatal JS
+error as unrecoverable and aborts the whole process rather than leaving
+the app in a broken state.
+
+Two contributing gaps, both fixed:
+
+1. **No error boundary anywhere in the app.** `app/_layout.tsx` now
+   exports `ErrorBoundary` (expo-router auto-wraps the root route tree in
+   a real React error boundary when a layout file exports a component by
+   that name — see https://docs.expo.dev/router/error-handling/). This
+   doesn't fix the underlying bug, but it's the actual fix for the
+   *crash*: any uncaught render-time exception anywhere now unmounts to
+   an in-app "Something went wrong / Try again" screen instead of taking
+   the whole app down to the home screen.
+2. **`onSend`'s send path had no try/catch** (`app/chat/[id].tsx`). The
+   prime suspect: `encryptString(key, text)` calls straight into
+   `@noble/ciphers`' `gcm(...)`, which validates key/IV length strictly
+   and throws synchronously on anything malformed — a real possibility
+   right after a device-approval/rewrap, since `ensureChatKey` can hand
+   back a stale or partial key. `onSend` is fired from `onPress` without
+   being awaited, so an uncaught throw in there becomes an unhandled
+   promise rejection rather than something any caller catches. The whole
+   body is now wrapped in try/catch/finally: any throw — from encryption,
+   from the network calls, from anywhere — now surfaces as the existing
+   `sendError` banner instead of escaping the handler.
+
+Together these mean: even if the exact original trigger wasn't
+`encryptString` specifically, the crash *mode* (an uncaught JS exception
+becoming a hard native abort) is now closed off at both the specific
+send path and the whole-app level. If sends still fail after this ships,
+they'll show a message instead of crashing, which will make the real
+cause far easier to pin down from a bug report alone.
+
+Verified: `tsc --noEmit` clean. Not yet verified against the physical
+device that produced the crash — needs a fresh TestFlight build.
+
+## Second crash, same TestFlight session: infinite-loop "Maximum update depth exceeded"
+
+A second crash log from the same device, right after the first fix
+shipped its ErrorBoundary — and this time the boundary actually did its
+job: instead of a hard native abort, the user saw the new "Something went
+wrong" screen with React's own error message right on it, which is what
+made this one easy to nail down.
+
+Root cause: `app/chat/[id].tsx`'s message selector —
+`useMessagesStore((s) => (id ? s.byChat[id] || [] : []))`. Whenever
+`s.byChat[id]` isn't set yet (a chat that hasn't finished loading
+history), the `|| []` fallback allocates a **brand-new array every single
+call**. Zustand's hook goes through React's `useSyncExternalStore`, which
+bails out of a re-render only when the snapshot is `Object.is`-equal to
+the last one — a fresh array reference every time looks like "the store
+changed" even when nothing did, forcing another render, which calls the
+selector again, which allocates another new array, forever. That loop is
+exactly what "Maximum update depth exceeded" means, and it's fatal in
+RN's release build (same `RCTFatal` escalation path as the first crash).
+
+Fixed with a module-level `EMPTY_MESSAGES` constant reused as the
+fallback instead of a fresh literal, so `Object.is` actually holds until
+`byChat[id]` gets set for real. Audited every other Zustand selector in
+the app for the same `x || []`/`x ?? {}` pattern — this was the only one.
+
+Verified: `tsc --noEmit` clean.
+
+## Workspace support: chats + 1:1 calls (not yet Meeting Room/group calls)
+
+Mobile only ever showed Personal. Turned out to be almost entirely a
+mobile-side gap, not a backend one — `OrgSummary`/`ChatSummary.orgId` were
+already fully typed and `orgs`/`chats` already came back from `/session`
+with real data, just never surfaced as a switcher, and `calls.tsx` was
+already sending `?orgId=` to the log endpoint, just always empty.
+
+Added:
+- `useSessionStore.activeOrgId` (+ `setActiveOrgId`) — in-memory only for
+  now, always reopens on Personal (not persisted across restarts the way
+  web's localStorage copy is; a reasonable default, flagged as a possible
+  follow-up).
+- `src/components/WorkspaceSwitcher.tsx` — the Personal/Workspace pill +
+  picker sheet, ported from index.html's `.workspace-bar` +
+  `#workspacesOverlay` (index.html:625-631, 1612-1626, 1945-1953). Only
+  renders once the user is actually in ≥1 workspace.
+- `app/(tabs)/index.tsx` now filters the chat list by
+  `(chat.orgId||null) === (activeOrgId||null)` — same equality worker.js
+  uses everywhere (e.g. worker.js:4241 in index.html's own filtering).
+- `app/(tabs)/calls.tsx` now sends the real `activeOrgId` instead of a
+  hardcoded empty string, and calling back from a log row re-tags the new
+  call with that row's own `orgId` rather than always Personal.
+- 1:1 calls now carry `orgId` end-to-end: `chat/[id].tsx`'s `callPeer()`
+  passes the chat's own `orgId` into `startOutgoingCall`; the call store
+  puts it on the outgoing `offer` signal (`callSignal.ts`'s
+  `CallSignal.orgId`); the receiving device reads it back off the
+  incoming offer so its own call-log write lands in the same workspace
+  scope as the caller's; every `logCallEntry()` call site (connected,
+  missed, declined) now tags the entry with it. worker.js already
+  round-trips `entry.orgId` end to end (worker.js:2805-2806, 2827) — no
+  backend changes needed.
+
+**Deliberately not built this round: web's "Meeting Room" (group/SFU
+calls).** That's a genuinely separate backend subsystem
+(`/api/meeting/room/ws`, `/api/meeting/sfu/*`, Cloudflare Calls SFU —
+worker.js:6038, 7092, 7134, 7176) with zero mobile client code touching
+it yet, not a missing toggle on top of the existing 1:1 P2P call path.
+Workspace chat and 1:1 workspace calls (audio + video) now have full
+parity with Personal; group/meeting calls inside a workspace are still
+web-only.
+
+Also added (used by the call-screen redesign in progress): `toggleSpeaker`
+and `switchCamera` on the call store. `switchCamera` is real (wired to
+react-native-webrtc's `_switchCamera()`). `toggleSpeaker` is UI state only
+— the installed react-native-webrtc version has no native audio-route
+override method (checked its iOS module source directly), so it doesn't
+force a hardware route change on top of the OS's own default (speaker for
+video, earpiece for audio). Flagged rather than shipping it silently.
+
+Verified: `tsc --noEmit` clean.

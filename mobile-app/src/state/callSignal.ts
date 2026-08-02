@@ -36,6 +36,11 @@ export interface CallSignal {
   fromUserId?: string;
   fromName?: string;
   fromAvatarUrl?: string | null;
+  // Which workspace this call belongs to (`null`/absent = Personal) — set
+  // on the initial 'offer' so the callee's own call-log write lands in the
+  // same workspace scope as the caller's, matching web's
+  // orgId:activeOrgId||null tagging on outgoing signals (index.html:6656).
+  orgId?: string | null;
 }
 
 export function sendCallSignal(toUserId: string, signal: CallSignal) {
@@ -50,6 +55,10 @@ export interface CallLogEntry {
   outcome: 'answered' | 'missed' | 'declined' | 'busy';
   durationSec: number;
   isVideo: boolean;
+  // worker.js's POST /call-log reads entry.orgId and stores it verbatim
+  // (worker.js:2827); GET /call-log filters by it (worker.js:2805-2806).
+  // Personal calls omit this / send null, same convention as chat orgId.
+  orgId?: string | null;
 }
 
 export function logCallEntry(entry: CallLogEntry) {

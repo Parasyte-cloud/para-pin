@@ -68,6 +68,15 @@ interface SessionState {
   // always present in the server response, just never typed through here.
   summaries: Record<string, { unreadCount?: number; lastMessageAt?: number | null; lastMessage?: ChatMessage | null }>;
   pinnedChatIds: string[];
+  // Which workspace's chats/calls are currently in view — `null` means
+  // Personal, matching every `orgId` field on the wire (chats, call log
+  // entries, etc. all use `null`/absent for Personal, never a sentinel
+  // string). Mirrors web's `activeOrgId` (index.html:3067). In-memory only
+  // for now (not persisted across app restarts like web's localStorage
+  // copy) — always reopens on Personal, which is a reasonable default and
+  // avoids a SecureStore round trip on every switch.
+  activeOrgId: string | null;
+  setActiveOrgId: (orgId: string | null) => void;
 
   hydrate: () => Promise<void>;
   submitPin: (
@@ -97,6 +106,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   chats: [],
   summaries: {},
   pinnedChatIds: [],
+  activeOrgId: null,
+  setActiveOrgId: (orgId) => set({ activeOrgId: orgId }),
 
   hydrate: async () => {
     const [deviceId, pinHash, biometricPref, biometricSupported] = await Promise.all([

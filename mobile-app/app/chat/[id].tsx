@@ -43,6 +43,21 @@ const DECRYPT_RETRY_MS = 5000;
 const GROUP_GAP_MS = 60 * 1000; // same-sender messages within this window render as one visual group
 const DATE_SEPARATOR_GAP_MS = 3 * 60 * 60 * 1000; // 3h gap (or a new day) gets its own separator
 
+// Stable reference for the "no messages loaded yet for this chat" case.
+// Root cause of the "Maximum update depth exceeded" crash (2026-08-02):
+// the Zustand selector below used to do `s.byChat[id] || []`, which
+// allocates a BRAND NEW array every single call whenever byChat[id] is
+// still unset. React's useSyncExternalStore (which Zustand's hook uses
+// under the hood) compares snapshots with Object.is — a fresh array
+// reference every call looks like "the store changed" even though
+// nothing did, which forces an immediate re-render, which re-runs the
+// selector, which allocates ANOTHER new array, forever. That's exactly
+// what "Maximum update depth exceeded" means, and it's fatal in RN's
+// release build (see README's crash-log writeup). Returning this same
+// module-level constant instead keeps Object.is happy until byChat[id]
+// actually gets set by loadHistory/decryptChat.
+const EMPTY_MESSAGES: ChatMessage[] = [];
+
 function isGroupable(a: ChatMessage, b: ChatMessage | undefined): boolean {
   if (!b) return false;
   if (a.type === 'system' || b.type === 'system' || a.system || b.system) return false;
@@ -68,7 +83,7 @@ export default function ChatDetailScreen() {
   const theme = useTheme();
   const myUserId = useSessionStore((s) => s.userId);
   const chat = useSessionStore((s) => s.chats.find((c) => c.id === id)) ?? null;
-  const messages = useMessagesStore((s) => (id ? s.byChat[id] || [] : []));
+  const messages = useMessagesStore((s) => (id ? s.byChat[id] || EMPTY_MESSAGES : EMPTY_MESSAGES));
   const loadHistory = useMessagesStore((s) => s.loadHistory);
   const decryptChat = useMessagesStore((s) => s.decryptChat);
   const addOptimistic = useMessagesStore((s) => s.addOptimistic);
@@ -101,9 +116,13 @@ export default function ChatDetailScreen() {
   const callPeer = useCallback(
     (video: boolean) => {
       if (!dmPeerId || inCall) return;
-      startOutgoingCall(dmPeerId, dmPeerName, null, video);
+      // Tag the call with this chat's own workspace scope so it lands in
+      // the same Personal/Workspace call-log bucket as the chat itself —
+      // see src/state/callSignal.ts's CallSignal/CallLogEntry.orgId
+      // comments and worker.js:2805-2806/2827.
+      startOutgoingCall(dmPeerId, dmPeerName, null, video, chat?.orgId ?? null);
     },
-    [dmPeerId, dmPeerName, inCall, startOutgoingCall]
+    [dmPeerId, dmPeerName, inCall, startOutgoingCall, chat?.orgId]
   );
 
   const { sendTyping } = useChatSocket(chat, {
@@ -180,75 +199,95 @@ export default function ChatDetailScreen() {
     if (!text || !chat || sending) return;
     setSending(true);
     setSendError(null);
-    const key = await ensureChatKey(chat);
-    if (!key) {
-      setSending(false);
-      // Previously a silent no-op — the persistent `!keyReady` banner
-      // above the message list covers the FIRST time a chat's key isn't
-      // ready yet, but gave no feedback for a send attempted mid-wait, and
-      // didn't explain what to do if it stays stuck (a missing chat-key
-      // wrap for this device — see the "Re-sync keys" button added to
-      // web's Settings > Devices list, index.html:9174-9176 — is the
-      // actual fix for that case, not something mobile can self-heal).
-      setSendError("Encryption isn't ready for this chat yet. If this doesn't clear on its own, ask whoever's already signed in on web to hit \"Re-sync keys\" for this device in Settings.");
-      return;
-    }
-    const enc = encryptString(key, text);
-
-    if (editingId) {
-      const res = await apiFetch<{ message?: ChatMessage }>(`/chats/${chat.id}/messages/${editingId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ ciphertext: enc.ciphertext, iv: enc.iv }),
-      });
-      setSending(false);
-      if (res.ok) {
-        // Pass the plaintext we already have (knownText) so the bubble
-        // updates immediately instead of showing "Waiting for
-        // encryption…" until the next unrelated decrypt pass.
-        applyEdit(chat.id, editingId, enc.ciphertext, enc.iv, text);
-        setInput('');
-        setEditingId(null);
-      } else {
-        setSendError("Couldn't save that edit. Try again.");
+    // Everything below can throw synchronously (encryptString's underlying
+    // @noble/ciphers call validates key/iv length strictly and throws if
+    // ensureChatKey ever hands back a malformed key — a real possibility
+    // right after a device-approval/rewrap) or reject (the two apiFetch
+    // calls). onSend is invoked from onPress as a fire-and-forget handler,
+    // so an uncaught throw here doesn't just fail this send — it becomes
+    // an unhandled rejection that React Native's release build can
+    // escalate to a fatal, whole-app-crashing error (this is what the
+    // 2026-08-02 TestFlight crash log traced back to: RN's own
+    // ExceptionsManager reportFatal: path aborting the process). Wrapping
+    // the whole body turns any of that into a normal, visible send error
+    // instead of a hard crash. app/_layout.tsx's ErrorBoundary is the
+    // second layer of defense for anything that still gets past this.
+    try {
+      const key = await ensureChatKey(chat);
+      if (!key) {
+        // Previously a silent no-op — the persistent `!keyReady` banner
+        // above the message list covers the FIRST time a chat's key isn't
+        // ready yet, but gave no feedback for a send attempted mid-wait, and
+        // didn't explain what to do if it stays stuck (a missing chat-key
+        // wrap for this device — see the "Re-sync keys" button added to
+        // web's Settings > Devices list, index.html:9174-9176 — is the
+        // actual fix for that case, not something mobile can self-heal).
+        setSendError("Encryption isn't ready for this chat yet. If this doesn't clear on its own, ask whoever's already signed in on web to hit \"Re-sync keys\" for this device in Settings.");
+        return;
       }
-      return;
-    }
+      const enc = encryptString(key, text);
 
-    setInput('');
-    const replyPayload = replyTarget ? { id: replyTarget.id, fromName: replyTarget.fromName, text: replyTarget.text } : undefined;
-    const tempId = `pending-${Date.now()}`;
-    const optimistic: ChatMessage = {
-      id: tempId,
-      fromUserId: myUserId || '',
-      ts: Date.now(),
-      text,
-      replyTo: replyPayload || null,
-      _e2eeDone: true,
-      _pending: true,
-    };
-    addOptimistic(chat.id, optimistic);
-    setReplyTarget(null);
-    const res = await apiFetch<{ message?: ChatMessage }>(`/chats/${chat.id}/messages`, {
-      method: 'POST',
-      body: JSON.stringify({
-        ciphertext: enc.ciphertext,
-        iv: enc.iv,
-        alg: chat.type === 'group' ? 'group' : 'dm',
-        replyTo: replyPayload,
-      }),
-    });
-    setSending(false);
-    removeOptimistic(chat.id, tempId);
-    if (res.ok && res.body.message) {
-      mergeMessages(chat.id, [{ ...res.body.message, text, _e2eeDone: true }]);
-    } else {
-      // Previously silently restored the input with zero indication
-      // anything went wrong — put the text back (so nothing's lost) but
-      // now actually say so.
+      if (editingId) {
+        const res = await apiFetch<{ message?: ChatMessage }>(`/chats/${chat.id}/messages/${editingId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ ciphertext: enc.ciphertext, iv: enc.iv }),
+        });
+        if (res.ok) {
+          // Pass the plaintext we already have (knownText) so the bubble
+          // updates immediately instead of showing "Waiting for
+          // encryption…" until the next unrelated decrypt pass.
+          applyEdit(chat.id, editingId, enc.ciphertext, enc.iv, text);
+          setInput('');
+          setEditingId(null);
+        } else {
+          setSendError("Couldn't save that edit. Try again.");
+        }
+        return;
+      }
+
+      setInput('');
+      const replyPayload = replyTarget ? { id: replyTarget.id, fromName: replyTarget.fromName, text: replyTarget.text } : undefined;
+      const tempId = `pending-${Date.now()}`;
+      const optimistic: ChatMessage = {
+        id: tempId,
+        fromUserId: myUserId || '',
+        ts: Date.now(),
+        text,
+        replyTo: replyPayload || null,
+        _e2eeDone: true,
+        _pending: true,
+      };
+      addOptimistic(chat.id, optimistic);
+      setReplyTarget(null);
+      const res = await apiFetch<{ message?: ChatMessage }>(`/chats/${chat.id}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({
+          ciphertext: enc.ciphertext,
+          iv: enc.iv,
+          alg: chat.type === 'group' ? 'group' : 'dm',
+          replyTo: replyPayload,
+        }),
+      });
+      removeOptimistic(chat.id, tempId);
+      if (res.ok && res.body.message) {
+        mergeMessages(chat.id, [{ ...res.body.message, text, _e2eeDone: true }]);
+      } else {
+        // Previously silently restored the input with zero indication
+        // anything went wrong — put the text back (so nothing's lost) but
+        // now actually say so.
+        setInput(text);
+        setSendError(
+          !res.ok && res.networkError ? "Couldn't reach PArA. Check your connection and try again." : "That message didn't send. Try again."
+        );
+      }
+    } catch (e: any) {
+      // Belt-and-suspenders for the encrypt-throw case above, plus
+      // anything else unforeseen — never let a send attempt escape as an
+      // uncaught/unhandled rejection.
       setInput(text);
-      setSendError(
-        !res.ok && res.networkError ? "Couldn't reach PArA. Check your connection and try again." : "That message didn't send. Try again."
-      );
+      setSendError(e?.message ? `Send failed: ${e.message}` : "That message didn't send. Try again.");
+    } finally {
+      setSending(false);
     }
   }, [input, chat, sending, myUserId, editingId, replyTarget, addOptimistic, removeOptimistic, mergeMessages, applyEdit]);
 

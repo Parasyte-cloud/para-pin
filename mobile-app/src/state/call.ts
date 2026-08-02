@@ -57,19 +57,27 @@ interface CallStoreState {
   hasVideo: boolean;
   muted: boolean;
   cameraOff: boolean;
+  speakerOn: boolean;
   awaitingConnection: boolean;
   callStartedAt: number | null;
   elapsedSec: number;
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
   connectError: string | null;
+  // Which workspace this call belongs to — see callSignal.ts's CallSignal/
+  // CallLogEntry.orgId comments. Threaded through so the call-log entry
+  // this device writes lands in the same workspace as whichever chat (or
+  // incoming offer) the call started from.
+  orgId: string | null;
 
-  startOutgoingCall: (peerId: string, peerName: string, peerAvatarUrl: string | null, video: boolean) => Promise<void>;
+  startOutgoingCall: (peerId: string, peerName: string, peerAvatarUrl: string | null, video: boolean, orgId?: string | null) => Promise<void>;
   acceptCall: () => Promise<void>;
   declineCall: (reason?: string) => void;
   endCall: (reason?: string) => void;
   toggleMute: () => void;
   toggleCamera: () => void;
+  toggleSpeaker: () => void;
+  switchCamera: () => void;
   handleCallSignal: (signal: CallSignal) => void;
   dismissConnectError: () => void;
 }
@@ -175,6 +183,7 @@ export const useCallStore = create<CallStoreState>((set, get) => {
         outcome,
         durationSec,
         isVideo: state.hasVideo,
+        orgId: state.orgId,
       });
     }
     teardownMedia();
@@ -188,11 +197,13 @@ export const useCallStore = create<CallStoreState>((set, get) => {
       hasVideo: false,
       muted: false,
       cameraOff: false,
+      speakerOn: false,
       awaitingConnection: false,
       callStartedAt: null,
       elapsedSec: 0,
       localStream: null,
       remoteStream: null,
+      orgId: null,
     });
   }
 
@@ -237,14 +248,16 @@ export const useCallStore = create<CallStoreState>((set, get) => {
     hasVideo: false,
     muted: false,
     cameraOff: false,
+    speakerOn: false,
     awaitingConnection: false,
     callStartedAt: null,
     elapsedSec: 0,
     localStream: null,
     remoteStream: null,
     connectError: null,
+    orgId: null,
 
-    startOutgoingCall: async (peerId, peerName, peerAvatarUrl, video) => {
+    startOutgoingCall: async (peerId, peerName, peerAvatarUrl, video, orgId = null) => {
       if (get().callState !== 'idle') return;
       let stream: MediaStream;
       try {
@@ -262,8 +275,13 @@ export const useCallStore = create<CallStoreState>((set, get) => {
         direction: 'outgoing',
         callState: 'ringing-out',
         hasVideo: video,
+        // Video calls default to speaker (matches how the OS/WebRTC's own
+        // default routing already behaves); audio calls default to
+        // earpiece, same convention as FaceTime/most VoIP apps.
+        speakerOn: video,
         localStream: stream,
         connectError: null,
+        orgId,
       });
       const pc = await createPeerConnection(
         peerId,
@@ -277,7 +295,7 @@ export const useCallStore = create<CallStoreState>((set, get) => {
       stream.getTracks().forEach((t: MediaStreamTrack) => pc.addTrack(t, stream));
       const offer = await pc.createOffer(undefined);
       await pc.setLocalDescription(offer);
-      await sendCallSignal(peerId, { kind: 'offer', callId, sdp: offer.sdp, video });
+      await sendCallSignal(peerId, { kind: 'offer', callId, sdp: offer.sdp, video, orgId });
       ringTimeoutTimer = setTimeout(() => {
         if (get().callState === 'ringing-out') get().endCall('no-answer');
       }, RING_TIMEOUT_MS);
@@ -334,6 +352,7 @@ export const useCallStore = create<CallStoreState>((set, get) => {
         outcome: reason === 'no-answer' ? 'missed' : 'declined',
         durationSec: 0,
         isVideo: s.hasVideo,
+        orgId: s.orgId,
       });
       finishCall(reason || 'declined', true);
     },
@@ -361,6 +380,7 @@ export const useCallStore = create<CallStoreState>((set, get) => {
         outcome: wasConnected ? 'answered' : 'missed',
         durationSec,
         isVideo: s.hasVideo,
+        orgId: s.orgId,
       });
       finishCall(reason, true);
     },
@@ -379,6 +399,29 @@ export const useCallStore = create<CallStoreState>((set, get) => {
         t.enabled = cameraOff;
       });
       set({ cameraOff: !cameraOff });
+    },
+
+    // Known cut: react-native-webrtc (the version installed here) doesn't
+    // expose an actual iOS/Android audio-route override (no
+    // setSpeakerphoneOn-style native method — checked the installed
+    // package's native module surface directly, see mobile-app/README.md).
+    // Adding one means a new native module + config plugin + rebuild, the
+    // same class of change as the WebRTC dependency itself needed. This
+    // toggle is real UI state (drives the button's active look, and
+    // reflects the OS's own default routing — speaker for video calls,
+    // earpiece for audio) but doesn't force a route change of its own on
+    // top of whatever the OS/WebRTC already picked. Flagged rather than
+    // silently faked so it isn't mistaken for a broken feature later.
+    toggleSpeaker: () => set((s) => ({ speakerOn: !s.speakerOn })),
+
+    // `_switchCamera()` is a real react-native-webrtc extension method on
+    // video tracks (not in the public TS types, hence the cast) — flips
+    // between front/back camera on a live video call.
+    switchCamera: () => {
+      const { localStream } = get();
+      localStream?.getVideoTracks().forEach((t: any) => {
+        if (typeof t._switchCamera === 'function') t._switchCamera();
+      });
     },
 
     dismissConnectError: () => set({ connectError: null }),
@@ -402,7 +445,9 @@ export const useCallStore = create<CallStoreState>((set, get) => {
           direction: 'incoming',
           callState: 'ringing-in',
           hasVideo: !!signal.video,
+          speakerOn: !!signal.video,
           connectError: null,
+          orgId: signal.orgId ?? null,
         });
         startRinging();
         ringTimeoutTimer = setTimeout(() => {

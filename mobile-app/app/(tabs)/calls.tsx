@@ -2,15 +2,15 @@ import { useCallback, useEffect, useState } from 'react';
 import { View, Text, FlatList, Pressable, StyleSheet, RefreshControl } from 'react-native';
 import { apiFetch } from '../../src/api/client';
 import { useTheme } from '../../src/hooks/useTheme';
+import { useSessionStore } from '../../src/state/session';
 import { useCallStore } from '../../src/state/call';
 import { initials, colorFromString } from '../../src/utils/avatar';
 
 // Mirrors worker.js's GET /api/calls/log response exactly (Registry DO's
 // `/call-log` handler — see the `log.unshift({...})` shape in POST
-// /call-log). Entries here are always personal-scoped: callSignal.ts's
-// logCallEntry() never sends an orgId, so the backend stores/reads them as
-// orgId:null — consistent on both the write and read side, nothing to
-// reconcile with a workspace switcher (mobile doesn't have one yet).
+// /call-log). Now scoped by the session store's activeOrgId, same
+// Personal/Workspace split web already has (worker.js:2805-2806 filters
+// server-side by the `?orgId=` query param this screen sends).
 interface CallLogRow {
   id: string;
   withUserId: string;
@@ -20,6 +20,7 @@ interface CallLogRow {
   outcome: 'answered' | 'missed' | 'declined' | 'busy';
   durationSec: number;
   isVideo: boolean;
+  orgId: string | null;
   ts: number;
 }
 
@@ -47,13 +48,14 @@ export default function CallsScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const startOutgoingCall = useCallStore((s) => s.startOutgoingCall);
   const inCall = useCallStore((s) => s.callState !== 'idle');
+  const activeOrgId = useSessionStore((s) => s.activeOrgId);
 
   const load = useCallback(async () => {
-    const res = await apiFetch<{ log: CallLogRow[] }>('/calls/log?orgId=');
+    const res = await apiFetch<{ log: CallLogRow[] }>(`/calls/log?orgId=${encodeURIComponent(activeOrgId || '')}`);
     if (res.ok) setRows(res.body.log || []);
     else if (rows === null) setRows([]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [activeOrgId]);
 
   useEffect(() => {
     load();
@@ -68,7 +70,7 @@ export default function CallsScreen() {
   const callBack = useCallback(
     (row: CallLogRow, video: boolean) => {
       if (inCall) return;
-      startOutgoingCall(row.withUserId, row.withName, row.withAvatarUrl, video);
+      startOutgoingCall(row.withUserId, row.withName, row.withAvatarUrl, video, row.orgId ?? null);
     },
     [inCall, startOutgoingCall]
   );
