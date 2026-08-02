@@ -125,12 +125,27 @@
 <div id="bgfx"></div>
 
 <div id="login">
-  <div class="card lg">
+  <div class="card lg" id="loginCard">
     <h1>PArA Ops</h1>
     <p>Platform console — sign in with an admin PIN.</p>
     <input id="pinInput" class="mono" type="password" inputmode="numeric" maxlength="12" placeholder="••••••">
     <button id="loginBtn" onclick="doLogin()">Sign in</button>
     <div id="loginErr"></div>
+  </div>
+
+  <!-- Device trust and MFA are two independent per-device gates in
+       worker.js (see /session's device_approval_required and mfa_required
+       checks) — clearing one doesn't clear the other, so this device can
+       hit this box right after clearing the one above if the account also
+       has TOTP/a passkey enabled. Mirrors index.html's mfaVerifyOverlay. -->
+  <div class="card lg" id="mfaVerifyBox" style="display:none;">
+    <h1 style="font-size:18px;">Verify it's you</h1>
+    <p>This device needs a second factor to finish signing in.</p>
+    <input id="mfaVerifyCodeInput" class="mono" type="text" inputmode="numeric" maxlength="10" placeholder="6-digit code" style="margin-top:10px;">
+    <button id="mfaVerifySubmitBtn" onclick="submitMfaVerify()">Verify</button>
+    <button id="mfaVerifyPasskeyBtn" style="display:none; margin-top:8px; background:transparent; border:1px solid var(--glass-brd-hi); color:var(--text-hi);" onclick="submitMfaPasskey()">Use a passkey instead</button>
+    <div id="mfaVerifyError" style="color:var(--danger); font-size:12.5px; margin-top:12px; min-height:16px;"></div>
+    <button style="background:transparent; border:1px solid var(--glass-brd-hi); color:var(--text-mid); margin-top:4px;" onclick="hideMfaVerifyBox()">Back</button>
   </div>
 
   <!-- This origin (admin.parasyte.cloud) is a separate device as far as
@@ -317,6 +332,12 @@ async function apiFetch(path, opts = {}) {
 // returns a short status string instead of touching error DOM directly, so
 // both callers can react in their own context (one shows a PIN-screen
 // error, the other updates the device-approval status line).
+// Set by attemptSession whenever it returns 'mfa_required', since the
+// error body's `methods` field (which second factors this account actually
+// has configured) needs to reach showMfaVerifyBox() but attemptSession
+// itself only returns a plain status string.
+let lastMfaMethods = null;
+
 async function attemptSession(pinHash){
   const res = await fetch('/api/session', {
     method: 'POST',
@@ -326,7 +347,10 @@ async function attemptSession(pinHash){
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
     if (body && body.error === 'device_approval_required') return 'device_approval_required';
-    if (body && body.error === 'mfa_required') return 'mfa_required';
+    if (body && body.error === 'mfa_required') {
+      lastMfaMethods = body.methods || null;
+      return 'mfa_required';
+    }
     return 'fail';
   }
   if (!body.isAdmin) return 'not_admin';
@@ -352,7 +376,8 @@ async function doLogin(){
       pendingLoginPinHash = pinHash;
       showDeviceApprovalBox();
     } else if (result === 'mfa_required') {
-      errEl.textContent = 'MFA is required on this account — sign in on the regular app first to complete it.';
+      pendingLoginPinHash = pinHash;
+      showMfaVerifyBox(lastMfaMethods);
     } else if (result === 'not_admin') {
       errEl.textContent = "This account isn't a platform admin. Ask an existing admin to promote you from Users & devices.";
     } else if (result === 'fail') {
@@ -388,10 +413,19 @@ async function apiFetchAs(path, pinHash, opts = {}) {
   return { ok: res.ok, status: res.status, body };
 }
 
+// Three mutually-exclusive cards share the #login container (the PIN form,
+// device approval, and MFA verify) — this is the one place that decides
+// which is visible, so adding a fourth later doesn't mean re-deriving every
+// existing show/hide pair's "everything else" selector by hand again.
+const LOGIN_BOX_IDS = ['loginCard', 'mfaVerifyBox', 'deviceApprovalBox'];
+function showLoginBox(id){
+  LOGIN_BOX_IDS.forEach((boxId) => {
+    document.getElementById(boxId).style.display = boxId === id ? 'block' : 'none';
+  });
+}
+
 function showDeviceApprovalBox(){
-  document.querySelector('#login .card:not(#deviceApprovalBox)').style.display = 'none';
-  const box = document.getElementById('deviceApprovalBox');
-  box.style.display = 'block';
+  showLoginBox('deviceApprovalBox');
   document.getElementById('deviceApprovalCodeBox').style.display = 'none';
   document.getElementById('deviceApprovalRequestBtn').style.display = 'block';
   document.getElementById('deviceApprovalError').textContent = '';
@@ -402,8 +436,7 @@ function showDeviceApprovalBox(){
 function hideDeviceApprovalBox(){
   clearInterval(deviceApprovalPollTimer);
   deviceApprovalPollTimer = null;
-  document.getElementById('deviceApprovalBox').style.display = 'none';
-  document.querySelector('#login .card:not(#deviceApprovalBox)').style.display = '';
+  showLoginBox('loginCard');
 }
 
 async function requestDeviceApproval(){
@@ -436,6 +469,11 @@ async function requestDeviceApproval(){
       const result = await attemptSession(pendingLoginPinHash);
       if (result === 'ok') {
         hideDeviceApprovalBox();
+      } else if (result === 'mfa_required') {
+        // Device trust and MFA are independent per-device gates — clearing
+        // one doesn't clear the other, this account also has TOTP/a passkey
+        // configured and this device hasn't cleared that yet either.
+        showMfaVerifyBox(lastMfaMethods);
       } else {
         // Trusted now, but something else still blocks sign-in — say so
         // instead of leaving "Signing you in…" up forever.
@@ -450,6 +488,123 @@ async function requestDeviceApproval(){
       document.getElementById('deviceApprovalRequestBtn').style.display = 'block';
     }
   }, 4000);
+}
+
+// ================= MFA VERIFY (login-time second factor) ==================
+// Reached from doLogin's mfa_required branch, or from the device-approval
+// poll above if the account has both gates enabled. pendingLoginPinHash is
+// already set by whichever of those called this.
+function bufToB64url(buf){
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+function b64urlToBuf(b64url){
+  const b64 = String(b64url).replace(/-/g,'+').replace(/_/g,'/');
+  const pad = b64.length % 4 === 0 ? '' : '='.repeat(4 - (b64.length % 4));
+  const bin = atob(b64 + pad);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  return buf;
+}
+
+function showMfaVerifyBox(methods){
+  methods = methods || {};
+  showLoginBox('mfaVerifyBox');
+  document.getElementById('mfaVerifyCodeInput').value = '';
+  document.getElementById('mfaVerifyError').textContent = '';
+  // A passkey-only account (no TOTP configured) has nothing to type into
+  // the code box — showing it anyway would just be a dead end that always
+  // says "that code didn't work" no matter what's entered.
+  const showCode = methods.totp !== false;
+  document.getElementById('mfaVerifyCodeInput').style.display = showCode ? 'block' : 'none';
+  document.getElementById('mfaVerifySubmitBtn').style.display = showCode ? 'block' : 'none';
+  document.getElementById('mfaVerifyPasskeyBtn').style.display = methods.webauthn ? 'block' : 'none';
+  if (showCode) setTimeout(() => document.getElementById('mfaVerifyCodeInput').focus(), 50);
+}
+
+function hideMfaVerifyBox(){
+  showLoginBox('loginCard');
+}
+
+async function submitMfaVerify(){
+  const btn = document.getElementById('mfaVerifySubmitBtn');
+  const errEl = document.getElementById('mfaVerifyError');
+  const code = document.getElementById('mfaVerifyCodeInput').value.trim();
+  errEl.textContent = '';
+  if (!code) { errEl.textContent = 'Enter a code.'; return; }
+  btn.disabled = true;
+  const r = await apiFetchAs('/mfa/verify-login', pendingLoginPinHash, {
+    method: 'POST',
+    body: JSON.stringify({ deviceId: myDeviceId, code }),
+  });
+  btn.disabled = false;
+  if (!r.ok) {
+    errEl.textContent = r.body && r.body.error === 'invalid_code' ? "That code didn't work. Check the app and try again, or use a backup code."
+      : r.body && r.body.error === 'rate_limited' ? 'Too many attempts. Wait a bit and try again.'
+      : "Couldn't verify that. Try again.";
+    return;
+  }
+  // This device's mfaVerifiedDeviceIds entry is now set — replay the same
+  // session call, same pattern as the device-approval flow, no reload.
+  const result = await attemptSession(pendingLoginPinHash);
+  if (result === 'ok') return; // attemptSession already called enterApp()
+  errEl.textContent = result === 'not_admin'
+    ? "Verified, but this account isn't a platform admin."
+    : 'Verified, but sign-in still failed — go back and try again.';
+}
+document.getElementById('mfaVerifyCodeInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') submitMfaVerify();
+});
+
+async function submitMfaPasskey(){
+  const errEl = document.getElementById('mfaVerifyError');
+  errEl.textContent = '';
+  if (!window.PublicKeyCredential || !navigator.credentials) {
+    errEl.textContent = "This browser doesn't support passkeys — enter a code instead.";
+    return;
+  }
+  const optRes = await apiFetchAs('/webauthn/auth-options', pendingLoginPinHash, { method: 'POST', body: JSON.stringify({ pinHash: pendingLoginPinHash }) });
+  if (!optRes.ok) {
+    errEl.textContent = "Couldn't start passkey sign-in. Try a code instead.";
+    return;
+  }
+  const opts = optRes.body;
+  let assertion;
+  try {
+    assertion = await navigator.credentials.get({
+      publicKey: {
+        challenge: b64urlToBuf(opts.challenge),
+        rpId: opts.rpId,
+        allowCredentials: (opts.allowCredentialIds || []).map((id) => ({ type: 'public-key', id: b64urlToBuf(id) })),
+        userVerification: 'preferred',
+        timeout: 60000,
+      },
+    });
+  } catch (e) {
+    errEl.textContent = e && e.name === 'NotAllowedError' ? 'Cancelled.' : "Couldn't use that passkey. Try a code instead.";
+    return;
+  }
+  const r = await apiFetchAs('/webauthn/auth-verify', pendingLoginPinHash, {
+    method: 'POST',
+    body: JSON.stringify({
+      deviceId: myDeviceId,
+      credentialId: bufToB64url(assertion.rawId),
+      authenticatorData: bufToB64url(assertion.response.authenticatorData),
+      clientDataJSON: bufToB64url(assertion.response.clientDataJSON),
+      signature: bufToB64url(assertion.response.signature),
+    }),
+  });
+  if (!r.ok) {
+    errEl.textContent = r.body && r.body.error === 'rate_limited' ? 'Too many attempts. Wait a bit and try again.' : "That passkey didn't verify. Try a code instead.";
+    return;
+  }
+  const result = await attemptSession(pendingLoginPinHash);
+  if (result === 'ok') return;
+  errEl.textContent = result === 'not_admin'
+    ? "Verified, but this account isn't a platform admin."
+    : 'Verified, but sign-in still failed — go back and try again.';
 }
 
 function doLogout(){
