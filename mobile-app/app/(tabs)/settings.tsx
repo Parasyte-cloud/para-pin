@@ -6,6 +6,7 @@ import { useSessionStore } from '../../src/state/session';
 import { ensurePushRegistered, type PushRegisterResult } from '../../src/state/push';
 import { apiFetch } from '../../src/api/client';
 import { rewrapAllChatsForDevice } from '../../src/state/e2ee';
+import { AuthBackdrop } from '../../src/components/AuthBackdrop';
 import type { ApiErrorBody } from '../../src/types';
 
 const BIOMETRIC_LABEL = Platform.OS === 'ios' ? 'Face ID / Touch ID' : 'Fingerprint unlock';
@@ -135,7 +136,8 @@ export default function SettingsScreen() {
   };
 
   return (
-    <ScrollView style={[styles.container, { backgroundColor: theme.bg0 }]} contentContainerStyle={styles.content}>
+    <AuthBackdrop>
+      <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <View style={[styles.card, { backgroundColor: theme.glass, borderColor: theme.glassBrd }]}>
         <Text style={[styles.label, { color: theme.textLow }]}>Signed in as</Text>
         <Text style={[styles.value, { color: theme.textHi }]}>{displayName || 'Someone'}</Text>
@@ -253,13 +255,16 @@ export default function SettingsScreen() {
       >
         <Text style={{ color: theme.danger, fontWeight: '600' }}>Sign out</Text>
       </Pressable>
-    </ScrollView>
+      </ScrollView>
+    </AuthBackdrop>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  content: { padding: 16, gap: 12 },
+  // Bottom padding clears the floating BottomNav pill (app/(tabs)/_layout.tsx) —
+  // see index.tsx's identical comment.
+  content: { padding: 16, paddingBottom: 110, gap: 12 },
   card: { borderWidth: 1, borderRadius: 16, padding: 14, gap: 4 },
   label: { fontSize: 11.5, textTransform: 'uppercase', letterSpacing: 0.5 },
   value: { fontSize: 15, fontWeight: '600' },

@@ -87,6 +87,13 @@ interface SessionState {
   unlockWithBiometric: () => Promise<boolean>;
   unlockWithPin: (pin: string) => Promise<{ ok: true } | { ok: false; error: ApiErrorBody | null; status: number }>;
   setBiometricEnabled: (enabled: boolean) => Promise<boolean>;
+  // Manual re-lock, e.g. tapping the nav bar's lock medallion (mirrors
+  // web's lock button — index.html's medallion taps call lock(), see the
+  // nav research notes in mobile-app/README.md). Works the same whether
+  // biometricEnabled is on or not — app/(auth)/lock.tsx already has a PIN
+  // fallback path either way, this just reuses the existing isLocked gate
+  // app/(tabs)/_layout.tsx already redirects on.
+  lockNow: () => void;
   logout: () => Promise<void>;
 }
 
@@ -275,6 +282,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set({ biometricEnabled: false });
     return true;
   },
+
+  lockNow: () => set({ isLocked: true }),
 
   logout: async () => {
     await SecureStore.deleteItemAsync(PIN_HASH_KEY);

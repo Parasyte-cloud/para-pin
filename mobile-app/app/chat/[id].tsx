@@ -37,6 +37,7 @@ import { useCallStore } from '../../src/state/call';
 import { colorFromString } from '../../src/utils/avatar';
 import MessageBubble, { formatTime } from '../../src/components/MessageBubble';
 import MessageActionSheet from '../../src/components/MessageActionSheet';
+import { AuthBackdrop } from '../../src/components/AuthBackdrop';
 import type { ChatMessage } from '../../src/types';
 
 const DECRYPT_RETRY_MS = 5000;
@@ -423,15 +424,18 @@ export default function ChatDetailScreen() {
 
   if (!chat) {
     return (
-      <View style={[styles.container, { backgroundColor: theme.bg0, alignItems: 'center', justifyContent: 'center' }]}>
-        <Text style={{ color: theme.textMid }}>Chat not found.</Text>
-      </View>
+      <AuthBackdrop>
+        <View style={[styles.container, { alignItems: 'center', justifyContent: 'center' }]}>
+          <Text style={{ color: theme.textMid }}>Chat not found.</Text>
+        </View>
+      </AuthBackdrop>
     );
   }
 
   return (
+    <AuthBackdrop>
     <KeyboardAvoidingView
-      style={[styles.container, { backgroundColor: theme.bg0 }]}
+      style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
     >
@@ -563,12 +567,15 @@ export default function ChatDetailScreen() {
         onClose={() => setActionSheetFor(null)}
       />
     </KeyboardAvoidingView>
+    </AuthBackdrop>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  listContent: { paddingHorizontal: 10, paddingVertical: 12, flexGrow: 1, justifyContent: 'flex-end' },
+  // 14px (was 10) — extra clearance for the bubble tail's -6px protrusion
+  // (MessageBubble.tsx's tailMine/tailTheirs), see that file's comment.
+  listContent: { paddingHorizontal: 14, paddingVertical: 12, flexGrow: 1, justifyContent: 'flex-end' },
   empty: { transform: [{ scaleY: -1 }], alignItems: 'center', padding: 24 },
   keyBanner: { padding: 8, borderBottomWidth: 1, alignItems: 'center' },
   sendErrorBanner: {

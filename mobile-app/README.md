@@ -929,3 +929,90 @@ force a hardware route change on top of the OS's own default (speaker for
 video, earpiece for audio). Flagged rather than shipping it silently.
 
 Verified: `tsc --noEmit` clean.
+
+## Nav redesign, ambient backdrop everywhere, bubble/layout fixes
+
+- **`src/components/BottomNav.tsx`** replaces expo-router's default tab
+  bar entirely (`app/(tabs)/_layout.tsx` sets `tabBarStyle:{display:'none'}`
+  and renders this as a floating sibling instead) — a real liquid-glass
+  pill (`expo-blur` BlurView, translucent border, drop shadow) with a
+  raised circular lock medallion in the middle that isn't a route at all;
+  tapping it calls a new `useSessionStore.lockNow()` action and reuses the
+  existing `isLocked` → `/(auth)/lock` redirect that was already there for
+  biometric re-entry. **Scope note**: web's nav has 5 real destinations
+  (Profile/Calls/Chats/Settings, 2-2 split around the medallion) — mobile
+  only has 3 screens (no dedicated Profile screen exists), so this renders
+  Calls / medallion / Chats / Settings (1-2 split) rather than inventing a
+  Profile screen that wasn't asked for. Every tab screen got matching
+  bottom padding added since a floating/absolute nav doesn't reserve
+  space the way the native tab bar used to.
+- **`AuthBackdrop`** (previously PIN/lock-only) is now used on every
+  screen — chat list, calls, settings, chat detail — for the same
+  teal/orange ambient glow throughout instead of just at the door. No new
+  dependency: it's the same two-large-soft-circles technique already used
+  for `CallOverlay`'s audio-only backdrop, not an image or gradient
+  library.
+- **Bubble gradient**: web's own-message bubbles use a real two-stop
+  diagonal gradient (`rgba(0,212,255,0.22)`→`rgba(255,106,0,0.16)`, CSS
+  `linear-gradient`). Porting that exactly needs `expo-linear-gradient`,
+  which isn't installed and couldn't be added this session (this sandbox
+  has no npm registry access — `expo install` failed with a network
+  error). Left as solid `theme.ice` for now rather than risk shipping an
+  unverified new native dependency. Flagging this explicitly: if you want
+  the literal gradient, run `npx expo install expo-linear-gradient`
+  yourself and it's a small, contained follow-up change.
+- **Bubble width/tail clipping fix**: `MessageBubble.tsx`'s `bubbleCol`
+  was `maxWidth:'78%'` against only 10px of list padding
+  (`chat/[id].tsx`'s `listContent`) — a right-aligned "mine" bubble had
+  almost no clearance before the tail's `-6px` protrusion ran into the
+  screen edge, which is what showed up as a clipped tail. Now 74% width +
+  14px list padding.
+- Lock icon: already correct (see the earlier crash/bug-sweep section —
+  `assets/lock-logo.png` was already byte-identical to web's and already
+  wired into `pin.tsx`/`lock.tsx`). The new nav medallion reuses the same
+  asset, so the "shield+logo" treatment is now also in the nav, not just
+  the door screens.
+
+Verified: `tsc --noEmit` clean. Not yet verified on-device (no new build
+shipped since this round landed).
+
+**Still queued, not started this round**: iOS-native-style call screen
+(2x3 circular button grid matching the reference screenshot), iOS-native-
+style message long-press action sheet (reaction bar + sender avatar +
+liquid-glass action list). Both are real, scoped-out follow-ups, not
+forgotten.
+
+## General bug sweep of the nav/workspace round
+
+Two real bugs found and fixed:
+
+1. **`app/(tabs)/calls.tsx`'s `load()` had a stale-closure bug.** It was a
+   `useCallback` that read `rows` in its body but only listed `activeOrgId`
+   as a dependency — React kept reusing the same closure across renders,
+   so the `rows === null` check inside it stayed frozen at whatever `rows`
+   was when that closure was first created (usually `null`, from before
+   the first successful load). A transient failure on pull-to-refresh
+   would trip that stale check and wipe already-loaded call history back
+   to an empty list, even though good data was on screen a second earlier.
+   Rewritten as a plain effect with a functional `setRows((prev) => ...)`
+   update instead, which also fixes a second, related gap: switching
+   workspaces quickly (Personal → A → B) had no guard against A's slower
+   response landing after B's and showing the wrong workspace's calls —
+   now uses the same `cancelled`-flag pattern `app/(tabs)/index.tsx`'s
+   effects already use.
+2. **`BottomNav.tsx`'s drop shadow silently didn't render on iOS.** The
+   shadow properties (`shadowColor`/`shadowOffset`/etc.) were on the same
+   style as `overflow:'hidden'` (needed to clip the BlurView to the pill
+   shape) — iOS drops a layer's shadow entirely when it also clips its
+   overflow, a well-known RN/iOS interaction. Moved the shadow onto a
+   separate wrapping `View` with no `overflow` set, keeping the clip on
+   the inner `BlurView`.
+
+Everything else audited (route-matching logic, `orgId` reset paths on
+every call-ending branch, AuthBackdrop/KeyboardAvoidingView nesting,
+BottomNav's floating-pill padding clearance on every screen, asset paths)
+came back clean — no action needed.
+
+Verified: `tsc --noEmit` clean, `npm test` in the repo root still 28/28
+(unrelated to mobile, but run anyway since worker.js was touched this
+session too).

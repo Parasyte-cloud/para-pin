@@ -162,7 +162,7 @@ export default function ChatsScreen() {
             </Text>
           </View>
         }
-        contentContainerStyle={sorted.length === 0 ? styles.emptyContainer : undefined}
+        contentContainerStyle={sorted.length === 0 ? styles.emptyContainer : styles.listContent}
         style={{ flex: 1 }}
       />
     </AuthBackdrop>
@@ -180,5 +180,11 @@ const styles = StyleSheet.create({
   badge: { minWidth: 20, height: 20, borderRadius: 10, paddingHorizontal: 5, alignItems: 'center', justifyContent: 'center' },
   badgeText: { color: '#0a0d12', fontSize: 11, fontWeight: '700' },
   empty: { padding: 32 },
-  emptyContainer: { flexGrow: 1, justifyContent: 'center' },
+  // 100px clears the floating BottomNav pill (see app/(tabs)/_layout.tsx)
+  // so the last row in the list isn't hidden underneath it — the default
+  // native tab bar used to reserve this space automatically; a
+  // floating/absolute nav doesn't, so screens have to leave room for it
+  // themselves.
+  listContent: { paddingBottom: 100 },
+  emptyContainer: { flexGrow: 1, justifyContent: 'center', paddingBottom: 100 },
 });

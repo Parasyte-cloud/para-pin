@@ -5,6 +5,7 @@ import { useTheme } from '../../src/hooks/useTheme';
 import { useSessionStore } from '../../src/state/session';
 import { useCallStore } from '../../src/state/call';
 import { initials, colorFromString } from '../../src/utils/avatar';
+import { AuthBackdrop } from '../../src/components/AuthBackdrop';
 
 // Mirrors worker.js's GET /api/calls/log response exactly (Registry DO's
 // `/call-log` handler — see the `log.unshift({...})` shape in POST
@@ -50,22 +51,41 @@ export default function CallsScreen() {
   const inCall = useCallStore((s) => s.callState !== 'idle');
   const activeOrgId = useSessionStore((s) => s.activeOrgId);
 
-  const load = useCallback(async () => {
-    const res = await apiFetch<{ log: CallLogRow[] }>(`/calls/log?orgId=${encodeURIComponent(activeOrgId || '')}`);
-    if (res.ok) setRows(res.body.log || []);
-    else if (rows === null) setRows([]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeOrgId]);
+  const fetchCallLog = useCallback((orgId: string | null) => {
+    return apiFetch<{ log: CallLogRow[] }>(`/calls/log?orgId=${encodeURIComponent(orgId || '')}`);
+  }, []);
 
+  // Auto-load whenever the active workspace changes, with the same
+  // cancelled-flag pattern app/(tabs)/index.tsx's effects use — without
+  // it, switching Personal -> Workspace A -> Workspace B quickly could
+  // let A's slower response resolve after B's and show A's call history
+  // while activeOrgId already points at B. The `setRows((prev) => ...)`
+  // functional form here also fixes a previous bug: the old version read
+  // `rows` directly inside a useCallback whose deps didn't include it, so
+  // a failed request always saw a stale snapshot of `rows` frozen from
+  // whenever that closure was created (often `null`, from before the
+  // first successful load) — a transient failure on pull-to-refresh could
+  // wipe already-loaded history it had no business touching.
   useEffect(() => {
-    load();
-  }, [load]);
+    let cancelled = false;
+    (async () => {
+      const res = await fetchCallLog(activeOrgId);
+      if (cancelled) return;
+      if (res.ok) setRows(res.body.log || []);
+      else setRows((prev) => (prev === null ? [] : prev));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeOrgId, fetchCallLog]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await load();
+    const res = await fetchCallLog(activeOrgId);
+    if (res.ok) setRows(res.body.log || []);
+    else setRows((prev) => (prev === null ? [] : prev));
     setRefreshing(false);
-  }, [load]);
+  }, [activeOrgId, fetchCallLog]);
 
   const callBack = useCallback(
     (row: CallLogRow, video: boolean) => {
@@ -126,7 +146,7 @@ export default function CallsScreen() {
   );
 
   return (
-    <View style={[styles.container, { backgroundColor: theme.bg0 }]}>
+    <AuthBackdrop>
       <FlatList
         data={rows || []}
         keyExtractor={(item) => item.id}
@@ -142,9 +162,9 @@ export default function CallsScreen() {
             </View>
           ) : null
         }
-        contentContainerStyle={!rows || rows.length === 0 ? styles.emptyContainer : undefined}
+        contentContainerStyle={!rows || rows.length === 0 ? styles.emptyContainer : styles.listContent}
       />
-    </View>
+    </AuthBackdrop>
   );
 }
 
@@ -159,5 +179,7 @@ const styles = StyleSheet.create({
   actions: { flexDirection: 'row', gap: 16 },
   empty: { padding: 32, alignItems: 'center' },
   emptyTitle: { fontSize: 16, fontWeight: '700' },
-  emptyContainer: { flexGrow: 1, justifyContent: 'center' },
+  // See index.tsx's identical comment — clears the floating BottomNav pill.
+  listContent: { paddingBottom: 100 },
+  emptyContainer: { flexGrow: 1, justifyContent: 'center', paddingBottom: 100 },
 });

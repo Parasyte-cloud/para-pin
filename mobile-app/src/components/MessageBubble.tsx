@@ -209,7 +209,12 @@ const styles = StyleSheet.create({
   row: { flexDirection: 'row' },
   rowMine: { justifyContent: 'flex-end' },
   rowTheirs: { justifyContent: 'flex-start' },
-  bubbleCol: { maxWidth: '78%' },
+  // 74% (was 78%) plus the FlatList's own horizontal padding bump (see
+  // chat/[id].tsx's listContent style) — at 78% a right-aligned "mine"
+  // bubble had almost no clearance before the tail's -6px protrusion (see
+  // tailMine below) ran into the screen edge, which is what read as a
+  // clipped/cut-off tail in testing.
+  bubbleCol: { maxWidth: '74%' },
   colMine: { alignItems: 'flex-end' },
   colTheirs: { alignItems: 'flex-start' },
   senderLabel: { fontSize: 11.5, fontWeight: '600', marginBottom: 2, marginLeft: 12 },

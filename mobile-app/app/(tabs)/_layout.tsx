@@ -1,11 +1,8 @@
 import { Redirect, Tabs } from 'expo-router';
-import { Text, type ColorValue } from 'react-native';
+import { View, StyleSheet } from 'react-native';
 import { useSessionStore } from '../../src/state/session';
 import { useTheme } from '../../src/hooks/useTheme';
-
-function TabIcon({ symbol, color }: { symbol: string; color: ColorValue }) {
-  return <Text style={{ fontSize: 20, color }}>{symbol}</Text>;
-}
+import BottomNav from '../../src/components/BottomNav';
 
 export default function TabsLayout() {
   const pinHash = useSessionStore((s) => s.pinHash);
@@ -15,27 +12,28 @@ export default function TabsLayout() {
   if (isLocked) return <Redirect href="/(auth)/lock" />;
 
   return (
-    <Tabs
-      screenOptions={{
-        headerStyle: { backgroundColor: theme.bg1 },
-        headerTintColor: theme.textHi,
-        tabBarStyle: { backgroundColor: theme.bg1, borderTopColor: theme.glassBrd },
-        tabBarActiveTintColor: theme.ice,
-        tabBarInactiveTintColor: theme.textLow,
-      }}
-    >
-      <Tabs.Screen
-        name="index"
-        options={{ title: 'Chats', tabBarIcon: ({ color }) => <TabIcon symbol="💬" color={color} /> }}
-      />
-      <Tabs.Screen
-        name="calls"
-        options={{ title: 'Calls', tabBarIcon: ({ color }) => <TabIcon symbol="📞" color={color} /> }}
-      />
-      <Tabs.Screen
-        name="settings"
-        options={{ title: 'Settings', tabBarIcon: ({ color }) => <TabIcon symbol="⚙️" color={color} /> }}
-      />
-    </Tabs>
+    <View style={styles.root}>
+      <Tabs
+        screenOptions={{
+          headerStyle: { backgroundColor: theme.bg1 },
+          headerTintColor: theme.textHi,
+          // Default native tab bar is fully replaced by <BottomNav> below
+          // (rendered as a floating sibling, same as web's
+          // `.nav-wrap{position:fixed}` — see BottomNav.tsx) rather than
+          // styled to look like it — a real liquid-glass pill + center
+          // medallion isn't achievable through tabBarStyle alone.
+          tabBarStyle: { display: 'none' },
+        }}
+      >
+        <Tabs.Screen name="index" options={{ title: 'Chats' }} />
+        <Tabs.Screen name="calls" options={{ title: 'Calls' }} />
+        <Tabs.Screen name="settings" options={{ title: 'Settings' }} />
+      </Tabs>
+      <BottomNav />
+    </View>
   );
 }
+
+const styles = StyleSheet.create({
+  root: { flex: 1 },
+});
