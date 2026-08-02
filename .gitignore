@@ -5,6 +5,5 @@ android/
 *.zip
 *.bak
 *.bak2
-mobile-app/google-services.json
 mobile-app/google-service-account.json
 *.p8

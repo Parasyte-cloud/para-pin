@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "605214907688",
+    "project_id": "para-2fcb2",
+    "storage_bucket": "para-2fcb2.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:605214907688:android:a142f9b5c3898dffc3041d",
+        "android_client_info": {
+          "package_name": "cloud.parasyte.parapin"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDHZpYkyK6x6QqyFlF7rA41je622-70jaE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
