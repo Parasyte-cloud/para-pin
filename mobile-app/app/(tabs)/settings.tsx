@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react';
-import { View, Text, Pressable, StyleSheet, ScrollView, Switch, Platform } from 'react-native';
+import { View, Text, Pressable, StyleSheet, ScrollView, Switch, Platform, TextInput } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import { useTheme } from '../../src/hooks/useTheme';
 import { useSessionStore } from '../../src/state/session';
 import { ensurePushRegistered } from '../../src/state/push';
+import { apiFetch } from '../../src/api/client';
+import { rewrapAllChatsForDevice } from '../../src/state/e2ee';
+import type { ApiErrorBody } from '../../src/types';
 
 const BIOMETRIC_LABEL = Platform.OS === 'ios' ? 'Face ID / Touch ID' : 'Fingerprint unlock';
 
@@ -18,6 +21,10 @@ export default function SettingsScreen() {
   const [biometricBusy, setBiometricBusy] = useState(false);
   const [pushGranted, setPushGranted] = useState<boolean | null>(null);
   const [pushBusy, setPushBusy] = useState(false);
+  const deviceId = useSessionStore((s) => s.deviceId);
+  const [approveCode, setApproveCode] = useState('');
+  const [approveBusy, setApproveBusy] = useState(false);
+  const [approveMsg, setApproveMsg] = useState<{ text: string; ok: boolean } | null>(null);
 
   useEffect(() => {
     Notifications.getPermissionsAsync()
@@ -37,6 +44,43 @@ export default function SettingsScreen() {
     const p = await Notifications.getPermissionsAsync().catch(() => null);
     setPushGranted(p ? !!p.granted : null);
     setPushBusy(false);
+  };
+
+  // Mirrors index.html's #approveDeviceSubmitBtn handler (index.html:3541-
+  // 3573) — this is the counterpart to DeviceApprovalGate on the PIN/lock
+  // screens. deviceId (this already-trusted device's own) is what lets the
+  // server confirm a real trusted device is vouching, not just that
+  // whoever's calling knows the shared PIN; see the server-side comment on
+  // /device-link/approve in worker.js for why that distinction matters.
+  const onApproveDevice = async () => {
+    if (!/^\d{6}$/.test(approveCode.trim())) {
+      setApproveMsg({ text: 'Enter the 6-digit code shown on the new device.', ok: false });
+      return;
+    }
+    setApproveBusy(true);
+    const r = await apiFetch<{ ok: true; approvedDeviceId?: string }>('/device-link/approve', {
+      method: 'POST',
+      body: JSON.stringify({ code: approveCode.trim(), deviceId }),
+    });
+    setApproveBusy(false);
+    if (r.ok) {
+      setApproveMsg({ text: 'Device approved.', ok: true });
+      setApproveCode('');
+      if (r.body.approvedDeviceId) rewrapAllChatsForDevice(r.body.approvedDeviceId); // fire-and-forget
+      return;
+    }
+    const err = r.body as ApiErrorBody | null;
+    const text =
+      err?.error === 'wrong_code'
+        ? "That code doesn't match."
+        : err?.error === 'expired'
+          ? 'That code expired.'
+          : err?.error === 'not_a_trusted_device'
+            ? "This device isn't trusted yet, so it can't approve others."
+            : err?.error === 'rate_limited'
+              ? `Too many attempts. Try again in ${err.retryAfterMs ? Math.ceil(err.retryAfterMs / 1000) : 'a bit'}s.`
+              : "Couldn't approve that device. Try again.";
+    setApproveMsg({ text, ok: false });
   };
 
   return (
@@ -103,6 +147,41 @@ export default function SettingsScreen() {
         </View>
       </View>
 
+      <View style={[styles.card, { backgroundColor: theme.glass, borderColor: theme.glassBrd }]}>
+        <Text style={[styles.value, { color: theme.textHi }]}>Approve a new device</Text>
+        <Text style={[styles.rowHint, { color: theme.textMid }]}>
+          Signing in on another device? Enter the 6-digit code it shows you.
+        </Text>
+        <TextInput
+          value={approveCode}
+          onChangeText={(t) => {
+            setApproveCode(t.replace(/[^0-9]/g, '').slice(0, 6));
+            setApproveMsg(null);
+          }}
+          placeholder="6-digit code"
+          placeholderTextColor={theme.textLow}
+          keyboardType="number-pad"
+          maxLength={6}
+          style={[
+            styles.codeInput,
+            { color: theme.textHi, borderColor: theme.glassBrd, backgroundColor: theme.bg0 },
+          ]}
+        />
+        {approveMsg && (
+          <Text style={[styles.rowHint, { color: approveMsg.ok ? theme.ok : theme.danger }]}>{approveMsg.text}</Text>
+        )}
+        <Pressable
+          onPress={onApproveDevice}
+          disabled={approveBusy}
+          style={({ pressed }) => [
+            styles.approveBtn,
+            { backgroundColor: theme.ice, opacity: approveBusy ? 0.5 : pressed ? 0.7 : 1 },
+          ]}
+        >
+          <Text style={{ color: '#0a0d12', fontWeight: '700', fontSize: 13 }}>Approve</Text>
+        </Pressable>
+      </View>
+
       <Pressable
         onPress={() => logout()}
         style={({ pressed }) => [
@@ -126,4 +205,15 @@ const styles = StyleSheet.create({
   rowHint: { fontSize: 12, marginTop: 3, lineHeight: 16 },
   signOutBtn: { borderWidth: 1, borderRadius: 999, paddingVertical: 12, alignItems: 'center', marginTop: 8 },
   enableBtn: { borderRadius: 999, paddingHorizontal: 14, paddingVertical: 9 },
+  codeInput: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    fontSize: 16,
+    textAlign: 'center',
+    letterSpacing: 4,
+    marginTop: 4,
+  },
+  approveBtn: { borderRadius: 999, paddingVertical: 10, alignItems: 'center', marginTop: 4 },
 });

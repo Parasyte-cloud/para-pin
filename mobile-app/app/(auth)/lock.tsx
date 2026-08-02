@@ -5,6 +5,7 @@ import { useSessionStore } from '../../src/state/session';
 import { PinKeypad } from '../../src/components/PinKeypad';
 import { authErrorMessage } from '../../src/utils/authErrors';
 import { AuthBackdrop } from '../../src/components/AuthBackdrop';
+import { DeviceApprovalGate } from '../../src/components/DeviceApprovalGate';
 
 // Same badge+wordmark asset as pin.tsx — see the comment there.
 const LOGO_ASPECT = 640 / 502;
@@ -15,9 +16,17 @@ export default function LockScreen() {
   const isLoading = useSessionStore((s) => s.isLoading);
   const unlockWithBiometric = useSessionStore((s) => s.unlockWithBiometric);
   const unlockWithPin = useSessionStore((s) => s.unlockWithPin);
+  const storedPinHash = useSessionStore((s) => s.pinHash);
+  const deviceId = useSessionStore((s) => s.deviceId);
   const [showPinFallback, setShowPinFallback] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [attempting, setAttempting] = useState(false);
+  // Set when this device's own already-stored credential still hits
+  // device_approval_required — e.g. an admin removed this device from
+  // Settings > Security > Devices on another client, so re-entry needs a
+  // fresh approval same as a brand-new sign-in would. Holds the pin only
+  // long enough to retry unlockWithPin once approved.
+  const [pendingApproval, setPendingApproval] = useState<{ pin: string } | null>(null);
 
   const tryBiometric = useCallback(async () => {
     setAttempting(true);
@@ -44,12 +53,23 @@ export default function LockScreen() {
       setError(null);
       const result = await unlockWithPin(pin);
       if (!result.ok) {
+        if (result.error?.error === 'device_approval_required') {
+          setPendingApproval({ pin });
+          return;
+        }
         // Real status now (was hardcoded to 0) — see pin.tsx's onComplete.
         setError(authErrorMessage(result.error, result.status));
       }
     },
     [unlockWithPin]
   );
+
+  const onApproved = useCallback(() => {
+    if (!pendingApproval) return;
+    const { pin } = pendingApproval;
+    setPendingApproval(null);
+    onPinComplete(pin);
+  }, [pendingApproval, onPinComplete]);
 
   return (
     <AuthBackdrop>
@@ -65,7 +85,17 @@ export default function LockScreen() {
           </Text>
         </View>
 
-        {!showPinFallback ? (
+        {pendingApproval ? (
+          // storedPinHash/deviceId are guaranteed set here — this screen only
+          // ever renders once hydrate() has both (see app/_layout.tsx's
+          // isHydrated gate and this screen's own pinHash-required routing).
+          <DeviceApprovalGate
+            pinHash={storedPinHash!}
+            deviceId={deviceId!}
+            onApproved={onApproved}
+            onCancel={() => setPendingApproval(null)}
+          />
+        ) : !showPinFallback ? (
           <View style={styles.center}>
             <Pressable
               onPress={tryBiometric}

@@ -182,6 +182,37 @@ export async function ensureChatKey(chat: ChatSummary): Promise<Uint8Array | nul
   return rawKey;
 }
 
+// Called right after THIS (already-trusted) device approves a new device
+// on the same account, via DeviceApprovalGate's counterpart in
+// settings.tsx. Mirrors index.html's rewrapAllChatsForDevice
+// (index.html:10697-10710): the new device generated a keypair and
+// uploaded its public key before requesting approval, but has no way to
+// get the actual chat keys — only a device that already holds them can
+// hand out a wrap for a new one. Best-effort/fire-and-forget: if this
+// fails partway, the new device just waits for a fresh message in each
+// still-unwrapped chat instead (ensureChatKey retries automatically).
+export async function rewrapAllChatsForDevice(newDeviceId: string): Promise<void> {
+  try {
+    const { userId: myUserId, chats } = useSessionStore.getState();
+    if (!myUserId) return;
+    peerDeviceKeysCache.delete(myUserId); // force a fresh lookup — the new key was likely just uploaded moments ago
+    const mine = await fetchPeerDeviceKeys(myUserId);
+    const newDevicePub = mine[newDeviceId];
+    if (!newDevicePub) return; // hasn't uploaded its key yet, nothing to wrap against
+    for (const chat of chats) {
+      const key = await ensureChatKey(chat);
+      if (!key) continue;
+      const wrap = wrapRawKeyForDevice(key, newDevicePub);
+      await apiFetch(`/chats/${chat.id}/e2ee-wraps`, {
+        method: 'POST',
+        body: JSON.stringify({ wraps: { [myUserId]: { [newDeviceId]: wrap } } }),
+      });
+    }
+  } catch {
+    // best-effort, see comment above
+  }
+}
+
 // Legacy pre-multi-device pairwise DM key — decrypt-only fallback for old
 // DM history (index.html:10467-10506's fetchPeerLegacyPublicKey /
 // ensureLegacyDmKey). `e2eePublicKey` on the /users record is the OTHER

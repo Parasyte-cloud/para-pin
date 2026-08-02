@@ -111,8 +111,9 @@ end.
 - PIN entry/creation (`app/(auth)/pin.tsx`) wired to real `POST
   /api/session`, same auth header pattern as web (`X-Para-Pin-Hash`),
   handles every real error case the server returns (`rate_limited`,
-  `pin_disabled`, `device_approval_required`, `mfa_required` — MFA punts to
-  the web app since native TOTP/WebAuthn UI isn't built).
+  `pin_disabled`, `device_approval_required` (full self-serve device-link
+  flow, see below — not just an error message), `mfa_required` — MFA punts
+  to the web app since native TOTP/WebAuthn UI isn't built).
 - Face ID / fingerprint quick-unlock (`app/(auth)/lock.tsx`, opt-in via
   Settings): a LOCAL device-lock gate on top of the real credential, not a
   replacement for it — PIN is still what's sent to the server. Doesn't yet
@@ -537,3 +538,42 @@ yet). Both are noted inline in the two screen files rather than silently
 dropped.
 
 Verified after all changes: `tsc --noEmit` clean.
+
+## Device approval: mobile could trigger it but never resolve it
+
+Found while testing a real sign-in after the fixes above: any account with
+an already-trusted device (in practice, almost always the web app) rejects
+a new mobile sign-in with `device_approval_required` — this is the
+device-trust feature working exactly as designed server-side
+(worker.js:1904-1913: first device ever on an account auto-trusts itself,
+every device after that needs an existing one to vouch for it). The bug
+was that mobile had no way to act on it in either direction: it could
+display the error but had no "request approval" flow to run, and had no
+screen at all for an already-trusted mobile device to approve a pending
+one. Web has always had both halves of this (`#deviceApprovalOverlay` /
+`#approveDeviceOverlay`, index.html:3388-3573); mobile only ever had the
+first half's error string.
+
+Built both halves to close the gap:
+- **Requesting side** — new `src/components/DeviceApprovalGate.tsx`, shown
+  in place of the keypad on `app/(auth)/pin.tsx` (fresh sign-in) and
+  `app/(auth)/lock.tsx` (re-entry, e.g. after this device was remotely
+  removed from Settings > Security > Devices on another client) whenever
+  `submitPin`/`unlockWithPin` returns `device_approval_required`. Uploads
+  this device's E2EE public key first (`ensureMyE2eeKeyPair()`, so the
+  approving device has something to wrap chat keys against the moment it
+  approves), then calls `POST /device-link/request`, displays the 6-digit
+  code, and polls `GET /device-link/status` every 4s. On approval it
+  retries the original `submitPin`/`unlockWithPin` call automatically with
+  the same PIN (held only in memory for this, same pattern as web's
+  `pendingPin`) — no re-typing needed.
+- **Approving side** — new card in `app/(tabs)/settings.tsx`, "Approve a
+  new device": 6-digit code input, calls `POST /device-link/approve`.
+  Mirrors web's handler message-for-message (wrong code / expired / not
+  a trusted device / rate limited). On success, calls the new
+  `rewrapAllChatsForDevice()` (`src/state/e2ee.ts`, ported from web's
+  function of the same name) fire-and-forget, so the newly-approved device
+  can start decrypting chats immediately instead of waiting for a fresh
+  message in each one.
+
+Verified: `tsc --noEmit` clean.
