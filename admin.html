@@ -132,6 +132,26 @@
     <button id="loginBtn" onclick="doLogin()">Sign in</button>
     <div id="loginErr"></div>
   </div>
+
+  <!-- This origin (admin.parasyte.cloud) is a separate device as far as
+       device-trust is concerned — even with the right PIN, the account's
+       first sign-in here needs to be vouched for by an already-trusted
+       device (e.g. chat.parasyte.cloud or the mobile app), same mechanism
+       as index.html's deviceApprovalOverlay. Previously doLogin() just
+       printed a dead-end error with no way to actually act on it — this
+       gives that flow somewhere to go. -->
+  <div class="card lg" id="deviceApprovalBox" style="display:none;">
+    <h1 style="font-size:18px;">New device</h1>
+    <p id="deviceApprovalIntro">This PIN is already set up on another device. Ask whoever has it to approve this one.</p>
+    <button id="deviceApprovalRequestBtn" onclick="requestDeviceApproval()">Request approval</button>
+    <div id="deviceApprovalCodeBox" style="display:none; margin-top:16px;">
+      <p>Show this code to someone with an already-trusted device — they'll enter it there (Settings &gt; Security &gt; Devices) to approve this one.</p>
+      <div id="deviceApprovalCode" style="font-size:32px; font-weight:700; letter-spacing:8px; margin:8px 0; color:var(--text-hi);"></div>
+      <p id="deviceApprovalStatus" style="color:var(--text-mid);">Waiting for approval…</p>
+    </div>
+    <div id="deviceApprovalError" style="color:var(--danger); font-size:12.5px; margin-top:12px; min-height:16px;"></div>
+    <button style="background:transparent; border:1px solid var(--glass-brd-hi); color:var(--text-mid); margin-top:4px;" onclick="hideDeviceApprovalBox()">Back</button>
+  </div>
 </div>
 
 <div id="app">
@@ -293,6 +313,30 @@ async function apiFetch(path, opts = {}) {
   return { ok: res.ok, status: res.status, body };
 }
 
+// Shared by the initial sign-in attempt and the post-approval retry below —
+// returns a short status string instead of touching error DOM directly, so
+// both callers can react in their own context (one shows a PIN-screen
+// error, the other updates the device-approval status line).
+async function attemptSession(pinHash){
+  const res = await fetch('/api/session', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Para-Pin-Hash': pinHash },
+    body: JSON.stringify({ pinHash, deviceId: myDeviceId }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    if (body && body.error === 'device_approval_required') return 'device_approval_required';
+    if (body && body.error === 'mfa_required') return 'mfa_required';
+    return 'fail';
+  }
+  if (!body.isAdmin) return 'not_admin';
+  myPinHash = pinHash;
+  localStorage.setItem(PIN_HASH_KEY, pinHash);
+  whoami = body;
+  enterApp();
+  return 'ok';
+}
+
 async function doLogin(){
   const pin = document.getElementById('pinInput').value.trim();
   const errEl = document.getElementById('loginErr');
@@ -302,34 +346,110 @@ async function doLogin(){
   btn.disabled = true;
   try {
     const pinHash = await sha256Hex(pin);
-    const res = await fetch('/api/session', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Para-Pin-Hash': pinHash },
-      body: JSON.stringify({ pinHash, deviceId: myDeviceId }),
-    });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      errEl.textContent = body && body.error === 'device_approval_required'
-        ? 'This device needs to be approved from an already-trusted device first — same flow as the regular app.'
-        : body && body.error === 'mfa_required'
-          ? 'MFA is required on this account — sign in on the regular app first to complete it.'
-          : 'Sign-in failed. Check the PIN and try again.';
-      btn.disabled = false;
-      return;
-    }
-    if (!body.isAdmin) {
+    const result = await attemptSession(pinHash);
+    btn.disabled = false;
+    if (result === 'device_approval_required') {
+      pendingLoginPinHash = pinHash;
+      showDeviceApprovalBox();
+    } else if (result === 'mfa_required') {
+      errEl.textContent = 'MFA is required on this account — sign in on the regular app first to complete it.';
+    } else if (result === 'not_admin') {
       errEl.textContent = "This account isn't a platform admin. Ask an existing admin to promote you from Users & devices.";
-      btn.disabled = false;
-      return;
+    } else if (result === 'fail') {
+      errEl.textContent = 'Sign-in failed. Check the PIN and try again.';
     }
-    myPinHash = pinHash;
-    localStorage.setItem(PIN_HASH_KEY, pinHash);
-    whoami = body;
-    enterApp();
+    // result === 'ok': attemptSession already called enterApp().
   } catch (e) {
     errEl.textContent = 'Network error — try again.';
     btn.disabled = false;
   }
+}
+
+// ================= NEW-DEVICE APPROVAL (same mechanism as index.html) =====
+// A device that knows the right PIN but isn't yet trusted has to be vouched
+// for by a device that already is: this one asks for a short code and shows
+// it here; someone with a trusted device (chat.parasyte.cloud, the mobile
+// app) enters it in Settings > Security > Devices to approve. Unlike
+// index.html this never reloads the page — pendingLoginPinHash is still in
+// memory from the failed attempt, so once approved this just replays
+// attemptSession() with it directly.
+let pendingLoginPinHash = null;
+let deviceApprovalPollTimer = null;
+
+// The shared apiFetch() helper only ever sends the CURRENT signed-in
+// session's myPinHash, which is exactly what's still missing at this point
+// in the flow — these three calls need to authenticate as the pending
+// (not-yet-trusted) PIN instead.
+async function apiFetchAs(path, pinHash, opts = {}) {
+  const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {}, { 'X-Para-Pin-Hash': pinHash });
+  const res = await fetch('/api' + path, Object.assign({}, opts, { headers }));
+  let body = null;
+  try { body = await res.json(); } catch {}
+  return { ok: res.ok, status: res.status, body };
+}
+
+function showDeviceApprovalBox(){
+  document.querySelector('#login .card:not(#deviceApprovalBox)').style.display = 'none';
+  const box = document.getElementById('deviceApprovalBox');
+  box.style.display = 'block';
+  document.getElementById('deviceApprovalCodeBox').style.display = 'none';
+  document.getElementById('deviceApprovalRequestBtn').style.display = 'block';
+  document.getElementById('deviceApprovalError').textContent = '';
+}
+
+// Also stops the status poll — otherwise it keeps hitting the API every 4s
+// in the background even after the person gives up and goes back.
+function hideDeviceApprovalBox(){
+  clearInterval(deviceApprovalPollTimer);
+  deviceApprovalPollTimer = null;
+  document.getElementById('deviceApprovalBox').style.display = 'none';
+  document.querySelector('#login .card:not(#deviceApprovalBox)').style.display = '';
+}
+
+async function requestDeviceApproval(){
+  const btn = document.getElementById('deviceApprovalRequestBtn');
+  const errEl = document.getElementById('deviceApprovalError');
+  errEl.textContent = '';
+  btn.disabled = true;
+  const r = await apiFetchAs('/device-link/request', pendingLoginPinHash, {
+    method: 'POST',
+    body: JSON.stringify({ deviceId: myDeviceId }),
+  });
+  btn.disabled = false;
+  if (!r.ok) {
+    errEl.textContent = r.body && r.body.error === 'no_trusted_devices'
+      ? "There's no trusted device to ask — an admin will need to reset this account's devices instead."
+      : "Couldn't start that. Try again.";
+    return;
+  }
+  btn.style.display = 'none';
+  document.getElementById('deviceApprovalCodeBox').style.display = 'block';
+  document.getElementById('deviceApprovalCode').textContent = r.body.code || '';
+  document.getElementById('deviceApprovalStatus').textContent = 'Waiting for approval…';
+  clearInterval(deviceApprovalPollTimer);
+  deviceApprovalPollTimer = setInterval(async () => {
+    const sr = await apiFetchAs(`/device-link/status?deviceId=${encodeURIComponent(myDeviceId)}`, pendingLoginPinHash);
+    if (!sr.ok) return;
+    if (sr.body.status === 'approved') {
+      clearInterval(deviceApprovalPollTimer);
+      document.getElementById('deviceApprovalStatus').textContent = 'Approved! Signing you in…';
+      const result = await attemptSession(pendingLoginPinHash);
+      if (result === 'ok') {
+        hideDeviceApprovalBox();
+      } else {
+        // Trusted now, but something else still blocks sign-in — say so
+        // instead of leaving "Signing you in…" up forever.
+        document.getElementById('deviceApprovalStatus').textContent =
+          result === 'not_admin'
+            ? "Device approved, but this account isn't a platform admin."
+            : 'Device approved, but sign-in still failed — go back and try again.';
+      }
+    } else if (sr.body.status === 'expired' || sr.body.status === 'none') {
+      clearInterval(deviceApprovalPollTimer);
+      document.getElementById('deviceApprovalStatus').textContent = 'That request expired. Tap Request approval to try again.';
+      document.getElementById('deviceApprovalRequestBtn').style.display = 'block';
+    }
+  }, 4000);
 }
 
 function doLogout(){
