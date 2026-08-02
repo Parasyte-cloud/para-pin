@@ -6252,7 +6252,16 @@ export default {
         // ever knows about index.html, it has no per-hostname awareness.
         const isDocumentRequest = request.method === 'GET' && !/\.[a-zA-Z0-9]+$/.test(url.pathname);
         if (isDocumentRequest) {
-          const adminUrl = new URL('/admin.html', request.url);
+          // Deliberately requesting the extensionless "clean" URL here, not
+          // /admin.html directly — with the default html_handling
+          // (auto-trailing-slash), asking the assets binding for the
+          // literal .html path returns a 307 to the clean URL instead of
+          // the file itself. Forwarding that status/Location blindly (as
+          // this used to) sent the browser right back to admin.parasyte.cloud
+          // /admin, which re-enters this same branch and rewrites to
+          // /admin.html again — an infinite redirect loop. /admin resolves
+          // straight to admin.html's contents with a 200, no redirect.
+          const adminUrl = new URL('/admin', request.url);
           const assetRes = await env.ASSETS.fetch(new Request(adminUrl, request));
           const headers = new Headers(assetRes.headers);
           headers.set('Cache-Control', 'private, no-store, must-revalidate');
