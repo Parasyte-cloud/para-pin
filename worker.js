@@ -4959,6 +4959,39 @@ export class Registry {
       return json({ users });
     }
 
+    // ---- Platform admin: every workspace across the whole deployment ----
+    // Didn't exist before admin.parasyte.cloud needed it — every other org
+    // endpoint (worker.js's /org/* routes) requires already knowing an
+    // orgId, there was no way for a platform admin to discover what
+    // workspaces even exist. Same list-by-prefix approach as /admin/users
+    // above, just over `org:` keys instead of `userById:`. Member counts
+    // reuse the same `orgMembers:${orgId}` index addUserToOrg() maintains,
+    // no new bookkeeping needed.
+    if (request.method === 'GET' && url.pathname === '/admin/orgs') {
+      const requesterId = url.searchParams.get('requesterId');
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      const map = await this.state.storage.list({ prefix: 'org:' });
+      const orgs = [];
+      for (const org of map.values()) {
+        const members = (await this.state.storage.get(`orgMembers:${org.id}`)) || [];
+        orgs.push({
+          id: org.id,
+          name: org.name,
+          logoUrl: org.logoUrl || null,
+          billingStatus: org.billingStatus || 'active',
+          memberCount: members.length,
+          adminCount: Array.isArray(org.admins) ? org.admins.length : 0,
+          createdAt: org.createdAt || null,
+          billingActivatedAt: org.billingActivatedAt || null,
+          country: org.country || null,
+          customDomains: Array.isArray(org.customDomains) ? org.customDomains : (org.customDomain ? [org.customDomain] : []),
+        });
+      }
+      orgs.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      return json({ orgs });
+    }
+
     // Admin status is account-level (controls access to this Admin Console)
     // and is completely separate from who created a given group, creating
     // a group doesn't make you its "admin" in any special sense here; every
@@ -6200,6 +6233,34 @@ export default {
     const url = new URL(request.url);
 
     if (!url.pathname.startsWith('/api/')) {
+      // ---- Admin console (admin.parasyte.cloud) ----
+      // Its own static entry point (admin.html), not index.html — a
+      // genuinely separate app (the platform-wide admin console, gated by
+      // the global `admins` list — see the /api/admin/* routes below),
+      // sharing this same Worker/deployment rather than a branded view of
+      // the regular chat app. Auth happens the same way index.html's does:
+      // PIN -> POST /api/session -> every /api/admin/* call independently
+      // re-checks admins.includes() server-side. This branch only decides
+      // which static HTML shell to serve for this hostname — it is not
+      // itself a security boundary, admin.html has zero privileged data
+      // baked into it.
+      if (url.hostname === 'admin.parasyte.cloud' || (url.hostname === 'localhost' && url.pathname === '/admin')) {
+        // Static assets (JS/CSS/icons/manifest/service worker) pass
+        // through unchanged; only bare document requests (no file
+        // extension) get redirected to admin.html — the ASSETS binding's
+        // own `not_found_handling: single-page-application` fallback only
+        // ever knows about index.html, it has no per-hostname awareness.
+        const isDocumentRequest = request.method === 'GET' && !/\.[a-zA-Z0-9]+$/.test(url.pathname);
+        if (isDocumentRequest) {
+          const adminUrl = new URL('/admin.html', request.url);
+          const assetRes = await env.ASSETS.fetch(new Request(adminUrl, request));
+          const headers = new Headers(assetRes.headers);
+          headers.set('Cache-Control', 'private, no-store, must-revalidate');
+          return new Response(assetRes.body, { status: assetRes.status, headers });
+        }
+        return env.ASSETS.fetch(request);
+      }
+
       // ---- Branded custom domains ----
       // If a workspace has claimed this hostname (see /org/custom-domains/
       // add — a workspace can claim more than one — the actual DNS/
@@ -6842,6 +6903,15 @@ export default {
         const who = await whoRes.json();
         if (!who.ok) return json({ error: 'not_registered' }, 401);
         return registryStub.fetch(`https://internal/admin/users?requesterId=${encodeURIComponent(who.userId)}`);
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/admin/orgs') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        return registryStub.fetch(`https://internal/admin/orgs?requesterId=${encodeURIComponent(who.userId)}`);
       }
 
       if (request.method === 'POST' && url.pathname === '/api/admin/reset-device') {

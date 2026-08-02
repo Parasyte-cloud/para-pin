@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
+<title>PArA Admin</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/favicon.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#050608">
+<link rel="manifest" href="/admin-manifest.webmanifest">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PArA Admin">
+<meta name="robots" content="noindex, nofollow">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* Same palette as index.html's :root (kept in sync by hand — this is a
+     small enough file that a shared stylesheet isn't worth the extra
+     network request on a console that's meant to load fast). */
+  :root{
+    --ice:#00d4ff; --fire:#ff6a00; --bg-0:#050608; --bg-1:#0a0d12;
+    --glass:rgba(255,255,255,0.055); --glass-brd:rgba(255,255,255,0.09); --glass-brd-hi:rgba(255,255,255,0.18);
+    --text-hi:#f2f5f7; --text-mid:#9aa5ad; --text-low:#5f6a72;
+    --danger:#ff6a6a; --ok:#7ee08a; --warn:#ffcf5c;
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;}
+  body{margin:0; background:var(--bg-0); color:var(--text-hi); font-family:'Inter',sans-serif; -webkit-font-smoothing:antialiased;}
+  h1,h2,h3,.display{font-family:'Rajdhani',sans-serif; letter-spacing:.02em;}
+  .mono{font-family:'JetBrains Mono',monospace;}
+  a{color:var(--ice);}
+
+  #bgfx{position:fixed; inset:0; z-index:0; overflow:hidden; background:
+    radial-gradient(circle at 12% 8%, #0c1720 0%, transparent 45%),
+    radial-gradient(circle at 90% 92%, #1a0f08 0%, transparent 45%),
+    var(--bg-0);
+  }
+  #bgfx::before, #bgfx::after{content:''; position:absolute; width:60vmax; height:60vmax; border-radius:50%; filter:blur(90px); mix-blend-mode:screen; opacity:.22;}
+  #bgfx::before{background:var(--ice); top:-20%; left:-15%;}
+  #bgfx::after{background:var(--fire); bottom:-25%; right:-15%;}
+
+  .lg{background:var(--glass); border:1px solid var(--glass-brd); backdrop-filter:blur(20px) saturate(140%); -webkit-backdrop-filter:blur(20px) saturate(140%);}
+  .pill{border-radius:999px;}
+  button, input, select, textarea{font-family:inherit; font-size:14px;}
+  button{cursor:pointer;}
+
+  /* ---------- login ---------- */
+  #login{position:relative; z-index:2; min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px;}
+  #login .card{width:100%; max-width:360px; border-radius:22px; padding:32px 28px; text-align:center;}
+  #login h1{font-size:22px; margin:0 0 4px;}
+  #login p{color:var(--text-mid); font-size:13px; margin:0 0 22px;}
+  #pinInput{width:100%; text-align:center; letter-spacing:6px; font-size:22px; padding:14px; border-radius:14px; border:1px solid var(--glass-brd-hi); background:var(--glass); color:var(--text-hi); margin-bottom:14px;}
+  #loginBtn{width:100%; padding:13px; border-radius:999px; border:none; background:linear-gradient(135deg,var(--ice),var(--fire)); color:#0a0d12; font-weight:700; font-size:15px;}
+  #loginBtn:disabled{opacity:.5;}
+  #loginErr{color:var(--danger); font-size:12.5px; margin-top:12px; min-height:16px;}
+
+  /* ---------- app shell ---------- */
+  #app{position:relative; z-index:2; display:none; min-height:100vh;}
+  #app.show{display:flex;}
+  #sidebar{width:220px; flex-shrink:0; padding:22px 14px; display:flex; flex-direction:column; gap:4px; border-right:1px solid var(--glass-brd);}
+  #sidebar .brand{display:flex; align-items:center; gap:10px; padding:0 10px 22px;}
+  #sidebar .brand img{width:34px; height:34px; border-radius:9px;}
+  #sidebar .brand b{font-size:16px;}
+  #sidebar .brand span{display:block; font-size:10px; color:var(--text-low); letter-spacing:.08em; text-transform:uppercase;}
+  .navBtn{display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:12px; border:none; background:transparent; color:var(--text-mid); text-align:left; font-weight:600; font-size:13.5px;}
+  .navBtn.active{background:rgba(0,212,255,0.1); color:var(--ice);}
+  .navBtn:hover{background:var(--glass);}
+  #sidebar .whoami{margin-top:auto; padding:10px; border-radius:12px; font-size:12px; color:var(--text-low);}
+  #logoutBtn{margin-top:8px; width:100%; padding:8px; border-radius:999px; border:1px solid var(--glass-brd-hi); background:transparent; color:var(--text-mid); font-size:12px;}
+
+  #main{flex:1; min-width:0; padding:26px 30px 60px; overflow-y:auto; max-height:100vh;}
+  .panel{display:none;}
+  .panel.active{display:block;}
+  .panelHead{display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:18px; flex-wrap:wrap;}
+  .panelHead h2{font-size:20px; margin:0;}
+  .panelHead p{color:var(--text-mid); font-size:12.5px; margin:2px 0 0;}
+
+  .cards{display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px; margin-bottom:22px;}
+  .statCard{border-radius:16px; padding:14px 16px;}
+  .statCard .num{font-size:24px; font-weight:700; font-family:'Rajdhani',sans-serif;}
+  .statCard .lbl{font-size:11.5px; color:var(--text-mid); margin-top:2px;}
+
+  table{width:100%; border-collapse:collapse; font-size:13px;}
+  th{text-align:left; color:var(--text-low); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.05em; padding:8px 10px; border-bottom:1px solid var(--glass-brd);}
+  td{padding:10px; border-bottom:1px solid var(--glass-brd); vertical-align:middle;}
+  tr:last-child td{border-bottom:none;}
+  .tableWrap{border-radius:16px; overflow:hidden;}
+  .badge{display:inline-block; padding:2px 9px; border-radius:999px; font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.03em;}
+  .badge.ok{background:rgba(126,224,138,0.14); color:var(--ok);}
+  .badge.warn{background:rgba(255,207,92,0.14); color:var(--warn);}
+  .badge.danger{background:rgba(255,106,106,0.14); color:var(--danger);}
+  .badge.ice{background:rgba(0,212,255,0.14); color:var(--ice);}
+
+  .btnSm{padding:6px 12px; border-radius:999px; border:1px solid var(--glass-brd-hi); background:var(--glass); color:var(--text-hi); font-size:12px; font-weight:600;}
+  .btnSm:hover{border-color:var(--ice);}
+  .btnSm.danger:hover{border-color:var(--danger); color:var(--danger);}
+  .btnSm:disabled{opacity:.4; cursor:default;}
+
+  .formRow{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;}
+  .formRow input, .formRow select{padding:9px 12px; border-radius:10px; border:1px solid var(--glass-brd-hi); background:var(--glass); color:var(--text-hi); flex:1; min-width:140px;}
+  .formRow textarea{padding:9px 12px; border-radius:10px; border:1px solid var(--glass-brd-hi); background:var(--glass); color:var(--text-hi); width:100%; min-height:90px; font-family:'JetBrains Mono',monospace; font-size:12px;}
+  .btnPrimary{padding:9px 18px; border-radius:999px; border:none; background:linear-gradient(135deg,var(--ice),var(--fire)); color:#0a0d12; font-weight:700; font-size:13px;}
+  .btnPrimary:disabled{opacity:.5;}
+  .card{border-radius:16px; padding:16px 18px; margin-bottom:16px;}
+  .card h3{font-size:14px; margin:0 0 4px;}
+  .card .hint{font-size:12px; color:var(--text-mid); margin:0 0 12px;}
+  .toast{position:fixed; bottom:20px; right:20px; z-index:50; padding:12px 18px; border-radius:14px; font-size:13px; max-width:340px;}
+  .toast.ok{border-color:rgba(126,224,138,0.3); color:var(--ok);}
+  .toast.err{border-color:rgba(255,106,106,0.3); color:var(--danger);}
+  .keyReveal{font-family:'JetBrains Mono',monospace; font-size:12px; background:rgba(0,212,255,0.08); border:1px solid rgba(0,212,255,0.25); border-radius:10px; padding:10px; word-break:break-all; margin-top:8px;}
+  .empty{color:var(--text-low); font-size:13px; padding:24px; text-align:center;}
+  .loading{color:var(--text-low); font-size:13px; padding:16px;}
+  @media (max-width:760px){
+    #app.show{flex-direction:column;}
+    #sidebar{width:100%; flex-direction:row; overflow-x:auto; border-right:none; border-bottom:1px solid var(--glass-brd); padding:12px;}
+    #sidebar .brand, #sidebar .whoami, #logoutBtn{display:none;}
+    #main{padding:18px;}
+  }
+</style>
+</head>
+<body>
+<div id="bgfx"></div>
+
+<div id="login">
+  <div class="card lg">
+    <h1>PArA Admin</h1>
+    <p>Platform console — sign in with an admin PIN.</p>
+    <input id="pinInput" class="mono" type="password" inputmode="numeric" maxlength="12" placeholder="••••••">
+    <button id="loginBtn" onclick="doLogin()">Sign in</button>
+    <div id="loginErr"></div>
+  </div>
+</div>
+
+<div id="app">
+  <div id="sidebar" class="lg">
+    <div class="brand">
+      <img src="/icon-192.png" alt="">
+      <div><b>PArA</b><span>Admin</span></div>
+    </div>
+    <button class="navBtn active" data-panel="overview" onclick="showPanel('overview')">Overview</button>
+    <button class="navBtn" data-panel="workspaces" onclick="showPanel('workspaces')">Workspaces</button>
+    <button class="navBtn" data-panel="users" onclick="showPanel('users')">Users &amp; devices</button>
+    <button class="navBtn" data-panel="roster" onclick="showPanel('roster')">Roster</button>
+    <button class="navBtn" data-panel="governance" onclick="showPanel('governance')">Governance</button>
+    <button class="navBtn" data-panel="developer" onclick="showPanel('developer')">Developer</button>
+    <button class="navBtn" data-panel="status" onclick="showPanel('status')">Status page</button>
+    <div class="whoami" id="whoamiBox"></div>
+    <button id="logoutBtn" onclick="doLogout()">Sign out</button>
+  </div>
+
+  <div id="main">
+
+    <!-- Overview -->
+    <section class="panel active" id="panel-overview">
+      <div class="panelHead"><div><h2>Overview</h2><p>Deployment-wide, not broken down per workspace.</p></div><button class="btnSm" onclick="loadOverview()">Refresh</button></div>
+      <div class="cards" id="overviewCards"><div class="loading">Loading…</div></div>
+      <div class="card lg" id="overviewCallStats"></div>
+    </section>
+
+    <!-- Workspaces -->
+    <section class="panel" id="panel-workspaces">
+      <div class="panelHead"><div><h2>Workspaces</h2><p>Every org across the whole deployment.</p></div><button class="btnSm" onclick="loadOrgs()">Refresh</button></div>
+      <div class="tableWrap lg"><table id="orgsTable"><thead><tr><th>Name</th><th>Billing</th><th>Members</th><th>Admins</th><th>Custom domains</th><th>Created</th></tr></thead><tbody><tr><td colspan="6" class="loading">Loading…</td></tr></tbody></table></div>
+    </section>
+
+    <!-- Users -->
+    <section class="panel" id="panel-users">
+      <div class="panelHead"><div><h2>Users &amp; devices</h2><p>Everyone who has ever signed in.</p></div><button class="btnSm" onclick="loadUsers()">Refresh</button></div>
+      <div class="tableWrap lg"><table id="usersTable"><thead><tr><th>Name</th><th>Device lock</th><th>Devices</th><th>Platform admin</th><th>Actions</th></tr></thead><tbody><tr><td colspan="5" class="loading">Loading…</td></tr></tbody></table></div>
+    </section>
+
+    <!-- Roster -->
+    <section class="panel" id="panel-roster">
+      <div class="panelHead"><div><h2>Roster</h2><p>Pre-provision accounts before anyone signs in.</p></div><button class="btnSm" onclick="loadRoster()">Refresh</button></div>
+      <div class="card lg">
+        <h3>Add one</h3>
+        <div class="formRow">
+          <input id="rosterName" placeholder="Full name">
+          <input id="rosterDept" placeholder="Department (optional)">
+          <input id="rosterEmail" placeholder="Email (optional)">
+          <button class="btnPrimary" onclick="rosterAdd()">Add</button>
+        </div>
+      </div>
+      <div class="card lg">
+        <h3>Bulk import</h3>
+        <p class="hint">One per line: Name, Department, Email — max 500 rows.</p>
+        <textarea id="rosterBulk" placeholder="Jane Doe, Engineering, jane@example.com"></textarea>
+        <div style="margin-top:10px;"><button class="btnPrimary" onclick="rosterBulkImport()">Import</button></div>
+        <div id="rosterBulkResult" class="hint"></div>
+      </div>
+      <div class="tableWrap lg"><table id="rosterTable"><thead><tr><th>Name</th><th>Department</th><th>Email</th><th>Status</th><th>Actions</th></tr></thead><tbody><tr><td colspan="5" class="loading">Loading…</td></tr></tbody></table></div>
+    </section>
+
+    <!-- Governance -->
+    <section class="panel" id="panel-governance">
+      <div class="panelHead"><div><h2>Governance</h2><p>Global message retention and litigation holds — deployment-wide, not per workspace.</p></div></div>
+      <div class="card lg">
+        <h3>Message retention</h3>
+        <p class="hint">Messages older than this are purged. Anyone on legal hold is exempt.</p>
+        <div class="formRow">
+          <select id="retentionSelect">
+            <option value="0">Keep forever</option>
+            <option value="30">30 days</option>
+            <option value="90">90 days</option>
+            <option value="365">365 days</option>
+          </select>
+          <button class="btnPrimary" onclick="saveRetention()">Save</button>
+        </div>
+      </div>
+      <div class="card lg">
+        <h3>Legal holds</h3>
+        <p class="hint">A user's chats are exempt from retention purge while held.</p>
+        <div class="formRow"><input id="legalHoldUserId" placeholder="User ID"><button class="btnPrimary" onclick="addLegalHold()">Add hold</button></div>
+        <div class="tableWrap"><table id="legalHoldsTable"><thead><tr><th>User ID</th><th></th></tr></thead><tbody><tr><td colspan="2" class="loading">Loading…</td></tr></tbody></table></div>
+      </div>
+    </section>
+
+    <!-- Developer -->
+    <section class="panel" id="panel-developer">
+      <div class="panelHead"><div><h2>Developer</h2><p>Public REST API keys and outbound webhooks.</p></div></div>
+      <div class="card lg">
+        <h3>API keys</h3>
+        <div class="formRow"><input id="apiKeyName" placeholder="Key name (e.g. \"Zapier\")"><button class="btnPrimary" onclick="createApiKey()">Create key</button></div>
+        <div id="apiKeyReveal"></div>
+        <div class="tableWrap"><table id="apiKeysTable"><thead><tr><th>Name</th><th>Preview</th><th>Created</th><th>Status</th><th></th></tr></thead><tbody><tr><td colspan="5" class="loading">Loading…</td></tr></tbody></table></div>
+      </div>
+      <div class="card lg">
+        <h3>Webhooks</h3>
+        <p class="hint">Events: roster.person_added, roster.person_claimed, roster.person_disabled.</p>
+        <div class="formRow"><input id="webhookUrl" placeholder="https://your-endpoint.example.com/hook"><button class="btnPrimary" onclick="addWebhook()">Add</button></div>
+        <div class="tableWrap"><table id="webhooksTable"><thead><tr><th>URL</th><th>Events</th><th></th></tr></thead><tbody><tr><td colspan="3" class="loading">Loading…</td></tr></tbody></table></div>
+      </div>
+    </section>
+
+    <!-- Status -->
+    <section class="panel" id="panel-status">
+      <div class="panelHead"><div><h2>Status page</h2><p>Public component status + incidents, shown at /api/status.</p></div><button class="btnSm" onclick="loadStatus()">Refresh</button></div>
+      <div class="tableWrap lg" style="margin-bottom:16px;"><table id="statusComponentsTable"><thead><tr><th>Component</th><th>Status</th><th>Set</th></tr></thead><tbody><tr><td colspan="3" class="loading">Loading…</td></tr></tbody></table></div>
+      <div class="card lg">
+        <h3>Post an incident update</h3>
+        <div class="formRow">
+          <input id="incidentId" placeholder="Incident ID (blank = new)">
+          <input id="incidentTitle" placeholder="Title">
+        </div>
+        <div class="formRow">
+          <select id="incidentSeverity"><option value="minor">Minor</option><option value="major">Major</option><option value="critical">Critical</option></select>
+          <select id="incidentStatus"><option value="investigating">Investigating</option><option value="identified">Identified</option><option value="monitoring">Monitoring</option><option value="resolved">Resolved</option></select>
+        </div>
+        <div class="formRow"><textarea id="incidentMessage" placeholder="Update message" style="min-height:60px;"></textarea></div>
+        <button class="btnPrimary" onclick="postIncident()">Post update</button>
+      </div>
+      <div id="incidentsList"></div>
+    </section>
+
+  </div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------
+// Auth — same PIN/session mechanics as index.html (POST /api/session,
+// X-Para-Pin-Hash header on every subsequent call), just gated on the
+// response's `isAdmin` flag, which is the GLOBAL platform-admin list
+// (worker.js's top-level `admins` array), not a per-workspace org admin
+// flag. An org admin who isn't a platform admin gets a clean "not
+// authorized" here rather than any partial view — this console has no
+// concept of "my workspace only".
+// ---------------------------------------------------------------------
+const DEVICE_ID_KEY = 'para_admin_device_id';
+const PIN_HASH_KEY = 'para_admin_pin_hash';
+
+function getOrCreateDeviceId(){
+  let id = localStorage.getItem(DEVICE_ID_KEY);
+  if (!id) { id = crypto.randomUUID(); localStorage.setItem(DEVICE_ID_KEY, id); }
+  return id;
+}
+async function sha256Hex(str){
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2,'0')).join('');
+}
+let myPinHash = localStorage.getItem(PIN_HASH_KEY) || null;
+let myDeviceId = getOrCreateDeviceId();
+let whoami = null;
+
+async function apiFetch(path, opts = {}) {
+  const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
+  if (myPinHash) headers['X-Para-Pin-Hash'] = myPinHash;
+  const res = await fetch('/api' + path, Object.assign({}, opts, { headers }));
+  let body = null;
+  try { body = await res.json(); } catch {}
+  return { ok: res.ok, status: res.status, body };
+}
+
+async function doLogin(){
+  const pin = document.getElementById('pinInput').value.trim();
+  const errEl = document.getElementById('loginErr');
+  errEl.textContent = '';
+  if (!pin) return;
+  const btn = document.getElementById('loginBtn');
+  btn.disabled = true;
+  try {
+    const pinHash = await sha256Hex(pin);
+    const res = await fetch('/api/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Para-Pin-Hash': pinHash },
+      body: JSON.stringify({ pinHash, deviceId: myDeviceId }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      errEl.textContent = body && body.error === 'device_approval_required'
+        ? 'This device needs to be approved from an already-trusted device first — same flow as the regular app.'
+        : body && body.error === 'mfa_required'
+          ? 'MFA is required on this account — sign in on the regular app first to complete it.'
+          : 'Sign-in failed. Check the PIN and try again.';
+      btn.disabled = false;
+      return;
+    }
+    if (!body.isAdmin) {
+      errEl.textContent = "This account isn't a platform admin. Ask an existing admin to promote you from Users & devices.";
+      btn.disabled = false;
+      return;
+    }
+    myPinHash = pinHash;
+    localStorage.setItem(PIN_HASH_KEY, pinHash);
+    whoami = body;
+    enterApp();
+  } catch (e) {
+    errEl.textContent = 'Network error — try again.';
+    btn.disabled = false;
+  }
+}
+
+function doLogout(){
+  localStorage.removeItem(PIN_HASH_KEY);
+  myPinHash = null;
+  document.getElementById('app').classList.remove('show');
+  document.getElementById('login').style.display = 'flex';
+  document.getElementById('pinInput').value = '';
+}
+
+function enterApp(){
+  document.getElementById('login').style.display = 'none';
+  document.getElementById('app').classList.add('show');
+  document.getElementById('whoamiBox').innerHTML = 'Signed in as<br><b style="color:var(--text-hi)">' + (whoami.displayName || 'Admin') + '</b>';
+  loadOverview();
+}
+
+// Try to resume a stored session on load, same as index.html does.
+(async function boot(){
+  if (!myPinHash) return;
+  const res = await apiFetch('/session', { method: 'POST', body: JSON.stringify({ pinHash: myPinHash, deviceId: myDeviceId }) });
+  if (res.ok && res.body && res.body.isAdmin) {
+    whoami = res.body;
+    enterApp();
+  } else {
+    localStorage.removeItem(PIN_HASH_KEY);
+    myPinHash = null;
+  }
+})();
+
+document.getElementById('pinInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
+
+// ---------------------------------------------------------------------
+// Nav
+// ---------------------------------------------------------------------
+const PANEL_LOADERS = { overview: loadOverview, workspaces: loadOrgs, users: loadUsers, roster: loadRoster, governance: loadGovernance, developer: loadDeveloper, status: loadStatus };
+function showPanel(name){
+  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
+  document.querySelectorAll('.navBtn').forEach(b => b.classList.toggle('active', b.dataset.panel === name));
+  const loader = PANEL_LOADERS[name];
+  if (loader) loader();
+}
+
+function toast(msg, kind){
+  const el = document.createElement('div');
+  el.className = 'toast lg ' + (kind || 'ok');
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 4200);
+}
+function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function fmtDate(ts){ return ts ? new Date(ts).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' }) : '—'; }
+
+// ---------------------------------------------------------------------
+// Overview
+// ---------------------------------------------------------------------
+async function loadOverview(){
+  const cardsEl = document.getElementById('overviewCards');
+  const callEl = document.getElementById('overviewCallStats');
+  cardsEl.innerHTML = '<div class="loading">Loading…</div>';
+  const res = await apiFetch('/admin/analytics');
+  if (!res.ok) { cardsEl.innerHTML = '<div class="empty">Could not load analytics.</div>'; return; }
+  const a = res.body;
+  const stats = [
+    ['Total users', a.totalUsers], ['Active (7d)', a.activeUsers7d], ['Active (30d)', a.activeUsers30d],
+    ['New (30d)', a.newUsers30d], ['Device-locked', a.usersWithDeviceLock], ['Platform admins', a.totalAdmins],
+    ['Total chats', a.totalChats], ['Roster entries', a.totalRosterEntries],
+    ['Retention (days)', a.retentionDays === 0 ? 'Forever' : a.retentionDays], ['Legal holds', a.legalHoldCount],
+  ];
+  cardsEl.innerHTML = stats.map(([lbl, num]) => '<div class="statCard lg"><div class="num">' + esc(num) + '</div><div class="lbl">' + esc(lbl) + '</div></div>').join('');
+  // callStats shape: {total, byOutcome:{answered,missed,...}, totalDurationSec}
+  if (a.callStats) {
+    const cs = a.callStats;
+    const byOutcome = Object.entries(cs.byOutcome || {}).map(([k, v]) => esc(k) + ': ' + esc(v)).join(' &nbsp;·&nbsp; ') || '—';
+    const hours = cs.totalDurationSec ? (cs.totalDurationSec / 3600).toFixed(1) : '0';
+    callEl.innerHTML = '<h3>Calls</h3><div class="hint">Total: ' + esc(cs.total || 0) + ' &nbsp;·&nbsp; ' + hours + 'h talk time<br>' + byOutcome + '</div>';
+  } else {
+    callEl.innerHTML = '';
+  }
+}
+
+// ---------------------------------------------------------------------
+// Workspaces
+// ---------------------------------------------------------------------
+async function loadOrgs(){
+  const tbody = document.querySelector('#orgsTable tbody');
+  tbody.innerHTML = '<tr><td colspan="6" class="loading">Loading…</td></tr>';
+  const res = await apiFetch('/admin/orgs');
+  if (!res.ok) { tbody.innerHTML = '<tr><td colspan="6" class="empty">Could not load workspaces.</td></tr>'; return; }
+  const orgs = res.body.orgs || [];
+  if (!orgs.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty">No workspaces yet.</td></tr>'; return; }
+  tbody.innerHTML = orgs.map(o => {
+    const badge = o.billingStatus === 'active' ? 'ok' : o.billingStatus === 'pending' ? 'warn' : 'danger';
+    return '<tr><td><b>' + esc(o.name) + '</b><div class="hint mono" style="font-size:10.5px;color:var(--text-low)">' + esc(o.id) + '</div></td>' +
+      '<td><span class="badge ' + badge + '">' + esc(o.billingStatus) + '</span></td>' +
+      '<td>' + esc(o.memberCount) + '</td><td>' + esc(o.adminCount) + '</td>' +
+      '<td>' + (o.customDomains.length ? o.customDomains.map(esc).join(', ') : '—') + '</td>' +
+      '<td>' + fmtDate(o.createdAt) + '</td></tr>';
+  }).join('');
+}
+
+// ---------------------------------------------------------------------
+// Users
+// ---------------------------------------------------------------------
+async function loadUsers(){
+  const tbody = document.querySelector('#usersTable tbody');
+  tbody.innerHTML = '<tr><td colspan="5" class="loading">Loading…</td></tr>';
+  const res = await apiFetch('/admin/users');
+  if (!res.ok) { tbody.innerHTML = '<tr><td colspan="5" class="empty">Could not load users.</td></tr>'; return; }
+  const users = res.body.users || [];
+  if (!users.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty">No users yet.</td></tr>'; return; }
+  tbody.innerHTML = users.map(u =>
+    '<tr><td><b>' + esc(u.displayName) + '</b><div class="hint mono" style="font-size:10.5px;color:var(--text-low)">' + esc(u.id) + '</div></td>' +
+    '<td>' + (u.hasDeviceLock ? '<span class="badge ok">Locked</span>' : '<span class="badge warn">None</span>') + '</td>' +
+    '<td>' + esc(u.deviceCount) + '</td>' +
+    '<td>' + (u.isAdmin ? '<span class="badge ice">Admin</span>' : '—') + '</td>' +
+    '<td style="display:flex;gap:6px;flex-wrap:wrap;">' +
+      '<button class="btnSm" onclick="resetDevice(\'' + u.id + '\')" ' + (u.hasDeviceLock ? '' : 'disabled') + '>Reset device</button>' +
+      '<button class="btnSm" onclick="toggleAdmin(\'' + u.id + '\', ' + (u.isAdmin ? 'true' : 'false') + ')">' + (u.isAdmin ? 'Demote' : 'Promote') + '</button>' +
+    '</td></tr>'
+  ).join('');
+}
+async function resetDevice(userId){
+  if (!confirm("Reset this user's device lock? They will need to re-approve a device on next sign-in.")) return;
+  const res = await apiFetch('/admin/reset-device', { method: 'POST', body: JSON.stringify({ userId }) });
+  toast(res.ok ? 'Device lock reset.' : 'Failed.', res.ok ? 'ok' : 'err');
+  if (res.ok) loadUsers();
+}
+async function toggleAdmin(userId, isAdminNow){
+  const action = isAdminNow ? 'demote' : 'promote';
+  if (!confirm((isAdminNow ? 'Remove' : 'Grant') + ' platform admin access for this user?')) return;
+  const res = await apiFetch('/admin/' + action, { method: 'POST', body: JSON.stringify({ userId }) });
+  toast(res.ok ? 'Done.' : (res.body && res.body.error === 'last_admin' ? "Can't demote the last remaining admin." : 'Failed.'), res.ok ? 'ok' : 'err');
+  if (res.ok) loadUsers();
+}
+
+// ---------------------------------------------------------------------
+// Roster
+// ---------------------------------------------------------------------
+async function loadRoster(){
+  const tbody = document.querySelector('#rosterTable tbody');
+  tbody.innerHTML = '<tr><td colspan="5" class="loading">Loading…</td></tr>';
+  const res = await apiFetch('/admin/roster');
+  if (!res.ok) { tbody.innerHTML = '<tr><td colspan="5" class="empty">Could not load roster.</td></tr>'; return; }
+  const rows = res.body.entries || [];
+  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty">Roster is empty.</td></tr>'; return; }
+  tbody.innerHTML = rows.map(r =>
+    '<tr><td>' + esc(r.name) + '</td><td>' + esc(r.department || '—') + '</td><td>' + esc(r.email || '—') + '</td>' +
+    '<td>' + (r.status === 'claimed' ? '<span class="badge ok">Claimed</span>' : r.status === 'disabled' ? '<span class="badge danger">Disabled</span>' : '<span class="badge warn">Pending</span>') + '</td>' +
+    '<td>' + (r.status === 'disabled' ? '—' : '<button class="btnSm danger" onclick="rosterDisable(\'' + r.id + '\')">Disable</button>') + '</td></tr>'
+  ).join('');
+}
+async function rosterAdd(){
+  const name = document.getElementById('rosterName').value.trim();
+  if (!name) { toast('Name is required.', 'err'); return; }
+  const department = document.getElementById('rosterDept').value.trim();
+  const email = document.getElementById('rosterEmail').value.trim();
+  const res = await apiFetch('/admin/roster', { method: 'POST', body: JSON.stringify({ name, department, email }) });
+  if (res.ok) {
+    toast('Added' + (res.body.pin ? ' — PIN ' + res.body.pin : '') + '.', 'ok');
+    document.getElementById('rosterName').value = '';
+    document.getElementById('rosterDept').value = '';
+    document.getElementById('rosterEmail').value = '';
+    loadRoster();
+  } else {
+    toast(res.body && res.body.error === 'already_exists' ? 'Already on the roster (or use Force).' : 'Failed to add.', 'err');
+  }
+}
+async function rosterBulkImport(){
+  const raw = document.getElementById('rosterBulk').value.trim();
+  if (!raw) return;
+  const rows = raw.split('\n').map(l => l.split(',').map(s => s.trim())).filter(p => p[0]).map(p => ({ name: p[0], department: p[1] || '', email: p[2] || '' }));
+  if (!rows.length) { toast('Nothing to import.', 'err'); return; }
+  if (rows.length > 500) { toast('Max 500 rows per import.', 'err'); return; }
+  const res = await apiFetch('/admin/roster/bulk', { method: 'POST', body: JSON.stringify({ rows }) });
+  const resultEl = document.getElementById('rosterBulkResult');
+  if (res.ok) {
+    resultEl.textContent = 'Created ' + res.body.created + ', skipped ' + res.body.skipped + ', failed ' + res.body.failed + '.';
+    document.getElementById('rosterBulk').value = '';
+    loadRoster();
+  } else {
+    resultEl.textContent = 'Import failed.';
+  }
+}
+async function rosterDisable(id){
+  if (!confirm('Disable this roster entry?')) return;
+  const res = await apiFetch('/admin/roster/disable', { method: 'POST', body: JSON.stringify({ id }) });
+  toast(res.ok ? 'Disabled.' : 'Failed.', res.ok ? 'ok' : 'err');
+  if (res.ok) loadRoster();
+}
+
+// ---------------------------------------------------------------------
+// Governance
+// ---------------------------------------------------------------------
+function loadGovernance(){ loadRetention(); loadLegalHolds(); }
+async function loadRetention(){
+  const res = await apiFetch('/admin/retention');
+  if (res.ok && res.body) document.getElementById('retentionSelect').value = String(res.body.retentionDays ?? 0);
+}
+async function saveRetention(){
+  const retentionDays = Number(document.getElementById('retentionSelect').value);
+  const res = await apiFetch('/admin/retention', { method: 'POST', body: JSON.stringify({ retentionDays }) });
+  toast(res.ok ? 'Retention saved.' : 'Failed.', res.ok ? 'ok' : 'err');
+}
+async function loadLegalHolds(){
+  const tbody = document.querySelector('#legalHoldsTable tbody');
+  tbody.innerHTML = '<tr><td colspan="2" class="loading">Loading…</td></tr>';
+  const res = await apiFetch('/admin/legal-holds');
+  if (!res.ok) { tbody.innerHTML = '<tr><td colspan="2" class="empty">Could not load.</td></tr>'; return; }
+  const holds = res.body.holds || [];
+  if (!holds.length) { tbody.innerHTML = '<tr><td colspan="2" class="empty">No one is on hold.</td></tr>'; return; }
+  tbody.innerHTML = holds.map(h => '<tr><td>' + esc(h.displayName) + '<div class="hint mono" style="font-size:10.5px;color:var(--text-low)">' + esc(h.userId) + '</div></td><td><button class="btnSm danger" onclick="removeLegalHold(\'' + h.userId + '\')">Remove</button></td></tr>').join('');
+}
+async function addLegalHold(){
+  const userId = document.getElementById('legalHoldUserId').value.trim();
+  if (!userId) return;
+  const res = await apiFetch('/admin/legal-holds', { method: 'POST', body: JSON.stringify({ userId }) });
+  toast(res.ok ? 'Hold added.' : 'Failed.', res.ok ? 'ok' : 'err');
+  if (res.ok) { document.getElementById('legalHoldUserId').value = ''; loadLegalHolds(); }
+}
+async function removeLegalHold(userId){
+  const res = await apiFetch('/admin/legal-holds/remove', { method: 'POST', body: JSON.stringify({ userId }) });
+  toast(res.ok ? 'Removed.' : 'Failed.', res.ok ? 'ok' : 'err');
+  if (res.ok) loadLegalHolds();
+}
+
+// ---------------------------------------------------------------------
+// Developer
+// ---------------------------------------------------------------------
+function loadDeveloper(){ loadApiKeys(); loadWebhooks(); }
+async function loadApiKeys(){
+  const tbody = document.querySelector('#apiKeysTable tbody');
+  tbody.innerHTML = '<tr><td colspan="5" class="loading">Loading…</td></tr>';
+  const res = await apiFetch('/admin/api-keys');
+  if (!res.ok) { tbody.innerHTML = '<tr><td colspan="5" class="empty">Could not load.</td></tr>'; return; }
+  const keys = res.body.keys || [];
+  if (!keys.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty">No API keys yet.</td></tr>'; return; }
+  tbody.innerHTML = keys.map(k =>
+    '<tr><td>' + esc(k.name) + '</td><td class="mono">' + esc(k.keyPreview) + '</td><td>' + fmtDate(k.createdAt) + '</td>' +
+    '<td>' + (k.revoked ? '<span class="badge danger">Revoked</span>' : '<span class="badge ok">Active</span>') + '</td>' +
+    '<td>' + (k.revoked ? '—' : '<button class="btnSm danger" onclick="revokeApiKey(\'' + k.id + '\')">Revoke</button>') + '</td></tr>'
+  ).join('');
+}
+async function createApiKey(){
+  const name = document.getElementById('apiKeyName').value.trim();
+  const res = await apiFetch('/admin/api-keys', { method: 'POST', body: JSON.stringify({ name }) });
+  if (res.ok) {
+    document.getElementById('apiKeyReveal').innerHTML = '<div class="keyReveal">' + esc(res.body.key) + '<br><span style="color:var(--text-low)">Shown once — copy it now.</span></div>';
+    document.getElementById('apiKeyName').value = '';
+    loadApiKeys();
+  } else {
+    toast('Failed to create key.', 'err');
+  }
+}
+async function revokeApiKey(id){
+  if (!confirm('Revoke this key? Anything using it will stop working immediately.')) return;
+  const res = await apiFetch('/admin/api-keys/revoke', { method: 'POST', body: JSON.stringify({ id }) });
+  toast(res.ok ? 'Revoked.' : 'Failed.', res.ok ? 'ok' : 'err');
+  if (res.ok) loadApiKeys();
+}
+async function loadWebhooks(){
+  const tbody = document.querySelector('#webhooksTable tbody');
+  tbody.innerHTML = '<tr><td colspan="3" class="loading">Loading…</td></tr>';
+  const res = await apiFetch('/admin/webhooks');
+  if (!res.ok) { tbody.innerHTML = '<tr><td colspan="3" class="empty">Could not load.</td></tr>'; return; }
+  const hooks = res.body.webhooks || [];
+  if (!hooks.length) { tbody.innerHTML = '<tr><td colspan="3" class="empty">No webhooks yet.</td></tr>'; return; }
+  tbody.innerHTML = hooks.map(w =>
+    '<tr><td class="mono" style="font-size:11.5px;">' + esc(w.url) + '</td><td>' + esc((w.events || []).join(', ')) + '</td>' +
+    '<td><button class="btnSm danger" onclick="removeWebhook(\'' + w.id + '\')">Remove</button></td></tr>'
+  ).join('');
+}
+async function addWebhook(){
+  const url = document.getElementById('webhookUrl').value.trim();
+  if (!url) return;
+  const events = ['roster.person_added', 'roster.person_claimed', 'roster.person_disabled'];
+  const res = await apiFetch('/admin/webhooks', { method: 'POST', body: JSON.stringify({ url, events }) });
+  toast(res.ok ? 'Webhook added.' : 'Failed.', res.ok ? 'ok' : 'err');
+  if (res.ok) { document.getElementById('webhookUrl').value = ''; loadWebhooks(); }
+}
+async function removeWebhook(id){
+  const res = await apiFetch('/admin/webhooks/remove', { method: 'POST', body: JSON.stringify({ id }) });
+  toast(res.ok ? 'Removed.' : 'Failed.', res.ok ? 'ok' : 'err');
+  if (res.ok) loadWebhooks();
+}
+
+// ---------------------------------------------------------------------
+// Status page
+// ---------------------------------------------------------------------
+async function loadStatus(){
+  const tbody = document.querySelector('#statusComponentsTable tbody');
+  const listEl = document.getElementById('incidentsList');
+  tbody.innerHTML = '<tr><td colspan="3" class="loading">Loading…</td></tr>';
+  const res = await apiFetch('/admin/status');
+  if (!res.ok) { tbody.innerHTML = '<tr><td colspan="3" class="empty">Could not load.</td></tr>'; return; }
+  // components is an array of {key,label,status}, not a map — see
+  // getStatusSnapshot() in worker.js.
+  const components = res.body.components || [];
+  const badge = (s) => s === 'operational' ? 'ok' : s === 'degraded' ? 'warn' : 'danger';
+  tbody.innerHTML = components.map((c) =>
+    '<tr><td>' + esc(c.label || c.key) + '</td><td><span class="badge ' + badge(c.status) + '">' + esc(c.status || 'operational') + '</span></td>' +
+    '<td><select onchange="setComponentStatus(\'' + c.key + '\', this.value)">' +
+      ['operational','degraded','outage'].map(s => '<option value="' + s + '"' + (c.status === s ? ' selected' : '') + '>' + s + '</option>').join('') +
+    '</select></td></tr>'
+  ).join('') || '<tr><td colspan="3" class="empty">No components configured.</td></tr>';
+  const incidents = res.body.incidents || [];
+  listEl.innerHTML = incidents.length ? '<div class="card lg"><h3>Recent incidents</h3>' + incidents.map((i) => {
+    // Each incident carries a chronological `updates[]` list rather than a
+    // single top-level message — see /admin/status/incident's write path.
+    const latest = Array.isArray(i.updates) && i.updates.length ? i.updates[i.updates.length - 1].message : '';
+    return '<div style="padding:8px 0;border-bottom:1px solid var(--glass-brd);"><b>' + esc(i.title) + '</b> <span class="badge ' + (i.status === 'resolved' ? 'ok' : 'warn') + '">' + esc(i.status) + '</span> <span class="hint mono" style="font-size:10.5px;">' + esc(i.id) + '</span><div class="hint">' + esc(latest) + '</div></div>';
+  }).join('') + '</div>' : '';
+}
+async function setComponentStatus(key, status){
+  const res = await apiFetch('/admin/status/component', { method: 'POST', body: JSON.stringify({ key, status }) });
+  toast(res.ok ? 'Updated.' : 'Failed.', res.ok ? 'ok' : 'err');
+  if (res.ok) loadStatus();
+}
+async function postIncident(){
+  const incidentId = document.getElementById('incidentId').value.trim() || undefined;
+  const title = document.getElementById('incidentTitle').value.trim();
+  const severity = document.getElementById('incidentSeverity').value;
+  const status = document.getElementById('incidentStatus').value;
+  const message = document.getElementById('incidentMessage').value.trim();
+  if (!title) { toast('Title is required.', 'err'); return; }
+  const res = await apiFetch('/admin/status/incident', { method: 'POST', body: JSON.stringify({ incidentId, title, severity, status, message }) });
+  toast(res.ok ? 'Posted.' : 'Failed.', res.ok ? 'ok' : 'err');
+  if (res.ok) { document.getElementById('incidentMessage').value = ''; loadStatus(); }
+}
+
+// ---------------------------------------------------------------------
+// PWA
+// ---------------------------------------------------------------------
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/service-worker-admin.js').catch(() => {});
+  });
+}
+</script>
+</body>
+</html>
