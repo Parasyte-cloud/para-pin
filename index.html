@@ -519,7 +519,14 @@
     padding:calc(18px + env(safe-area-inset-top,0px)) 16px 8px; color:#fff; text-shadow:0 1px 4px rgba(0,0,0,0.6);
   }
   .video-call-name{ font-size:16px; font-weight:700; }
-  .video-call-status{ font-size:12px; opacity:.85; }
+  /* Frosted status pill, matching the same treatment built for mobile's
+     CallOverlay this round — most visible (and most worth the glass
+     treatment) while remote video is playing behind it. */
+  .video-call-status{
+    font-size:12px; opacity:.9; margin-top:2px; padding:4px 12px; border-radius:999px;
+    background:rgba(20,22,26,0.4); -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px);
+    border:1px solid rgba(255,255,255,0.14);
+  }
   .meeting-minimize-btn{
     position:absolute; top:calc(12px + env(safe-area-inset-top,0px)); left:14px; z-index:3;
     width:32px; height:32px; border-radius:50%; background:rgba(255,255,255,0.16); color:#fff;
@@ -752,12 +759,16 @@
   .bubble-row{ display:flex; gap:8px; max-width:68%; min-width:0; }
   .bubble-row.me{ align-self:flex-end; flex-direction:row-reverse; }
   .bubble{
-    position:relative; padding:10px 14px; border-radius:16px; font-size:13.5px; line-height:1.45;
+    position:relative; padding:10px 14px; border-radius:20px; font-size:13.5px; line-height:1.45;
     overflow-wrap:anywhere; word-wrap:break-word; min-width:0;
     border:1px solid var(--glass-brd);
   }
-  .bubble-row:not(.me) .bubble{ background:rgba(var(--tint-rgb),0.05); border-top-left-radius:4px; }
-  .bubble-row.me .bubble{ background:linear-gradient(135deg, rgba(0,212,255,0.22), rgba(255,106,0,0.16)); border-top-right-radius:4px; border-color:rgba(0,212,255,0.25); padding-right:46px; }
+  /* Pushed from 16px to a rounder 20px (and the tail corner from 4px to
+     5px) to match the same pill/capsule treatment built for mobile's
+     MessageBubble this round — a closer read as a true pill on short,
+     single-line messages while multi-line ones still wrap cleanly. */
+  .bubble-row:not(.me) .bubble{ background:rgba(var(--tint-rgb),0.05); border-top-left-radius:5px; }
+  .bubble-row.me .bubble{ background:linear-gradient(135deg, rgba(0,212,255,0.22), rgba(255,106,0,0.16)); border-top-right-radius:5px; border-color:rgba(0,212,255,0.25); padding-right:46px; }
   .bubble.deleted{ font-style:italic; opacity:.6; padding-right:14px; }
   .bubble .from{ font-size:10.5px; font-weight:700; color:var(--ice); margin-bottom:2px; display:block; }
   .bubble .ts{ font-size:9.5px; color:var(--text-low); margin-top:4px; display:flex; align-items:center; justify-content:flex-end; gap:4px; }
@@ -840,7 +851,14 @@
     cursor:pointer; white-space:nowrap;
   }
   .smart-reply-chip:hover{ background:rgba(var(--tint-rgb),0.1); }
-  .composer{ padding:14px 18px; border-top:1px solid var(--glass-brd); display:flex; gap:10px; align-items:flex-end; position:relative; }
+  /* Frosted glass, matching the rest of the app's blur panels (nav, mention
+     menu, react picker, call controls) — the composer was the one bottom
+     bar still using a flat background instead of the app's established
+     liquid-glass treatment. */
+  .composer{
+    padding:14px 18px; border-top:1px solid var(--glass-brd-hi); display:flex; gap:10px; align-items:flex-end; position:relative;
+    background:rgba(var(--tint-rgb),0.035); -webkit-backdrop-filter:blur(18px) saturate(140%); backdrop-filter:blur(18px) saturate(140%);
+  }
   .mention-menu{
     position:absolute; left:18px; right:18px; bottom:100%; margin-bottom:6px; max-height:180px; overflow-y:auto;
     background:rgba(20,22,26,0.97); border:1px solid var(--glass-brd-hi); border-radius:12px; padding:5px;
@@ -6849,8 +6867,19 @@
       return;
     }
     if (kind === 'ice-candidate'){
-      if (rtcPeerConn && signal.candidate){
-        if (rtcPeerConn.remoteDescription) rtcPeerConn.addIceCandidate(signal.candidate).catch(()=>{});
+      // Was `if (rtcPeerConn && signal.candidate)` — dropped every
+      // candidate outright if rtcPeerConn didn't exist yet instead of
+      // queuing it. The callee doesn't create rtcPeerConn until acceptCall()
+      // runs, and a human tapping "Accept" always takes at least a second
+      // or two, during which the caller's trickled ICE candidates were
+      // silently lost. That's exactly what "calls sometimes just don't
+      // connect" looks like — it could still work if enough candidates
+      // happened to arrive after accept, which made it look random. Fixed
+      // identically on mobile (mobile-app/src/state/call.ts) this session;
+      // porting the same fix here so both clients queue whenever there's
+      // no peer connection yet OR no remote description yet.
+      if (signal.candidate){
+        if (rtcPeerConn && rtcPeerConn.remoteDescription) rtcPeerConn.addIceCandidate(signal.candidate).catch(()=>{});
         else pendingIceCandidates.push(signal.candidate);
       }
       return;
@@ -9771,7 +9800,21 @@
   async function refreshReadState(chatId){
     const r = await apiFetch(`/chats/${chatId}/read-state`);
     if (r.ok && r.body.reads){
-      readState[chatId] = r.body.reads;
+      // Merge (max per user), never overwrite the whole object wholesale.
+      // This fetch runs concurrently with the live 'read_receipt' socket
+      // handler below on every tab focus/visibilitychange, not just chat
+      // open — a plain overwrite here could silently roll the read
+      // indicator backward if the socket event's fresher value arrived
+      // first and this slower REST call resolved after with a stale
+      // cached one. Same race identified and fixed on mobile this session
+      // (mobile-app/app/chat/[id].tsx); web's version was worse since it
+      // recurs on every focus, not just once per chat open.
+      const existing = readState[chatId] || {};
+      const merged = { ...existing };
+      for (const uid in r.body.reads){
+        merged[uid] = Math.max(merged[uid] || 0, r.body.reads[uid]);
+      }
+      readState[chatId] = merged;
       if (activeChatId === chatId) renderConv();
     }
   }

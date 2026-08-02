@@ -406,3 +406,20 @@ bundles all 1445 modules with zero JS/import errors (fails only at the
 final native Hermes-bytecode step, which this sandbox can't execute —
 expected, not a code issue, same as every previous verification pass this
 session).
+
+## Re-confirmed: paid workspace members can chat here too
+
+Traced this explicitly this round rather than just trusting the line at
+the top of this file: `POST /api/session` (worker.js) builds its `chats`
+array from `userChats:${user.id}` and returns every chat in it — personal
+DMs and every workspace group chat the account belongs to — with no
+platform/client-type check anywhere in that path, and no billing/plan
+check either (a workspace's existence already implies it's paid; once
+you're a member, its chats are just chats). Mobile calls the exact same
+`/api/session` endpoint web does and stores whatever `chats` comes back
+with zero client-side filtering (`src/state/session.ts`). So this was
+already correct, not something that needed a fix — worth stating plainly
+so a future session doesn't accidentally scope a Phase-5 change too
+broadly and gate chat itself. What mobile actually excludes is narrower
+and already listed above: HR, admin console, billing, and SSO/SAML
+settings — never the chats/calls themselves.

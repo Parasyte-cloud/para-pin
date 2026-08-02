@@ -1360,6 +1360,190 @@ async function sendWebPushWithRetry(subscription, payloadObj, env) {
   return result;
 }
 
+// ================= Native push (APNs + FCM, for the mobile app) =================
+// web.parasyte.cloud/chat.parasyte.cloud's PWA install uses the Web Push
+// path above; the React Native app (mobile-app/) has no browser to hold a
+// Web Push subscription, it registers a raw platform device token instead
+// (APNs device token on iOS, FCM registration token on Android — see
+// mobile-app/src/state/push.ts's getDevicePushTokenAsync() call, chosen
+// specifically over Expo's own push-relay service so this really is a
+// direct dual-send to Apple/Google, not a third intermediary). Both use
+// the same ES256-JWT-signing pattern already proven out for VAPID above,
+// APNs directly, FCM via a Google OAuth2 service-account exchange.
+//
+// Neither path can be fully verified from this environment the way the
+// E2EE crypto module was (no real device token, no live Apple/Google
+// credentials here) — the JWT-signing halves are the same well-understood
+// primitives as VAPID's, but the only real test is a genuine push
+// arriving on a real device once APNS_*/FCM_* secrets are set.
+
+let apnsJwtCache = null; // { jwt, expiresAt } — Apple asks that this token be reused, not regenerated per-push, and rate-limits regeneration.
+
+async function getApnsJWT(env) {
+  if (!env.APNS_KEY_ID || !env.APNS_TEAM_ID || !env.APNS_PRIVATE_KEY_P8) return null;
+  const now = Math.floor(Date.now() / 1000);
+  if (apnsJwtCache && apnsJwtCache.expiresAt > now) return apnsJwtCache.jwt;
+  try {
+    const pem = env.APNS_PRIVATE_KEY_P8.replace(/-----BEGIN PRIVATE KEY-----/, '')
+      .replace(/-----END PRIVATE KEY-----/, '').replace(/\s+/g, '');
+    const der = b64ToBufStd(pem);
+    const key = await crypto.subtle.importKey('pkcs8', der, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+    const header = { alg: 'ES256', kid: env.APNS_KEY_ID };
+    const payload = { iss: env.APNS_TEAM_ID, iat: now };
+    const unsigned = `${bufToB64url(new TextEncoder().encode(JSON.stringify(header)))}.${bufToB64url(new TextEncoder().encode(JSON.stringify(payload)))}`;
+    const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, new TextEncoder().encode(unsigned));
+    const jwt = `${unsigned}.${bufToB64url(sig)}`;
+    apnsJwtCache = { jwt, expiresAt: now + 50 * 60 }; // Apple's tokens are valid up to 1hr; refresh at 50m to stay safely inside that.
+    return jwt;
+  } catch (e) {
+    apnsJwtCache = null;
+    return null;
+  }
+}
+
+function b64ToBufStd(b64) {
+  const bin = atob(b64);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  return buf;
+}
+
+async function sendApnsPush(deviceToken, payloadObj, env) {
+  const jwt = await getApnsJWT(env);
+  if (!jwt) return { ok: false, status: 0, error: 'apns_not_configured' };
+  const host = env.APNS_USE_SANDBOX === 'true' ? 'https://api.sandbox.push.apple.com' : 'https://api.push.apple.com';
+  const body = JSON.stringify({
+    aps: { alert: { title: payloadObj.title, body: payloadObj.body }, sound: 'default', 'mutable-content': 1 },
+    chatId: payloadObj.chatId || null,
+    avatarUrl: payloadObj.avatarUrl || null,
+  });
+  try {
+    const res = await fetch(`${host}/3/device/${deviceToken}`, {
+      method: 'POST',
+      headers: {
+        'authorization': `bearer ${jwt}`,
+        'apns-topic': env.APNS_BUNDLE_ID || 'cloud.parasyte.parapin',
+        'apns-push-type': 'alert',
+        'apns-priority': '10',
+      },
+      body,
+    });
+    let reason = null;
+    if (!res.ok) { try { reason = (await res.json()).reason; } catch (e) {} }
+    return { ok: res.ok, status: res.status, reason };
+  } catch (e) {
+    return { ok: false, status: 0, error: e && e.message };
+  }
+}
+
+let fcmTokenCache = null; // { token, projectId, expiresAt }
+
+async function getFcmAccessToken(env) {
+  if (!env.FCM_SERVICE_ACCOUNT_JSON) return null;
+  const now = Math.floor(Date.now() / 1000);
+  if (fcmTokenCache && fcmTokenCache.expiresAt > now) return fcmTokenCache;
+  try {
+    const sa = JSON.parse(env.FCM_SERVICE_ACCOUNT_JSON);
+    const header = { alg: 'RS256', typ: 'JWT' };
+    const payload = {
+      iss: sa.client_email,
+      scope: 'https://www.googleapis.com/auth/firebase.messaging',
+      aud: 'https://oauth2.googleapis.com/token',
+      iat: now,
+      exp: now + 3600,
+    };
+    const unsigned = `${bufToB64url(new TextEncoder().encode(JSON.stringify(header)))}.${bufToB64url(new TextEncoder().encode(JSON.stringify(payload)))}`;
+    const pem = sa.private_key.replace(/-----BEGIN PRIVATE KEY-----/, '').replace(/-----END PRIVATE KEY-----/, '').replace(/\s+/g, '');
+    const der = b64ToBufStd(pem);
+    const key = await crypto.subtle.importKey('pkcs8', der, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
+    const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(unsigned));
+    const assertion = `${unsigned}.${bufToB64url(sig)}`;
+    const res = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: `grant_type=${encodeURIComponent('urn:ietf:params:oauth:grant-type:jwt-bearer')}&assertion=${encodeURIComponent(assertion)}`,
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    fcmTokenCache = { token: data.access_token, projectId: sa.project_id, expiresAt: now + (data.expires_in || 3600) - 60 };
+    return fcmTokenCache;
+  } catch (e) {
+    fcmTokenCache = null;
+    return null;
+  }
+}
+
+async function sendFcmPush(deviceToken, payloadObj, env) {
+  const auth = await getFcmAccessToken(env);
+  if (!auth) return { ok: false, status: 0, error: 'fcm_not_configured' };
+  try {
+    const res = await fetch(`https://fcm.googleapis.com/v1/projects/${auth.projectId}/messages:send`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${auth.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        message: {
+          token: deviceToken,
+          notification: { title: payloadObj.title, body: payloadObj.body },
+          data: { chatId: String(payloadObj.chatId || ''), avatarUrl: String(payloadObj.avatarUrl || '') },
+          android: { priority: 'high' },
+        },
+      }),
+    });
+    let errorStatus = null;
+    if (!res.ok) { try { errorStatus = (await res.json()).error?.status; } catch (e) {} }
+    return { ok: res.ok, status: res.status, errorStatus };
+  } catch (e) {
+    return { ok: false, status: 0, error: e && e.message };
+  }
+}
+
+// Sends one payload to EVERY registered target for a user — every Web Push
+// subscription (`pushSubs`, browsers/PWA) plus every native device token
+// (`deviceTokens`, mobile app) — and prunes only the ones a push service
+// confirms are permanently gone, same conservative rule the original
+// Web Push code already used (a transient failure keeps the subscription;
+// only a definitive "this token/subscription no longer exists" drops it).
+async function pushToAllTargets(storage, payloadObj, env) {
+  const subs = (await storage.get('pushSubs')) || [];
+  const deviceTokens = (await storage.get('deviceTokens')) || [];
+  let delivered = 0;
+
+  const stillValidSubs = [];
+  for (const sub of subs) {
+    try {
+      const result = await sendWebPushWithRetry(sub, payloadObj, env);
+      if (result.ok) delivered++;
+      if (result.status !== 404 && result.status !== 410) stillValidSubs.push(sub);
+    } catch (e) {
+      stillValidSubs.push(sub);
+    }
+  }
+  if (stillValidSubs.length !== subs.length) await storage.put('pushSubs', stillValidSubs);
+
+  const stillValidTokens = [];
+  for (const dt of deviceTokens) {
+    try {
+      const result = dt.platform === 'ios'
+        ? await sendApnsPush(dt.token, payloadObj, env)
+        : await sendFcmPush(dt.token, payloadObj, env);
+      if (result.ok) delivered++;
+      // APNs signals a dead token via reason 'BadDeviceToken' or
+      // 'Unregistered'; FCM v1 via error.status 'UNREGISTERED' or
+      // 'INVALID_ARGUMENT'. Anything else (network blip, 5xx, rate limit,
+      // misconfigured secret) keeps the token — same "don't churn on an
+      // ambiguous signal" rule as the Web Push side.
+      const gone = result.reason === 'BadDeviceToken' || result.reason === 'Unregistered'
+        || result.errorStatus === 'UNREGISTERED' || result.errorStatus === 'INVALID_ARGUMENT';
+      if (!gone) stillValidTokens.push(dt);
+    } catch (e) {
+      stillValidTokens.push(dt);
+    }
+  }
+  if (stillValidTokens.length !== deviceTokens.length) await storage.put('deviceTokens', stillValidTokens);
+
+  return { delivered, total: subs.length + deviceTokens.length };
+}
+
 // ================= Transactional email (Resend) =================
 // Used only by the lightweight HR-linked onboarding roster: emails a newly
 // added person their PIN instead of (or alongside) an admin handing it over
@@ -5229,8 +5413,7 @@ export class UserChannel {
         // decrypts client-side and applies the real mention check there.
         const shouldPush = pref !== 'mute';
 
-        const subs = shouldPush ? (await this.state.storage.get('pushSubs')) || [] : [];
-        if (subs.length) {
+        if (shouldPush) {
           const senderLabel = data.message.fromName || 'Someone';
           // DMs put the sender's own name in the title (and their photo as
           // the icon, see avatarUrl below), same as a phone's native "from a
@@ -5241,19 +5424,7 @@ export class UserChannel {
           const title = data.chatType === 'group' ? (data.chatName || 'Group') : senderLabel;
           const body = data.chatType === 'group' ? `${senderLabel} sent a message` : 'Sent you a message';
           const pushPayload = { title, body, chatId: data.chatId, avatarUrl: data.message.fromAvatarUrl || null };
-          const stillValid = [];
-          for (const sub of subs) {
-            try {
-              const result = await sendWebPushWithRetry(sub, pushPayload, this.env);
-              // 404/410 = the browser/OS has permanently unsubscribed this endpoint, drop it.
-              if (result.status !== 404 && result.status !== 410) stillValid.push(sub);
-            } catch (e) {
-              stillValid.push(sub); // transient failure (network, etc.), keep it, don't churn subscriptions on a blip
-            }
-          }
-          if (stillValid.length !== subs.length) {
-            await this.state.storage.put('pushSubs', stillValid);
-          }
+          await pushToAllTargets(this.state.storage, pushPayload, this.env);
         }
       }
 
@@ -5306,8 +5477,7 @@ export class UserChannel {
       const isMissedCall = data && data.signal && data.signal.kind === 'end'
         && data.signal.reason === 'no-answer' && data.signal.direction === 'outgoing';
       if (data && data.type === 'call-signal' && data.signal && (data.signal.kind === 'offer' || data.signal.kind === 'meeting-invite' || isMissedCall)) {
-        const subs = (await this.state.storage.get('pushSubs')) || [];
-        if (subs.length) {
+        {
           let pushPayload;
           if (data.signal.kind === 'meeting-invite') {
             pushPayload = {
@@ -5328,16 +5498,7 @@ export class UserChannel {
               chatId: null,
             };
           }
-          const stillValid = [];
-          for (const sub of subs) {
-            try {
-              const result = await sendWebPushWithRetry(sub, pushPayload, this.env);
-              if (result.status !== 404 && result.status !== 410) stillValid.push(sub);
-            } catch (e) {
-              stillValid.push(sub);
-            }
-          }
-          if (stillValid.length !== subs.length) await this.state.storage.put('pushSubs', stillValid);
+          await pushToAllTargets(this.state.storage, pushPayload, this.env);
         }
       }
 
@@ -5372,37 +5533,86 @@ export class UserChannel {
       return json({ ok: true });
     }
 
+    // Mobile app equivalent of /subscribe — a raw APNs device token or FCM
+    // registration token instead of a Web Push subscription object, since
+    // React Native has neither a Push API nor a service worker to hold one.
+    // Kept in a separate `deviceTokens` list rather than folded into
+    // `pushSubs` so the existing, already-verified Web Push code path
+    // (shape-checked on `subscription.endpoint`) can't be handed a token
+    // it doesn't understand — see sendPush/pushToAllTargets above.
+    if (request.method === 'POST' && url.pathname === '/register-device') {
+      const { platform, token, displayName } = await request.json();
+      if (!token || (platform !== 'ios' && platform !== 'android')) return json({ error: 'invalid_device_token' }, 400);
+      const tokens = (await this.state.storage.get('deviceTokens')) || [];
+      // A device's token can rotate (OS-issued, not stable forever) — drop
+      // any stale entry for the same platform+token pair before re-adding,
+      // and also drop any OTHER token this exact string previously appeared
+      // under (defensive: tokens are meant to be unique per install, this
+      // just guards against ever double-sending to the same physical device).
+      const deduped = tokens.filter((t) => t.token !== token);
+      deduped.push({ platform, token });
+      await this.state.storage.put('deviceTokens', deduped);
+      if (displayName) await this.state.storage.put('displayName', displayName);
+      return json({ ok: true });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/unregister-device') {
+      const { token } = await request.json();
+      const tokens = (await this.state.storage.get('deviceTokens')) || [];
+      await this.state.storage.put('deviceTokens', tokens.filter((t) => t.token !== token));
+      return json({ ok: true });
+    }
+
     if (request.method === 'GET' && url.pathname === '/notify-prefs') {
       const notifyPrefs = (await this.state.storage.get('notifyPrefs')) || {};
       return json({ notifyPrefs });
     }
 
-    // Direct self-test, sends to every registered subscription regardless
-    // of notifyPrefs, and reports back per-subscription success/failure
+    // Direct self-test, sends to every registered subscription/device token
+    // regardless of notifyPrefs, and reports back per-item success/failure
     // instead of swallowing it, so a bad push service response is visible
     // instead of just "nothing arrived."
     if (request.method === 'POST' && url.pathname === '/push-test') {
       const subs = (await this.state.storage.get('pushSubs')) || [];
-      if (!subs.length) return json({ delivered: 0, total: 0, error: 'no_subscriptions' });
+      const deviceTokens = (await this.state.storage.get('deviceTokens')) || [];
+      if (!subs.length && !deviceTokens.length) return json({ delivered: 0, total: 0, error: 'no_subscriptions' });
       const payload = { title: 'PArA PIN', body: 'Test notification, if you see this, push works.', chatId: null };
       let delivered = 0;
       const errors = [];
-      const stillValid = [];
+      const stillValidSubs = [];
       for (const sub of subs) {
         try {
           const result = await sendWebPushWithRetry(sub, payload, this.env);
-          if (result.ok) { delivered++; stillValid.push(sub); }
+          if (result.ok) { delivered++; stillValidSubs.push(sub); }
           else {
-            errors.push(`status ${result.status}${result.error ? ': ' + result.error : ''}`);
-            if (result.status !== 404 && result.status !== 410) stillValid.push(sub);
+            errors.push(`web: status ${result.status}${result.error ? ': ' + result.error : ''}`);
+            if (result.status !== 404 && result.status !== 410) stillValidSubs.push(sub);
           }
         } catch (e) {
-          errors.push(e && e.message ? e.message : 'unknown error');
-          stillValid.push(sub);
+          errors.push(`web: ${e && e.message ? e.message : 'unknown error'}`);
+          stillValidSubs.push(sub);
         }
       }
-      if (stillValid.length !== subs.length) await this.state.storage.put('pushSubs', stillValid);
-      return json({ delivered, total: subs.length, errors: errors.length ? errors : undefined });
+      if (stillValidSubs.length !== subs.length) await this.state.storage.put('pushSubs', stillValidSubs);
+
+      const stillValidTokens = [];
+      for (const dt of deviceTokens) {
+        try {
+          const result = dt.platform === 'ios' ? await sendApnsPush(dt.token, payload, this.env) : await sendFcmPush(dt.token, payload, this.env);
+          if (result.ok) { delivered++; stillValidTokens.push(dt); }
+          else {
+            errors.push(`${dt.platform}: status ${result.status}${result.reason ? ' (' + result.reason + ')' : ''}${result.errorStatus ? ' (' + result.errorStatus + ')' : ''}${result.error ? ': ' + result.error : ''}`);
+            const gone = result.reason === 'BadDeviceToken' || result.reason === 'Unregistered' || result.errorStatus === 'UNREGISTERED' || result.errorStatus === 'INVALID_ARGUMENT';
+            if (!gone) stillValidTokens.push(dt);
+          }
+        } catch (e) {
+          errors.push(`${dt.platform}: ${e && e.message ? e.message : 'unknown error'}`);
+          stillValidTokens.push(dt);
+        }
+      }
+      if (stillValidTokens.length !== deviceTokens.length) await this.state.storage.put('deviceTokens', stillValidTokens);
+
+      return json({ delivered, total: subs.length + deviceTokens.length, errors: errors.length ? errors : undefined });
     }
 
     // Generic "send this exact push to this user" primitive, used for things
@@ -5410,22 +5620,9 @@ export class UserChannel {
     // claims their HR-onboarding roster PIN for the first time.
     if (request.method === 'POST' && url.pathname === '/push-direct') {
       const { title, body, chatId } = await request.json().catch(() => ({}));
-      const subs = (await this.state.storage.get('pushSubs')) || [];
-      if (!subs.length) return json({ delivered: 0, total: 0 });
       const payload = { title: title || 'PArA PIN', body: body || '', chatId: chatId || null };
-      let delivered = 0;
-      const stillValid = [];
-      for (const sub of subs) {
-        try {
-          const result = await sendWebPushWithRetry(sub, payload, this.env);
-          if (result.ok) delivered++;
-          if (result.status !== 404 && result.status !== 410) stillValid.push(sub);
-        } catch (e) {
-          stillValid.push(sub);
-        }
-      }
-      if (stillValid.length !== subs.length) await this.state.storage.put('pushSubs', stillValid);
-      return json({ delivered, total: subs.length });
+      const result = await pushToAllTargets(this.state.storage, payload, this.env);
+      return json(result);
     }
 
     if (request.method === 'POST' && url.pathname === '/notify-pref') {
@@ -7031,6 +7228,39 @@ export default {
         const res = await channelStub.fetch('https://internal/unsubscribe', {
           method: 'POST',
           body: JSON.stringify({ endpoint }),
+        });
+        return res;
+      }
+
+      // Mobile app's equivalent of /api/push/subscribe — registers a raw
+      // APNs/FCM device token (see mobile-app/src/state/push.ts) instead of
+      // a Web Push subscription object.
+      if (request.method === 'POST' && url.pathname === '/api/push/register-device') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const { platform, token } = await request.json().catch(() => ({}));
+        const channelStub = env.USER_CHANNEL.get(env.USER_CHANNEL.idFromName(who.userId));
+        const res = await channelStub.fetch('https://internal/register-device', {
+          method: 'POST',
+          body: JSON.stringify({ platform, token, displayName: who.displayName }),
+        });
+        return res;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/push/unregister-device') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const { token } = await request.json().catch(() => ({}));
+        const channelStub = env.USER_CHANNEL.get(env.USER_CHANNEL.idFromName(who.userId));
+        const res = await channelStub.fetch('https://internal/unregister-device', {
+          method: 'POST',
+          body: JSON.stringify({ token }),
         });
         return res;
       }
