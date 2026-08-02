@@ -6,16 +6,19 @@
 // relayed through the other person's UserChannel DO. Audio/video itself is
 // peer-to-peer WebRTC and never touches the Worker.
 //
-// Known cut vs. web: no synthesized ringback/ringtone AUDIO (that's a Web
-// Audio oscillator trick with no direct RN equivalent) — an incoming call
-// now vibrates (see startRinging/stopRinging below) but doesn't play a
-// tone. This only fires while the app is foregrounded and the always-open
+// An incoming call vibrates AND now plays the synthesized ringtone (see
+// startRinging/stopRinging below and utils/ringtonePlayer.ts/
+// ringtoneSynth.ts) — real PCM audio generated in JS to match web's Web
+// Audio oscillator tones exactly, since there's no Web Audio API on-device
+// to run the same trick live. Outgoing calls get the matching ringback
+// tone too (started in startOutgoingCall, stopped in onCallConnected).
+// This only fires while the app is foregrounded and the always-open
 // notify socket is connected; a backgrounded/killed app has no CallKit/
 // VoIP-push integration, so it only gets whatever the push-notification
 // path delivers (see mobile-app/src/state/push.ts) — a real background
 // ring would need that separate, bigger native piece of work.
-// Group/meeting calls (Cloudflare Calls SFU) are a separate, not-yet-built
-// path — see mobile-app/README.md.
+// Group/meeting calls (Cloudflare Calls SFU) are a separate path — see
+// state/meeting.ts.
 
 import { Vibration } from 'react-native';
 import { create } from 'zustand';
@@ -28,6 +31,7 @@ import {
 } from 'react-native-webrtc';
 import { useSessionStore } from './session';
 import { getIceServers, sendCallSignal, logCallEntry, type CallSignal } from './callSignal';
+import { playIncomingRingtone, playOutgoingRingback, stopRingAudio } from '../utils/ringtonePlayer';
 
 export type CallState = 'idle' | 'ringing-out' | 'ringing-in' | 'connected';
 
@@ -82,14 +86,17 @@ interface CallStoreState {
   dismissConnectError: () => void;
 }
 
-// Repeating buzz-pause-buzz pattern, closest thing to "ringing" available
-// without a bundled audio asset + expo-audio playback wiring. `true` as
-// the second arg repeats the pattern until Vibration.cancel() is called.
+// Repeating buzz-pause-buzz pattern (`true` as the second arg repeats
+// until Vibration.cancel() is called) layered with the actual synthesized
+// ringtone audio — vibration alone used to be the whole story here, see
+// this file's header comment for why that was the known gap.
 function startRinging() {
   Vibration.vibrate([0, 700, 500], true);
+  playIncomingRingtone().catch(() => {});
 }
 function stopRinging() {
   Vibration.cancel();
+  stopRingAudio();
 }
 
 function clearAllTimers() {
@@ -209,6 +216,12 @@ export const useCallStore = create<CallStoreState>((set, get) => {
 
   function onCallConnected() {
     if (get().callState === 'connected') return;
+    // Stops the outgoing ringback the instant the call actually connects —
+    // acceptCall()/finishCall() already call this for the incoming-ring
+    // side, but a caller going ringing-out -> connected never passes
+    // through either of those, so without this the ringback tone would
+    // keep looping underneath a now-live call.
+    stopRinging();
     set({ callState: 'connected', callStartedAt: Date.now(), awaitingConnection: false, elapsedSec: 0 });
     if (ringTimeoutTimer) clearTimeout(ringTimeoutTimer);
     if (connectTimeoutTimer) clearTimeout(connectTimeoutTimer);
@@ -283,6 +296,7 @@ export const useCallStore = create<CallStoreState>((set, get) => {
         connectError: null,
         orgId,
       });
+      playOutgoingRingback().catch(() => {});
       const pc = await createPeerConnection(
         peerId,
         () => get().callId,
@@ -432,7 +446,16 @@ export const useCallStore = create<CallStoreState>((set, get) => {
       const myUserId = useSessionStore.getState().userId;
 
       if (signal.kind === 'offer') {
-        if (s.callState !== 'idle') {
+        // Also busy-reject while in a group meeting — meeting.ts's own
+        // handleMeetingInvite already checks the reverse (won't surface a
+        // meeting invite while mid 1:1-call), but this side of that same
+        // "only one call thing at a time" rule was missing: without it, a
+        // 1:1 offer arriving during an active meeting would still ring and
+        // let acceptCall() grab a second getUserMedia() stream on top of
+        // the meeting's already-live one.
+        const { useMeetingStore } = require('./meeting');
+        const inMeeting = useMeetingStore.getState().status !== 'idle';
+        if (s.callState !== 'idle' || inMeeting) {
           if (signal.fromUserId) sendCallSignal(signal.fromUserId, { kind: 'end', callId: signal.callId, reason: 'busy' });
           return;
         }

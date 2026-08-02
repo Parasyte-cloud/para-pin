@@ -12,9 +12,23 @@
 
 import { useMemo, useRef } from 'react';
 import { View, Text, Pressable, StyleSheet, Animated, PanResponder } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import { AttachmentView } from './MessageAttachments';
 import type { ChatMessage } from '../types';
 import type { ThemeColors } from '../theme';
+
+// Own-message bubble gradient — mirrors index.html's exact CSS
+// (`.bubble-row.me .bubble`, index.html:771):
+//   background:linear-gradient(135deg, rgba(0,212,255,0.22), rgba(255,106,0,0.16));
+//   border-color:rgba(0,212,255,0.25);
+// This was previously a flat theme.ice fill (a stand-in from before this
+// package was installable — see README's "known gap" note, now closed).
+// RN's LinearGradient has no `deg` prop; start/end {0,0}->{1,1} is the
+// standard approximation of a 135deg (top-left-to-bottom-right) CSS angle.
+const MINE_BUBBLE_GRADIENT = ['rgba(0,212,255,0.22)', 'rgba(255,106,0,0.16)'] as const;
+const MINE_BUBBLE_GRADIENT_START = { x: 0, y: 0 };
+const MINE_BUBBLE_GRADIENT_END = { x: 1, y: 1 };
+const MINE_BUBBLE_BORDER = 'rgba(0,212,255,0.25)';
 
 const SWIPE_TRIGGER_DISTANCE = 56;
 const SWIPE_MAX_DISTANCE = 80;
@@ -33,10 +47,68 @@ interface Props {
   onLongPress: () => void;
   onSwipeReply: () => void;
   onReplyPreviewPress?: () => void;
+  // In-chat message search (see app/chat/[id].tsx's msgSearch* state,
+  // mirroring index.html's #msgSearchInput highlighting) — highlightQuery
+  // is the lowercased search term to bold-highlight within this bubble's
+  // text, isCurrentMatch picks a stronger highlight color for whichever
+  // match searchStep() has currently scrolled to, same distinction as
+  // web's own current-vs-other-match highlight treatment.
+  highlightQuery?: string;
+  isCurrentMatch?: boolean;
 }
 
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+// Splits `text` on (case-insensitive) occurrences of `query` and renders
+// matched spans with a highlight background — same idea as index.html's
+// highlightMatch() (index.html:2977-2979) regex-wrapping matches in a
+// <mark>, adapted to RN Text's nested-Text-span model since there's no
+// <mark> equivalent.
+function HighlightedText({
+  text,
+  query,
+  color,
+  highlightBg,
+  highlightColor,
+}: {
+  text: string;
+  query: string;
+  color: string;
+  highlightBg: string;
+  highlightColor: string;
+}) {
+  if (!query) return <Text>{text}</Text>;
+  const lower = text.toLowerCase();
+  const q = query.toLowerCase();
+  const parts: { text: string; match: boolean }[] = [];
+  let i = 0;
+  while (i < text.length) {
+    const idx = lower.indexOf(q, i);
+    if (idx === -1) {
+      parts.push({ text: text.slice(i), match: false });
+      break;
+    }
+    if (idx > i) parts.push({ text: text.slice(i, idx), match: false });
+    parts.push({ text: text.slice(idx, idx + q.length), match: true });
+    i = idx + q.length;
+  }
+  return (
+    <Text>
+      {parts.map((p, idx) =>
+        p.match ? (
+          <Text key={idx} style={{ backgroundColor: highlightBg, color: highlightColor, fontWeight: '700' }}>
+            {p.text}
+          </Text>
+        ) : (
+          <Text key={idx} style={{ color }}>
+            {p.text}
+          </Text>
+        )
+      )}
+    </Text>
+  );
 }
 
 export default function MessageBubble({
@@ -53,6 +125,8 @@ export default function MessageBubble({
   onLongPress,
   onSwipeReply,
   onReplyPreviewPress,
+  highlightQuery,
+  isCurrentMatch,
 }: Props) {
   const dragX = useRef(new Animated.Value(0)).current;
   const replyIconOpacity = useRef(new Animated.Value(0)).current;
@@ -152,57 +226,91 @@ export default function MessageBubble({
         )}
 
         {item.replyTo?.id && (
-          <Pressable onPress={onReplyPreviewPress} style={[styles.replyPreview, { borderLeftColor: mine ? '#0a0d12' : theme.ice }]}>
-            <Text numberOfLines={1} style={[styles.replyPreviewName, { color: mine ? 'rgba(10,13,18,0.7)' : theme.ice }]}>
+          <Pressable onPress={onReplyPreviewPress} style={[styles.replyPreview, { borderLeftColor: theme.ice }]}>
+            <Text numberOfLines={1} style={[styles.replyPreviewName, { color: theme.ice }]}>
               {item.replyTo.fromName || 'Message'}
             </Text>
-            <Text numberOfLines={1} style={[styles.replyPreviewText, { color: mine ? 'rgba(10,13,18,0.6)' : theme.textLow }]}>
+            <Text numberOfLines={1} style={[styles.replyPreviewText, { color: theme.textLow }]}>
               {item.replyTo.text || ''}
             </Text>
           </Pressable>
         )}
 
         <Pressable onLongPress={onLongPress} delayLongPress={280}>
-          <View
-            style={[
+          {(() => {
+            const bubbleChildren = (
+              <>
+                {item.attachment && !item.deleted && (
+                  <View style={styles.attachmentWrap}>
+                    <AttachmentView attachment={item.attachment} mine={mine} theme={theme} />
+                  </View>
+                )}
+                {(!item.attachment || item.text || item.deleted) && (
+                  <Text style={{ color: theme.textHi, fontSize: 15.5, lineHeight: 20.5 }}>
+                    {item.deleted ? (
+                      <Text style={{ fontStyle: 'italic', opacity: 0.7 }}>{bodyText}</Text>
+                    ) : highlightQuery ? (
+                      <HighlightedText
+                        text={bodyText}
+                        query={highlightQuery}
+                        color={theme.textHi}
+                        highlightBg={theme.fire}
+                        highlightColor="#0a0d12"
+                      />
+                    ) : (
+                      bodyText
+                    )}
+                    {!item.deleted && item.edited ? (
+                      <Text style={{ fontSize: 11, color: theme.textLow }}> (edited)</Text>
+                    ) : null}
+                  </Text>
+                )}
+
+                {/* iMessage-style tail — only on the last bubble of a
+                    consecutive run: a small square, colored the same as the
+                    bubble, with just the inner corner rounded off. Sitting
+                    flush against the bubble's own sharp tail-side corner
+                    (see bubbleCornerStyle above) it reads as a single curved
+                    tail extending out from that corner, no image/SVG asset
+                    needed. Own-message tail reuses the same gradient so it
+                    doesn't read as a mismatched flat-color patch glued onto
+                    a translucent bubble. */}
+                {isLastInGroup &&
+                  (mine ? (
+                    <LinearGradient
+                      colors={MINE_BUBBLE_GRADIENT}
+                      start={MINE_BUBBLE_GRADIENT_START}
+                      end={MINE_BUBBLE_GRADIENT_END}
+                      style={styles.tailMine}
+                    />
+                  ) : (
+                    <View style={[styles.tailTheirs, { backgroundColor: theme.glass }]} />
+                  ))}
+              </>
+            );
+            const bubbleStyle = [
               styles.bubble,
               bubbleCornerStyle,
-              {
-                backgroundColor: mine ? theme.ice : theme.glass,
-                borderColor: mine ? 'transparent' : theme.glassBrdHi,
-              },
-            ]}
-          >
-            {item.attachment && !item.deleted && (
-              <View style={styles.attachmentWrap}>
-                <AttachmentView attachment={item.attachment} mine={mine} theme={theme} />
-              </View>
-            )}
-            {(!item.attachment || item.text || item.deleted) && (
-              <Text style={{ color: mine ? '#0a0d12' : theme.textHi, fontSize: 15.5, lineHeight: 20.5 }}>
-                {item.deleted ? <Text style={{ fontStyle: 'italic', opacity: 0.7 }}>{bodyText}</Text> : bodyText}
-                {!item.deleted && item.edited ? (
-                  <Text style={{ fontSize: 11, color: mine ? 'rgba(10,13,18,0.55)' : theme.textLow }}> (edited)</Text>
-                ) : null}
-              </Text>
-            )}
-
-            {/* iMessage-style tail — only on the last bubble of a
-                consecutive run: a small square, colored the same as the
-                bubble, with just the inner corner rounded off. Sitting
-                flush against the bubble's own sharp tail-side corner
-                (see bubbleCornerStyle above) it reads as a single curved
-                tail extending out from that corner, no image/SVG asset
-                needed. */}
-            {isLastInGroup && (
-              <View
-                style={[
-                  mine ? styles.tailMine : styles.tailTheirs,
-                  { backgroundColor: mine ? theme.ice : theme.glass },
-                ]}
-              />
-            )}
-          </View>
+              { borderColor: mine ? MINE_BUBBLE_BORDER : theme.glassBrdHi },
+              isCurrentMatch && { borderColor: theme.ice, borderWidth: 2 },
+            ];
+            // Own-message bubbles get the gradient fill (see
+            // MINE_BUBBLE_GRADIENT above); others keep the flat glass fill —
+            // matches web's `.bubble-row:not(.me) .bubble` vs
+            // `.bubble-row.me .bubble` split exactly.
+            return mine ? (
+              <LinearGradient
+                colors={MINE_BUBBLE_GRADIENT}
+                start={MINE_BUBBLE_GRADIENT_START}
+                end={MINE_BUBBLE_GRADIENT_END}
+                style={bubbleStyle}
+              >
+                {bubbleChildren}
+              </LinearGradient>
+            ) : (
+              <View style={[...bubbleStyle, { backgroundColor: theme.glass }]}>{bubbleChildren}</View>
+            );
+          })()}
         </Pressable>
 
         {reactionSummary.length > 0 && (
@@ -212,12 +320,19 @@ export default function MessageBubble({
                 key={r.emoji}
                 style={[
                   styles.reactionPill,
-                  { backgroundColor: r.mine ? theme.ice : theme.glass, borderColor: theme.glassBrd },
+                  // Matches index.html's `.reaction-pill.mine` exactly
+                  // (index.html:826) — a translucent ice tint with a
+                  // matching border, not a solid fill; this used to render
+                  // as a solid bright theme.ice chip with dark text, which
+                  // was never how web actually draws it.
+                  r.mine
+                    ? { backgroundColor: 'rgba(0,212,255,0.12)', borderColor: 'rgba(0,212,255,0.5)' }
+                    : { backgroundColor: theme.glass, borderColor: theme.glassBrd },
                 ]}
               >
                 <Text style={{ fontSize: 12 }}>{r.emoji}</Text>
                 {r.count > 1 && (
-                  <Text style={{ fontSize: 10.5, color: r.mine ? '#0a0d12' : theme.textMid, marginLeft: 2 }}>{r.count}</Text>
+                  <Text style={{ fontSize: 10.5, color: r.mine ? theme.textHi : theme.textMid, marginLeft: 2 }}>{r.count}</Text>
                 )}
               </View>
             ))}

@@ -14,6 +14,7 @@ import { useTheme } from '../src/hooks/useTheme';
 import { useNotifySocket } from '../src/hooks/useNotifySocket';
 import { ensurePushRegistered } from '../src/state/push';
 import CallOverlay from '../src/components/CallOverlay';
+import MeetingOverlay from '../src/components/MeetingOverlay';
 
 // Root-level safety net. expo-router auto-wraps this route tree in a real
 // React error boundary when a layout/route file exports a component named
@@ -112,6 +113,7 @@ export default function RootLayout() {
         {/* Sibling to the Stack, not inside any one screen — an incoming
             call needs to interrupt whatever route is currently active. */}
         <CallOverlay />
+        <MeetingOverlay />
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );

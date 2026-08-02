@@ -13,6 +13,7 @@ import { useEffect, useRef } from 'react';
 import { wsUrl } from '../api/client';
 import { useSessionStore } from '../state/session';
 import { useCallStore } from '../state/call';
+import { useMeetingStore } from '../state/meeting';
 
 const HEARTBEAT_INTERVAL_MS = 12000;
 const STALE_THRESHOLD_MS = 25000;
@@ -83,7 +84,18 @@ export function useNotifySocket() {
         } catch {
           return;
         }
-        if (data.type === 'call-signal') useCallStore.getState().handleCallSignal(data.signal);
+        if (data.type === 'call-signal') {
+          // Group-meeting invites ride the same call-signal envelope as
+          // 1:1 offers (see MeetingInviteSignal in state/meeting.ts) —
+          // routed to the meeting store instead of the 1:1 call state
+          // machine so an incoming meeting invite doesn't get treated as
+          // a phone call.
+          if (data.signal && data.signal.kind === 'meeting-invite') {
+            useMeetingStore.getState().handleMeetingInvite(data.signal);
+          } else {
+            useCallStore.getState().handleCallSignal(data.signal);
+          }
+        }
       });
 
       ws.addEventListener('close', () => {

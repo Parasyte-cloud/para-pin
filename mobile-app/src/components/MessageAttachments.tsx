@@ -3,6 +3,19 @@
 // them. Behavior unchanged from the original Phase-2 implementation —
 // image/voice-note/generic-file rendering keyed off MessageAttachment's
 // `_decryptedUri`/`_decrypting` state (see src/state/messages.ts).
+//
+// The `mine` prop is intentionally NOT used to pick different colors here
+// (general bug sweep fix, later round). It used to switch to dark literal
+// colors (`#0a0d12`, `rgba(10,13,18,…)`) as a compensation for the mine
+// bubble being a solid bright `theme.ice` fill — but web's own equivalents
+// (`.file-card`, `.att-decrypting`, `.voice-note-play`, index.html:1020-
+// 1046) never special-case the own-message case at all, they just inherit
+// the page's normal text-hi/tint-based chip colors either way. Now that
+// MessageBubble.tsx's own-message bubble is the actual translucent
+// gradient over the dark app background (matching web), keeping the old
+// dark-on-dark colors here would have made every attachment inside your
+// own messages unreadable. `mine` is kept as a prop since AttachmentView's
+// signature is shared with the bubble's rendering call site.
 
 import { View, Text, Image, Pressable, StyleSheet, ActivityIndicator } from 'react-native';
 import * as Sharing from 'expo-sharing';
@@ -39,11 +52,11 @@ function ImageAttachment({ attachment, mine, theme }: AttachmentProps) {
     );
   }
   return (
-    <View style={[styles.attachmentPlaceholder, { backgroundColor: mine ? 'rgba(10,13,18,0.15)' : theme.glass }]}>
+    <View style={[styles.attachmentPlaceholder, { backgroundColor: theme.glass }]}>
       {attachment._decryptedUri === null ? (
-        <Text style={{ fontSize: 11, color: mine ? '#0a0d12' : theme.textLow }}>Couldn't load image</Text>
+        <Text style={{ fontSize: 11, color: theme.textLow }}>Couldn't load image</Text>
       ) : (
-        <ActivityIndicator color={mine ? '#0a0d12' : theme.ice} size="small" />
+        <ActivityIndicator color={theme.ice} size="small" />
       )}
     </View>
   );
@@ -55,11 +68,11 @@ function AudioAttachment({ attachment, mine, theme }: AttachmentProps) {
 
   if (!attachment._decryptedUri) {
     return (
-      <View style={[styles.attachmentRow, { backgroundColor: mine ? 'rgba(10,13,18,0.12)' : theme.glass }]}>
+      <View style={[styles.attachmentRow, { backgroundColor: theme.glass }]}>
         {attachment._decryptedUri === null ? (
-          <Text style={{ fontSize: 12, color: mine ? '#0a0d12' : theme.textLow }}>Couldn't load voice note</Text>
+          <Text style={{ fontSize: 12, color: theme.textLow }}>Couldn't load voice note</Text>
         ) : (
-          <ActivityIndicator color={mine ? '#0a0d12' : theme.ice} size="small" />
+          <ActivityIndicator color={theme.ice} size="small" />
         )}
       </View>
     );
@@ -71,10 +84,10 @@ function AudioAttachment({ attachment, mine, theme }: AttachmentProps) {
   return (
     <Pressable
       onPress={() => (status.playing ? player.pause() : player.play())}
-      style={[styles.attachmentRow, { backgroundColor: mine ? 'rgba(10,13,18,0.12)' : theme.glass }]}
+      style={[styles.attachmentRow, { backgroundColor: theme.glass }]}
     >
       <Text style={{ fontSize: 18 }}>{status.playing ? '⏸' : '▶️'}</Text>
-      <Text style={{ fontSize: 12.5, color: mine ? '#0a0d12' : theme.textHi }}>
+      <Text style={{ fontSize: 12.5, color: theme.textHi }}>
         {formatDuration(elapsed)} / {formatDuration(duration)}
       </Text>
     </Pressable>
@@ -87,18 +100,18 @@ function FileAttachment({ attachment, mine, theme }: AttachmentProps) {
     <Pressable
       disabled={!canOpen}
       onPress={() => canOpen && Sharing.shareAsync(attachment._decryptedUri!).catch(() => {})}
-      style={[styles.attachmentRow, { backgroundColor: mine ? 'rgba(10,13,18,0.12)' : theme.glass, opacity: canOpen ? 1 : 0.7 }]}
+      style={[styles.attachmentRow, { backgroundColor: theme.glass, opacity: canOpen ? 1 : 0.7 }]}
     >
       <Text style={{ fontSize: 18 }}>📎</Text>
       <View style={{ flex: 1, minWidth: 0 }}>
-        <Text numberOfLines={1} style={{ fontSize: 12.5, color: mine ? '#0a0d12' : theme.textHi }}>
+        <Text numberOfLines={1} style={{ fontSize: 12.5, color: theme.textHi }}>
           {attachment.name || 'Attachment'}
         </Text>
-        <Text style={{ fontSize: 10.5, color: mine ? 'rgba(10,13,18,0.6)' : theme.textLow }}>
+        <Text style={{ fontSize: 10.5, color: theme.textLow }}>
           {attachment._decryptedUri === null ? "Couldn't decrypt" : attachment._decrypting ? 'Decrypting…' : formatBytes(attachment.size)}
         </Text>
       </View>
-      {attachment._decrypting && <ActivityIndicator color={mine ? '#0a0d12' : theme.ice} size="small" />}
+      {attachment._decrypting && <ActivityIndicator color={theme.ice} size="small" />}
     </Pressable>
   );
 }

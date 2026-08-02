@@ -8,6 +8,7 @@ import { resolveNames, getCachedName } from '../../src/state/names';
 import { resolvePreview, getCachedPreview } from '../../src/state/previews';
 import { AuthBackdrop } from '../../src/components/AuthBackdrop';
 import WorkspaceSwitcher from '../../src/components/WorkspaceSwitcher';
+import MembersModal from '../../src/components/MembersModal';
 import type { ChatSummary } from '../../src/types';
 
 // Mirrors index.html's chatDisplayName() (index.html:4030-4034): a DM's
@@ -36,6 +37,7 @@ export default function ChatsScreen() {
   const [namesVersion, setNamesVersion] = useState(0);
   // Same pattern for decrypted preview text (src/state/previews.ts).
   const [previewsVersion, setPreviewsVersion] = useState(0);
+  const [membersOpen, setMembersOpen] = useState(false);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -141,10 +143,24 @@ export default function ChatsScreen() {
 
   return (
     <AuthBackdrop>
+      <View style={styles.header}>
+        <Text style={[styles.headerTitle, { color: theme.textHi }]}>Chats</Text>
+        {/* Members/roster browsing is workspace-only — a personal account
+            has no browsable directory, same as web (see MembersModal's own
+            header comment) — so this only appears once there's an active
+            workspace to browse. */}
+        {activeOrgId && (
+          <Pressable onPress={() => setMembersOpen(true)} hitSlop={10} style={[styles.headerBtn, { backgroundColor: theme.glass }]}>
+            <Text style={{ fontSize: 16 }}>👥</Text>
+          </Pressable>
+        )}
+      </View>
+
       {/* Only shows the switcher once there's actually somewhere to switch
           to — a user in zero workspaces sees the plain chat list, same as
           web hiding the workspace bar for a personal-only account. */}
       {orgs.length > 0 && <WorkspaceSwitcher />}
+      <MembersModal visible={membersOpen} onClose={() => setMembersOpen(false)} />
       <FlatList
         data={sorted}
         keyExtractor={(item) => item.id}
@@ -156,9 +172,9 @@ export default function ChatsScreen() {
         ListEmptyComponent={
           <View style={styles.empty}>
             <Text style={{ color: theme.textMid, textAlign: 'center' }}>
-              {activeOrgName
-                ? `No chats in ${activeOrgName} yet. Start one from the web app for now — starting chats natively is coming in a later phase.`
-                : 'No chats yet. Start one from the web app for now — starting chats natively is coming in a later phase.'}
+              {activeOrgId
+                ? `No chats in ${activeOrgName} yet. Tap 👥 above to message someone from the workspace.`
+                : "No chats yet. Personal DMs are still started from the web app for now — there's no contacts directory to start one from on mobile without an existing pairing."}
             </Text>
           </View>
         }
@@ -171,6 +187,9 @@ export default function ChatsScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingTop: 10 },
+  headerTitle: { fontSize: 22, fontWeight: '800' },
+  headerBtn: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
   row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1 },
   avatar: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
   avatarText: { color: '#0a0d12', fontWeight: '700', fontSize: 14 },

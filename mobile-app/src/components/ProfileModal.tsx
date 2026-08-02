@@ -1,33 +1,122 @@
 // Profile tab's modal — ports index.html's "Your profile" overlay
 // (index.html ~9500s "settingsProfileOverlay"/openProfileModal) enough to
 // give the nav's new Profile tab somewhere real to go. Deliberately lighter
-// than web's version: no role field (that's an HR/roster concept with no
-// mobile editor yet) and no inline device-approval form — device trust
-// already has a full, working implementation in app/(tabs)/settings.tsx
-// (the "Approve a new device" section), so this links there instead of
-// forking a second copy of that flow.
+// than web's version: no role/department field (that's an HR/roster
+// concept, out of scope here) and no inline device-approval form — device
+// trust already has a full, working implementation in
+// app/(tabs)/settings.tsx (the "Approve a new device" section), so this
+// links there instead of forking a second copy of that flow.
+//
+// Editing (name + photo) mirrors index.html's profileSaveBtn flow exactly:
+// pick/compress an image client-side, upload it PLAIN (not E2EE — see
+// utils/profilePhotoUpload.ts's header comment for why), then POST
+// /api/profile with the resulting URL and the new display name together.
 
-import { View, Text, Pressable, StyleSheet, Modal, Image } from 'react-native';
+import { useState } from 'react';
+import { View, Text, Pressable, StyleSheet, Modal, Image, TextInput, ActivityIndicator, Alert } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { router } from 'expo-router';
+import * as ImagePicker from 'expo-image-picker';
 import { useSessionStore } from '../state/session';
 import { useTheme } from '../hooks/useTheme';
 import { initials, colorFromString } from '../utils/avatar';
+import { uploadProfilePhoto, ProfilePhotoUploadError } from '../utils/profilePhotoUpload';
 
 export default function ProfileModal({ visible, onClose }: { visible: boolean; onClose: () => void }) {
   const theme = useTheme();
   const displayName = useSessionStore((s) => s.displayName);
   const avatarUrl = useSessionStore((s) => s.avatarUrl);
   const userId = useSessionStore((s) => s.userId);
+  const updateProfile = useSessionStore((s) => s.updateProfile);
+
+  const [editing, setEditing] = useState(false);
+  const [nameInput, setNameInput] = useState('');
+  const [pendingPhotoUri, setPendingPhotoUri] = useState<string | null>(null);
+  const [pendingPhotoMime, setPendingPhotoMime] = useState('image/jpeg');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const goToDeviceSecurity = () => {
     onClose();
     router.push('/(tabs)/settings');
   };
 
+  const startEditing = () => {
+    setNameInput(displayName || '');
+    setPendingPhotoUri(null);
+    setError(null);
+    setEditing(true);
+  };
+
+  const cancelEditing = () => {
+    setEditing(false);
+    setPendingPhotoUri(null);
+    setError(null);
+  };
+
+  const pickPhoto = async () => {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      setError('Photo library access is needed to change your profile photo.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      quality: 0.8,
+      allowsEditing: true,
+      aspect: [1, 1],
+    });
+    if (result.canceled || !result.assets?.[0]) return;
+    setPendingPhotoUri(result.assets[0].uri);
+    setPendingPhotoMime(result.assets[0].mimeType || 'image/jpeg');
+    setError(null);
+  };
+
+  const save = async () => {
+    if (!nameInput.trim()) {
+      setError('Enter a display name.');
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      let newAvatarUrl: string | undefined;
+      if (pendingPhotoUri) {
+        newAvatarUrl = await uploadProfilePhoto(pendingPhotoUri, pendingPhotoMime);
+      }
+      const res = await updateProfile(nameInput, newAvatarUrl);
+      if (!res.ok) {
+        setError(res.error);
+        return;
+      }
+      setEditing(false);
+      setPendingPhotoUri(null);
+    } catch (e) {
+      setError(e instanceof ProfilePhotoUploadError ? e.message : "Couldn't save your profile. Try again.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const shownAvatarUrl = pendingPhotoUri || avatarUrl;
+  const shownName = editing ? nameInput || displayName || 'You' : displayName || 'You';
+
   return (
-    <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
-      <Pressable style={styles.backdrop} onPress={onClose}>
+    <Modal
+      visible={visible}
+      animationType="fade"
+      transparent
+      onRequestClose={() => {
+        if (editing) cancelEditing();
+        else onClose();
+      }}
+    >
+      <Pressable
+        style={styles.backdrop}
+        onPress={() => {
+          if (!saving) (editing ? cancelEditing() : onClose());
+        }}
+      >
         <Pressable onPress={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 360 }}>
           <BlurView
             intensity={50}
@@ -36,29 +125,76 @@ export default function ProfileModal({ visible, onClose }: { visible: boolean; o
           >
             <Text style={[styles.title, { color: theme.textHi }]}>Your profile</Text>
 
-            {avatarUrl ? (
-              <Image source={{ uri: avatarUrl }} style={styles.avatarImg} />
+            <Pressable onPress={editing ? pickPhoto : undefined} disabled={!editing}>
+              {shownAvatarUrl ? (
+                <Image source={{ uri: shownAvatarUrl }} style={styles.avatarImg} />
+              ) : (
+                <View style={[styles.avatarFallback, { backgroundColor: colorFromString(userId || '', theme.ice, theme.fire) }]}>
+                  <Text style={styles.avatarFallbackText}>{initials(shownName)}</Text>
+                </View>
+              )}
+              {editing && (
+                <View style={[styles.avatarEditBadge, { backgroundColor: theme.ice }]}>
+                  <Text style={{ fontSize: 12 }}>📷</Text>
+                </View>
+              )}
+            </Pressable>
+
+            {editing ? (
+              <TextInput
+                value={nameInput}
+                onChangeText={setNameInput}
+                placeholder="Your name"
+                placeholderTextColor={theme.textLow}
+                maxLength={40}
+                editable={!saving}
+                style={[styles.nameInput, { color: theme.textHi, borderColor: theme.glassBrdHi, backgroundColor: theme.glass }]}
+              />
             ) : (
-              <View style={[styles.avatarFallback, { backgroundColor: colorFromString(userId || '', theme.ice, theme.fire) }]}>
-                <Text style={styles.avatarFallbackText}>{initials(displayName || '?')}</Text>
-              </View>
+              <Text style={[styles.name, { color: theme.textHi }]}>{shownName}</Text>
             )}
 
-            <Text style={[styles.name, { color: theme.textHi }]}>{displayName || 'You'}</Text>
+            {error && <Text style={{ color: theme.danger, fontSize: 12.5, marginBottom: 10, textAlign: 'center' }}>{error}</Text>}
 
-            <Pressable
-              onPress={goToDeviceSecurity}
-              style={[styles.secBtn, { borderColor: theme.glassBrdHi, backgroundColor: theme.glass }]}
-            >
-              <Text style={{ color: theme.textHi, fontWeight: '600', fontSize: 14 }}>Devices &amp; security</Text>
-              <Text style={{ color: theme.textLow, fontSize: 12, marginTop: 2 }}>
-                Approve a new device, manage Face ID, and more — in Settings
-              </Text>
-            </Pressable>
+            {editing ? (
+              <View style={styles.editActions}>
+                <Pressable onPress={cancelEditing} disabled={saving} style={[styles.editBtn, { backgroundColor: theme.glass, borderColor: theme.glassBrdHi }]}>
+                  <Text style={{ color: theme.textMid, fontWeight: '600' }}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  onPress={save}
+                  disabled={saving}
+                  style={[styles.editBtn, { backgroundColor: theme.ice, opacity: saving ? 0.6 : 1 }]}
+                >
+                  {saving ? <ActivityIndicator color="#0a0d12" size="small" /> : <Text style={{ color: '#0a0d12', fontWeight: '700' }}>Save</Text>}
+                </Pressable>
+              </View>
+            ) : (
+              <Pressable
+                onPress={startEditing}
+                style={[styles.secBtn, { borderColor: theme.glassBrdHi, backgroundColor: theme.glass }]}
+              >
+                <Text style={{ color: theme.textHi, fontWeight: '600', fontSize: 14 }}>Edit name &amp; photo</Text>
+              </Pressable>
+            )}
 
-            <Pressable onPress={onClose} style={styles.closeBtn}>
-              <Text style={{ color: theme.textMid, fontWeight: '600' }}>Close</Text>
-            </Pressable>
+            {!editing && (
+              <Pressable
+                onPress={goToDeviceSecurity}
+                style={[styles.secBtn, { borderColor: theme.glassBrdHi, backgroundColor: theme.glass }]}
+              >
+                <Text style={{ color: theme.textHi, fontWeight: '600', fontSize: 14 }}>Devices &amp; security</Text>
+                <Text style={{ color: theme.textLow, fontSize: 12, marginTop: 2 }}>
+                  Approve a new device, manage Face ID, and more — in Settings
+                </Text>
+              </Pressable>
+            )}
+
+            {!editing && (
+              <Pressable onPress={onClose} style={styles.closeBtn}>
+                <Text style={{ color: theme.textMid, fontWeight: '600' }}>Close</Text>
+              </Pressable>
+            )}
           </BlurView>
         </Pressable>
       </Pressable>
@@ -73,7 +209,22 @@ const styles = StyleSheet.create({
   avatarImg: { width: 84, height: 84, borderRadius: 42, marginBottom: 12 },
   avatarFallback: { width: 84, height: 84, borderRadius: 42, alignItems: 'center', justifyContent: 'center', marginBottom: 12 },
   avatarFallbackText: { color: '#0a0d12', fontWeight: '700', fontSize: 26 },
+  avatarEditBadge: {
+    position: 'absolute',
+    bottom: 10,
+    right: -2,
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#0a0d12',
+  },
   name: { fontSize: 18, fontWeight: '700', marginBottom: 18 },
+  nameInput: { width: '100%', borderWidth: 1, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, fontSize: 15, textAlign: 'center', marginBottom: 14 },
   secBtn: { width: '100%', borderWidth: 1, borderRadius: 16, padding: 14, marginBottom: 10 },
+  editActions: { flexDirection: 'row', gap: 10, width: '100%', marginBottom: 10 },
+  editBtn: { flex: 1, borderWidth: 1, borderRadius: 16, paddingVertical: 12, alignItems: 'center', justifyContent: 'center' },
   closeBtn: { paddingVertical: 10, paddingHorizontal: 20 },
 });

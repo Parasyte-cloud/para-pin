@@ -1,13 +1,16 @@
-// FaceTime-style call UI: full-bleed remote video (or a soft gradient
-// backdrop for audio-only/pre-connect), a draggable local PiP self-view
-// that snaps to whichever corner it's released nearest to, and a
-// translucent control bar. Mute/camera controls are available as soon as
-// there's a live call (ringing-out included, matching FaceTime letting
-// you pre-mute before the other side even picks up) rather than only
-// once connected — one of the audio/video consistency fixes, see
+// iOS-native call UI: full-bleed remote video (or a soft gradient backdrop
+// for audio-only/pre-connect), a draggable local PiP self-view that snaps
+// to whichever corner it's released nearest to, and — once a call is
+// live — the real iOS in-call control grid: six circular liquid-glass
+// buttons in two rows of three (Speaker / Camera / Mute, then Flip camera /
+// End / More), matching the reference layout instead of the single
+// horizontal row this used to be. Mute/camera controls are available as
+// soon as there's a live call (ringing-out included, matching FaceTime
+// letting you pre-mute before the other side even picks up) rather than
+// only once connected — one of the audio/video consistency fixes, see
 // mobile-app/README.md's call-reliability section for the rest.
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { View, Text, Pressable, StyleSheet, Modal, Alert, Animated, PanResponder, Dimensions } from 'react-native';
 import { RTCView } from 'react-native-webrtc';
 import { BlurView } from 'expo-blur';
@@ -76,6 +79,7 @@ export default function CallOverlay() {
   const hasVideo = useCallStore((s) => s.hasVideo);
   const muted = useCallStore((s) => s.muted);
   const cameraOff = useCallStore((s) => s.cameraOff);
+  const speakerOn = useCallStore((s) => s.speakerOn);
   const awaitingConnection = useCallStore((s) => s.awaitingConnection);
   const elapsedSec = useCallStore((s) => s.elapsedSec);
   const localStream = useCallStore((s) => s.localStream);
@@ -86,7 +90,10 @@ export default function CallOverlay() {
   const endCall = useCallStore((s) => s.endCall);
   const toggleMute = useCallStore((s) => s.toggleMute);
   const toggleCamera = useCallStore((s) => s.toggleCamera);
+  const toggleSpeaker = useCallStore((s) => s.toggleSpeaker);
+  const switchCamera = useCallStore((s) => s.switchCamera);
   const dismissConnectError = useCallStore((s) => s.dismissConnectError);
+  const [moreOpen, setMoreOpen] = useState(false);
 
   useEffect(() => {
     if (connectError) {
@@ -173,38 +180,91 @@ export default function CallOverlay() {
               </View>
             </View>
           ) : (
-            <BlurView intensity={55} tint="dark" style={[styles.controlBar, { borderColor: 'rgba(255,255,255,0.16)' }]}>
-              <View style={styles.row}>
+            // 2x3 iOS in-call grid. Every cell is the SAME circular glass
+            // treatment (see .gridBtn) regardless of what it does — the
+            // active/toggled states (mute, speaker, camera) invert to a
+            // solid white fill same as the real iOS control grid, End
+            // stays red/prominent, and anything not actually wired to a
+            // real action (More, and Flip camera when there's no video
+            // track to flip) renders visibly dimmed rather than silently
+            // doing nothing, so it doesn't read as broken.
+            <View style={styles.grid}>
+              <View style={styles.gridRow}>
+                <View style={styles.controlCol}>
+                  <Pressable
+                    onPress={toggleSpeaker}
+                    disabled={!controlsActive}
+                    style={[styles.gridBtn, { backgroundColor: speakerOn ? '#fff' : 'rgba(255,255,255,0.16)', opacity: controlsActive ? 1 : 0.4 }]}
+                  >
+                    <Text style={{ fontSize: 21 }}>🔊</Text>
+                  </Pressable>
+                  <Text style={styles.controlLabel}>Speaker</Text>
+                </View>
+                <View style={styles.controlCol}>
+                  <Pressable
+                    onPress={toggleCamera}
+                    disabled={!controlsActive || !hasVideo}
+                    style={[
+                      styles.gridBtn,
+                      { backgroundColor: hasVideo && !cameraOff ? '#fff' : 'rgba(255,255,255,0.16)', opacity: controlsActive && hasVideo ? 1 : 0.4 },
+                    ]}
+                  >
+                    <Text style={{ fontSize: 21 }}>🎥</Text>
+                  </Pressable>
+                  <Text style={styles.controlLabel}>Camera</Text>
+                </View>
                 <View style={styles.controlCol}>
                   <Pressable
                     onPress={toggleMute}
                     disabled={!controlsActive}
-                    style={[styles.smallBtn, { backgroundColor: muted ? '#fff' : 'rgba(255,255,255,0.16)', opacity: controlsActive ? 1 : 0.4 }]}
+                    style={[styles.gridBtn, { backgroundColor: muted ? '#fff' : 'rgba(255,255,255,0.16)', opacity: controlsActive ? 1 : 0.4 }]}
                   >
-                    <Text style={{ fontSize: 20 }}>{muted ? '🔇' : '🎤'}</Text>
+                    <Text style={{ fontSize: 21 }}>{muted ? '🔇' : '🎤'}</Text>
                   </Pressable>
                   <Text style={styles.controlLabel}>{muted ? 'Unmute' : 'Mute'}</Text>
                 </View>
-                {hasVideo && (
-                  <View style={styles.controlCol}>
-                    <Pressable
-                      onPress={toggleCamera}
-                      disabled={!controlsActive}
-                      style={[styles.smallBtn, { backgroundColor: cameraOff ? '#fff' : 'rgba(255,255,255,0.16)', opacity: controlsActive ? 1 : 0.4 }]}
-                    >
-                      <Text style={{ fontSize: 20 }}>{cameraOff ? '📷' : '🎥'}</Text>
-                    </Pressable>
-                    <Text style={styles.controlLabel}>{cameraOff ? 'Start video' : 'Stop video'}</Text>
-                  </View>
-                )}
+              </View>
+              <View style={styles.gridRow}>
                 <View style={styles.controlCol}>
-                  <Pressable onPress={() => endCall()} style={[styles.roundBtn, { backgroundColor: '#ff453a' }]}>
-                    <Text style={styles.roundBtnLabel}>✕</Text>
+                  <Pressable
+                    onPress={switchCamera}
+                    disabled={!controlsActive || !hasVideo || cameraOff}
+                    style={[styles.gridBtn, { backgroundColor: 'rgba(255,255,255,0.16)', opacity: controlsActive && hasVideo && !cameraOff ? 1 : 0.35 }]}
+                  >
+                    <Text style={{ fontSize: 21 }}>🔄</Text>
+                  </Pressable>
+                  <Text style={styles.controlLabel}>Flip</Text>
+                </View>
+                <View style={styles.controlCol}>
+                  <Pressable onPress={() => endCall()} style={[styles.gridBtn, styles.endBtn, { backgroundColor: '#ff453a' }]}>
+                    <Text style={styles.endBtnLabel}>✕</Text>
                   </Pressable>
                   <Text style={styles.controlLabel}>End</Text>
                 </View>
+                <View style={styles.controlCol}>
+                  <Pressable
+                    onPress={() => setMoreOpen(true)}
+                    disabled={!controlsActive}
+                    style={[styles.gridBtn, { backgroundColor: 'rgba(255,255,255,0.16)', opacity: controlsActive ? 1 : 0.4 }]}
+                  >
+                    <Text style={{ fontSize: 21 }}>⋯</Text>
+                  </Pressable>
+                  <Text style={styles.controlLabel}>More</Text>
+                </View>
               </View>
-            </BlurView>
+            </View>
+          )}
+
+          {moreOpen && (
+            <Pressable style={styles.moreBackdrop} onPress={() => setMoreOpen(false)}>
+              <BlurView intensity={60} tint="dark" style={styles.moreSheet}>
+                <Text style={styles.moreTitle}>{name}</Text>
+                <Text style={styles.moreSub}>
+                  {hasVideo ? 'Video call' : 'Audio call'} · {formatElapsed(elapsedSec)}
+                </Text>
+                <Text style={styles.moreHint}>To add more people, end this call and start a group meeting from a group chat instead.</Text>
+              </BlurView>
+            </Pressable>
           )}
         </View>
       </View>
@@ -230,12 +290,45 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     zIndex: 5,
   },
-  controlsWrap: { alignItems: 'center' },
-  controlBar: { borderRadius: 32, borderWidth: 1, paddingVertical: 14, paddingHorizontal: 22, overflow: 'hidden' },
+  controlsWrap: { alignItems: 'center', width: '100%' },
   row: { flexDirection: 'row', gap: 28, justifyContent: 'center', alignItems: 'flex-start' },
   controlCol: { alignItems: 'center', gap: 6, width: 64 },
   controlLabel: { fontSize: 11, color: 'rgba(255,255,255,0.85)' },
   roundBtn: { width: 62, height: 62, borderRadius: 31, alignItems: 'center', justifyContent: 'center' },
   roundBtnLabel: { fontSize: 24, color: '#fff', fontWeight: '700' },
-  smallBtn: { width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center' },
+  // 2x3 in-call control grid — three equal-width columns per row, same
+  // circular glass button in every cell (see the comment at the JSX call
+  // site for why every cell shares one style regardless of what it does).
+  grid: { gap: 20, alignItems: 'center' },
+  gridRow: { flexDirection: 'row', gap: 26, justifyContent: 'center' },
+  gridBtn: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.22)',
+  },
+  endBtn: { borderColor: 'transparent' },
+  endBtnLabel: { fontSize: 24, color: '#fff', fontWeight: '700' },
+  moreBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    paddingBottom: 220,
+  },
+  moreSheet: {
+    width: '84%',
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+    padding: 18,
+    alignItems: 'center',
+    overflow: 'hidden',
+  },
+  moreTitle: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  moreSub: { color: 'rgba(255,255,255,0.7)', fontSize: 12.5, marginTop: 2 },
+  moreHint: { color: 'rgba(255,255,255,0.55)', fontSize: 11.5, marginTop: 10, textAlign: 'center' },
 });

@@ -168,16 +168,14 @@ end.
   (`app/chat/[id].tsx`), and a real Calls tab (`app/(tabs)/calls.tsx`)
   showing call history from `GET /api/calls/log` with tap-to-call-back.
 
-**Known, deliberate scope cuts in Phase 3:**
-- **No ringtone/vibration audio** — the incoming-call UI is silent beyond
-  the on-screen overlay; no sound plays yet.
-- **Group/meeting calls aren't built.** Only the 1:1 direct WebRTC path
-  (mirrors index.html's `startOutgoingCall`/`handleCallSignal` for DMs).
-  The separate SFU-based meeting path on Cloudflare Calls (`MeetingRoom`
-  DO) is unbuilt — group calls still require the web app.
-- Call log entries are always written/read as personal (no `orgId`) —
-  mobile has no workspace switcher yet, so this can't leak into or out of
-  a workspace's call history; it's just not workspace-scoped at all yet.
+**Known, deliberate scope cuts in Phase 3 — both since closed, see the
+"Ringtone/ringback audio" and "Group/meeting calling" entries further down:**
+- ~~No ringtone/vibration audio~~ — fixed, see below.
+- ~~Group/meeting calls aren't built~~ — fixed, see below.
+- Call log entries' `orgId` scoping was fixed in a later round too (see
+  `src/state/callSignal.ts`'s `CallLogEntry.orgId` handling) — mobile now
+  has a real workspace switcher and calls are scoped the same way chats
+  are.
 
 **Attachments — done.** Files/images/voice notes are E2EE'd server-side
 (separate ciphertext for the file bytes AND the filename); this now
@@ -189,8 +187,8 @@ in-memory blob URL (`src/state/messages.ts`'s `decryptOneAttachment`,
 (`app/chat/[id].tsx`'s `ImageAttachment`), voice notes get a play/pause
 row via `expo-audio` (`AudioAttachment`), everything else is a tappable
 file row that opens the OS share sheet via `expo-sharing` (`FileAttachment`).
-Sending attachments FROM mobile still isn't built — this covers receiving
-ones sent from web.
+Sending attachments FROM mobile is now built too — see the "Sending
+photo/voice attachments from mobile" entry further down.
 
 **Legacy pre-multi-device DM fallback — implemented, with an inherent
 limit worth understanding.** `src/crypto/e2ee.ts` now has
@@ -294,21 +292,46 @@ too, same `PATCH`/`DELETE`/`POST .../react` endpoints web already used.
   black), a draggable corner-snapping local self-view (`PanResponder` +
   `Animated`, FaceTime's PiP behavior), and a translucent bottom control
   bar with per-control labels.
-- **Deliberately not built: sending new photo/voice attachments from
-  mobile.** Receiving/decrypting them works (see Attachments above).
-  Authoring one needs a photo/voice picker (new native permission,
-  `expo-image-picker` isn't installed) plus a raw-byte upload to `POST
-  /api/upload` (confirmed exact contract in `index.html`, but never
-  exercised from React Native in this sandbox — no way to verify an actual
-  binary upload without a real device). Rather than ship an unverified "+"
-  button, the composer just doesn't have one yet.
+- **Sending photo/voice attachments from mobile — done.** `expo-image-picker`
+  (camera + library) and `expo-audio` (voice-note recording) feed a
+  pending-attachment preview in the composer; `src/utils/attachmentUpload.ts`
+  encrypts the bytes the same way as everything else (`crypto/e2ee.ts`'s
+  `encryptBytes`) and uploads via `expo-file-system`'s `File.upload()` as
+  binary content, since RN's `fetch` has no reliable raw-binary-body story
+  across iOS/Android — that's the one real transport difference from web's
+  direct Blob body.
+- **In-chat message search — done.** Client-side only (has to be — messages
+  are E2EE'd, the server never sees plaintext to search), matching against
+  already-decrypted text with a next/prev-match search bar in the chat
+  header, mirroring index.html's `msgSearch*` implementation.
+- **Workspace roster/contacts browsing — done.** A "👥" button on the Chats
+  tab (workspace-only, same as web) opens `GET /api/org/members` with
+  Message/Call quick actions per row — Message reuses `POST
+  /api/org/member-dm`, the same endpoint web uses, so this also closes the
+  "start a chat natively" gap the empty chat-list state used to punt to the
+  web app for.
+- **Own-profile editing (name/photo) — done.** `ProfileModal.tsx` now has an
+  edit mode; the photo uploads PLAIN (not E2EE — an avatar has to be
+  visible to everyone who can see this user's name at all, so encrypting it
+  would just make it undecryptable), same `POST /api/profile` contract as
+  web.
+- **Group/meeting calling — done.** `src/state/meeting.ts` ports
+  index.html's Cloudflare Realtime SFU client (session/track negotiation
+  queue, `MeetingRoom` DO presence socket) to `react-native-webrtc`, with
+  `MeetingOverlay.tsx` for the tile-grid UI. Entry point is a group chat's
+  own membership (auto-invites everyone in the chat) — there's still no
+  standalone contacts picker to choose people from outside that.
+- **Ringtone/ringback audio — done.** `src/utils/ringtoneSynth.ts`
+  synthesizes real PCM/WAV bytes matching index.html's two Web Audio
+  oscillator tones exactly (there's no Web Audio API on-device to run the
+  same live-oscillator trick), cached to disk once and loop-played via
+  `expo-audio` — layered on top of the vibration pattern that used to be
+  the whole story.
 
 **Phase 5 (HR, admin console, billing, SSO/SAML settings, workspace custom
 domains) is intentionally excluded from mobile, not just "not yet built."**
 Mobile is the free product; Workspace/billing/admin surfaces are the paid,
-web-only product — see the top of this file. Message search, contacts/
-roster browsing, and profile editing also aren't built, unrelated to that
-split, just not reached yet.
+web-only product — see the top of this file.
 
 ## Known rough edges
 
@@ -745,6 +768,11 @@ vibrates in a repeating buzz-pause pattern (`Vibration.vibrate([0, 700,
 accepted, declined, or ends. Real audio ringing (and any background
 ringing at all) remains unbuilt.
 
+*Update, later round:* real audio ringing IS now built — see the
+"Ringtone/ringback audio" entry near the top of this doc. Background/
+killed-app ringing (CallKit/VoIP-push) is still the one genuinely unbuilt
+piece here, for the reason stated above.
+
 **Push notifications weren't arriving**, with no visible reason —
 `ensurePushRegistered()` (`src/state/push.ts`) already ran automatically
 on every sign-in/unlock (`app/_layout.tsx`), and the request-shape/
@@ -920,6 +948,9 @@ Workspace chat and 1:1 workspace calls (audio + video) now have full
 parity with Personal; group/meeting calls inside a workspace are still
 web-only.
 
+*Update, later round:* group/meeting calling IS now built — see the
+"Group/meeting calling" entry near the top of this doc.
+
 Also added (used by the call-screen redesign in progress): `toggleSpeaker`
 and `switchCamera` on the call store. `switchCamera` is real (wired to
 react-native-webrtc's `_switchCamera()`). `toggleSpeaker` is UI state only
@@ -961,6 +992,32 @@ Verified: `tsc --noEmit` clean.
   unverified new native dependency. Flagging this explicitly: if you want
   the literal gradient, run `npx expo install expo-linear-gradient`
   yourself and it's a small, contained follow-up change.
+
+  *Update, later round:* `npm install <pkg>@<version>` (plain npm, not
+  `expo install`'s proxy path) turned out to work fine in this sandbox —
+  proven by installing `expo-image-picker`/`expo-asset` for other features
+  earlier the same round. `expo-linear-gradient@~57.0.1` is now installed
+  and `MessageBubble.tsx` renders own-message bubbles with the actual
+  gradient (`LinearGradient` from `expo-linear-gradient`, `start:{0,0}`→
+  `end:{1,1}` approximating CSS's 135deg) plus the matching border color
+  (`rgba(0,212,255,0.25)`) and gradient-filled tail. Closing this also
+  surfaced two related, previously-unnoticed contrast bugs fixed at the
+  same time: own-message text/edited-label/reply-quote colors were
+  hardcoded dark (`#0a0d12`, `rgba(10,13,18,…)`) — leftover from when the
+  bubble was solid bright `theme.ice` — and would've been unreadable
+  against the new translucent gradient over a dark background, so they
+  now use `theme.textHi`/`theme.ice`/`theme.textLow` like every other
+  bubble; and the own-reaction pill was a solid `theme.ice` chip with dark
+  text where web actually uses a translucent ice tint
+  (`rgba(0,212,255,0.12)` bg, `rgba(0,212,255,0.5)` border, `text-hi`
+  text, `.reaction-pill.mine` in index.html) — now matches. Same root
+  cause, third place: `MessageAttachments.tsx`'s image placeholder/voice-
+  note/file-card chips all had a `mine ? dark : light` branch too — dropped
+  it, since web's own equivalents (`.file-card`, `.att-decrypting`,
+  `.voice-note-play`) never special-case own-message at all (`color:
+  inherit`/`text-mid` either way), so these chips now always use
+  `theme.glass`/`theme.textHi`/`theme.textLow`/`theme.ice` regardless of
+  `mine`.
 - **Bubble width/tail clipping fix**: `MessageBubble.tsx`'s `bubbleCol`
   was `maxWidth:'78%'` against only 10px of list padding
   (`chat/[id].tsx`'s `listContent`) — a right-aligned "mine" bubble had

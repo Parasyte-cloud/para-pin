@@ -21,9 +21,20 @@ import {
   StyleSheet,
   KeyboardAvoidingView,
   Platform,
+  Image,
+  Alert,
 } from 'react-native';
 import { useLocalSearchParams, Stack, router } from 'expo-router';
 import * as Clipboard from 'expo-clipboard';
+import * as ImagePicker from 'expo-image-picker';
+import { File } from 'expo-file-system';
+import {
+  useAudioRecorder,
+  useAudioRecorderState,
+  RecordingPresets,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+} from 'expo-audio';
 import { BlurView } from 'expo-blur';
 import { useTheme } from '../../src/hooks/useTheme';
 import { useSessionStore } from '../../src/state/session';
@@ -34,11 +45,13 @@ import { encryptString } from '../../src/crypto/e2ee';
 import { resolveNames } from '../../src/state/names';
 import { apiFetch } from '../../src/api/client';
 import { useCallStore } from '../../src/state/call';
+import { useMeetingStore } from '../../src/state/meeting';
 import { colorFromString } from '../../src/utils/avatar';
 import MessageBubble, { formatTime } from '../../src/components/MessageBubble';
 import MessageActionSheet from '../../src/components/MessageActionSheet';
 import { AuthBackdrop } from '../../src/components/AuthBackdrop';
-import type { ChatMessage } from '../../src/types';
+import { encryptAndUploadAttachment, AttachmentUploadError, type PendingAttachment } from '../../src/utils/attachmentUpload';
+import type { ChatMessage, MessageAttachment } from '../../src/types';
 
 const DECRYPT_RETRY_MS = 5000;
 const GROUP_GAP_MS = 60 * 1000; // same-sender messages within this window render as one visual group
@@ -104,15 +117,50 @@ export default function ChatDetailScreen() {
   const [replyTarget, setReplyTarget] = useState<{ id: string; fromName: string; text: string } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [otherReadTs, setOtherReadTs] = useState(0);
+  const [pendingAttachment, setPendingAttachment] = useState<PendingAttachment | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchCurrentIndex, setSearchCurrentIndex] = useState(-1);
   const typingClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const listRef = useRef<FlatList<ChatMessage>>(null);
+  const recordingDurationMsRef = useRef(0);
+
+  // Voice-note recorder — RecordingPresets.HIGH_QUALITY produces a .m4a
+  // file on both iOS and Android (see RecordingPresets' own doc comment),
+  // matching MIME_EXTENSIONS' existing 'audio/m4a' entry in
+  // state/messages.ts, so a voice note sent from mobile decrypts/plays
+  // back correctly on mobile without adding a new extension mapping.
+  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const recorderState = useAudioRecorderState(audioRecorder, 100);
+  useEffect(() => {
+    recordingDurationMsRef.current = recorderState.durationMillis || 0;
+  }, [recorderState.durationMillis]);
+
+  // If the screen unmounts mid-recording (back button, deep link, chat
+  // switch) the native recording session otherwise keeps running with
+  // nothing left to ever call .stop() on it — this is the same class of
+  // bug as a call/meeting overlay leaking a live PeerConnection, just for
+  // the mic instead.
+  useEffect(() => {
+    return () => {
+      if (audioRecorder.isRecording) {
+        audioRecorder.stop().catch(() => {});
+        setAudioModeAsync({ allowsRecording: false }).catch(() => {});
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const chatTitle = chat?.name || (chat?.type === 'dm' ? 'Direct message' : 'Group');
   const dmPeerId = chat?.type === 'dm' ? chat.memberIds?.find((mid) => mid !== myUserId) || null : null;
   const dmPeerName = (dmPeerId && names[dmPeerId]) || chatTitle;
   const startOutgoingCall = useCallStore((s) => s.startOutgoingCall);
   const inCall = useCallStore((s) => s.callState !== 'idle');
+  const startMeeting = useMeetingStore((s) => s.startMeeting);
+  const meetingStatus = useMeetingStore((s) => s.status);
+  const inMeeting = meetingStatus !== 'idle';
 
   const callPeer = useCallback(
     (video: boolean) => {
@@ -124,6 +172,119 @@ export default function ChatDetailScreen() {
       startOutgoingCall(dmPeerId, dmPeerName, null, video, chat?.orgId ?? null);
     },
     [dmPeerId, dmPeerName, inCall, startOutgoingCall, chat?.orgId]
+  );
+
+  // Group calling's entry point: auto-invite every other member of THIS
+  // chat, same as web's group-chat "Start meeting" button
+  // (index.html:8388ish's joinMeetingRoom(newMeetingId, chat.name,
+  // invitable, {orgId})) — mobile has no standalone contacts/roster picker
+  // to choose people from yet, so the group chat's own memberIds is the
+  // one entry point that doesn't need one.
+  const startGroupMeeting = useCallback(() => {
+    if (!chat || chat.type !== 'group' || inMeeting || inCall) return;
+    const invite = (chat.memberIds || []).filter((mid) => mid !== myUserId);
+    startMeeting(chat.name || 'Group call', chat.orgId ?? null, invite);
+  }, [chat, inMeeting, inCall, myUserId, startMeeting]);
+
+  // Photo attach — mirrors index.html's image-attachment picker in spirit
+  // (pick, preview, upload-on-send), not its exact UI, since there's no
+  // web-style drag/drop equivalent on mobile. fileSize isn't always
+  // populated by the picker (notably: not from the camera on some
+  // Android OEMs), so it falls back to reading the file's real size off
+  // disk rather than sending a wrong/zero size to the recipient.
+  const pickImage = useCallback(
+    async (source: 'camera' | 'library') => {
+      if (pendingAttachment || isRecording) return;
+      const perm =
+        source === 'camera'
+          ? await ImagePicker.requestCameraPermissionsAsync()
+          : await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        setSendError(`${source === 'camera' ? 'Camera' : 'Photo library'} access is needed to attach a photo.`);
+        return;
+      }
+      const result = await (source === 'camera'
+        ? ImagePicker.launchCameraAsync({ mediaTypes: ['images'], quality: 0.8 })
+        : ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.8 }));
+      if (result.canceled || !result.assets?.[0]) return;
+      const asset = result.assets[0];
+      let size = asset.fileSize || 0;
+      if (!size) {
+        try {
+          size = new File(asset.uri).size || 0;
+        } catch {
+          // best-effort only — an unknown size still sends fine, it just
+          // won't show a file-size hint anywhere in the UI
+        }
+      }
+      setSendError(null);
+      setPendingAttachment({
+        kind: 'image',
+        uri: asset.uri,
+        mime: asset.mimeType || 'image/jpeg',
+        name: asset.fileName || 'photo.jpg',
+        size,
+        width: asset.width || undefined,
+        height: asset.height || undefined,
+      });
+    },
+    [pendingAttachment, isRecording]
+  );
+
+  const openAttachMenu = useCallback(() => {
+    if (pendingAttachment || isRecording || sending) return;
+    Alert.alert('Add Photo', undefined, [
+      { text: 'Take Photo', onPress: () => pickImage('camera') },
+      { text: 'Choose from Library', onPress: () => pickImage('library') },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }, [pendingAttachment, isRecording, sending, pickImage]);
+
+  // Voice notes — tap to start, tap again to stop (not iMessage's
+  // press-and-hold-to-record, which needs its own gesture-conflict
+  // handling against the surrounding ScrollView/FlatList; a tap toggle is
+  // the same "one button, in or out of a recording" affordance without
+  // that risk). Stopping produces a pendingAttachment preview the same as
+  // a picked photo — reviewable and cancelable before it actually sends,
+  // not fired off the instant you lift your finger.
+  const startVoiceRecording = useCallback(async () => {
+    if (pendingAttachment || isRecording || sending) return;
+    const perm = await requestRecordingPermissionsAsync();
+    if (!perm.granted) {
+      setSendError('Microphone access is needed to record a voice note.');
+      return;
+    }
+    setSendError(null);
+    await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+    await audioRecorder.prepareToRecordAsync();
+    audioRecorder.record();
+    setIsRecording(true);
+  }, [pendingAttachment, isRecording, sending, audioRecorder]);
+
+  const stopVoiceRecording = useCallback(
+    async (discard: boolean) => {
+      if (!isRecording) return;
+      await audioRecorder.stop();
+      setIsRecording(false);
+      setAudioModeAsync({ allowsRecording: false }).catch(() => {});
+      if (discard || !audioRecorder.uri) return;
+      const durationSec = Math.max(1, Math.round(recordingDurationMsRef.current / 1000));
+      let size = 0;
+      try {
+        size = new File(audioRecorder.uri).size || 0;
+      } catch {
+        // best-effort only, same as pickImage's size fallback
+      }
+      setPendingAttachment({
+        kind: 'voice',
+        uri: audioRecorder.uri,
+        mime: 'audio/m4a',
+        name: 'voice-message.m4a',
+        size,
+        duration: durationSec,
+      });
+    },
+    [isRecording, audioRecorder]
   );
 
   const { sendTyping } = useChatSocket(chat, {
@@ -197,22 +358,24 @@ export default function ChatDetailScreen() {
 
   const onSend = useCallback(async () => {
     const text = input.trim();
-    if (!text || !chat || sending) return;
+    const attachment = pendingAttachment;
+    if ((!text && !attachment) || !chat || sending) return;
     setSending(true);
     setSendError(null);
     // Everything below can throw synchronously (encryptString's underlying
     // @noble/ciphers call validates key/iv length strictly and throws if
     // ensureChatKey ever hands back a malformed key — a real possibility
     // right after a device-approval/rewrap) or reject (the two apiFetch
-    // calls). onSend is invoked from onPress as a fire-and-forget handler,
-    // so an uncaught throw here doesn't just fail this send — it becomes
-    // an unhandled rejection that React Native's release build can
-    // escalate to a fatal, whole-app-crashing error (this is what the
-    // 2026-08-02 TestFlight crash log traced back to: RN's own
-    // ExceptionsManager reportFatal: path aborting the process). Wrapping
-    // the whole body turns any of that into a normal, visible send error
-    // instead of a hard crash. app/_layout.tsx's ErrorBoundary is the
-    // second layer of defense for anything that still gets past this.
+    // calls, plus now the attachment upload). onSend is invoked from
+    // onPress as a fire-and-forget handler, so an uncaught throw here
+    // doesn't just fail this send — it becomes an unhandled rejection
+    // that React Native's release build can escalate to a fatal,
+    // whole-app-crashing error (this is what the 2026-08-02 TestFlight
+    // crash log traced back to: RN's own ExceptionsManager reportFatal:
+    // path aborting the process). Wrapping the whole body turns any of
+    // that into a normal, visible send error instead of a hard crash.
+    // app/_layout.tsx's ErrorBoundary is the second layer of defense for
+    // anything that still gets past this.
     try {
       const key = await ensureChatKey(chat);
       if (!key) {
@@ -226,9 +389,10 @@ export default function ChatDetailScreen() {
         setSendError("Encryption isn't ready for this chat yet. If this doesn't clear on its own, ask whoever's already signed in on web to hit \"Re-sync keys\" for this device in Settings.");
         return;
       }
-      const enc = encryptString(key, text);
 
       if (editingId) {
+        if (!text) return; // editing is text-only, same as web
+        const enc = encryptString(key, text);
         const res = await apiFetch<{ message?: ChatMessage }>(`/chats/${chat.id}/messages/${editingId}`, {
           method: 'PATCH',
           body: JSON.stringify({ ciphertext: enc.ciphertext, iv: enc.iv }),
@@ -247,6 +411,7 @@ export default function ChatDetailScreen() {
       }
 
       setInput('');
+      setPendingAttachment(null);
       const replyPayload = replyTarget ? { id: replyTarget.id, fromName: replyTarget.fromName, text: replyTarget.text } : undefined;
       const tempId = `pending-${Date.now()}`;
       const optimistic: ChatMessage = {
@@ -257,26 +422,62 @@ export default function ChatDetailScreen() {
         replyTo: replyPayload || null,
         _e2eeDone: true,
         _pending: true,
+        attachment: attachment
+          ? {
+              kind: attachment.kind,
+              mime: attachment.mime,
+              size: attachment.size,
+              width: attachment.width,
+              height: attachment.height,
+              duration: attachment.duration,
+              name: attachment.name,
+              fileIv: 'pending', // any truthy value — see MessageAttachment's own comment, just picks the "encrypted attachment" render branch
+              _decryptedUri: attachment.uri, // the original local file, shown immediately while the real upload/encrypt below is still in flight
+            }
+          : null,
       };
       addOptimistic(chat.id, optimistic);
       setReplyTarget(null);
+
+      let attachmentPayload: MessageAttachment | null = null;
+      if (attachment) {
+        try {
+          attachmentPayload = await encryptAndUploadAttachment(key, attachment);
+        } catch (e) {
+          removeOptimistic(chat.id, tempId);
+          setSendError(e instanceof AttachmentUploadError ? e.message : "Couldn't upload the attachment. Try again.");
+          if (text) setInput(text);
+          setPendingAttachment(attachment);
+          return;
+        }
+      }
+
+      const enc = text ? encryptString(key, text) : null;
       const res = await apiFetch<{ message?: ChatMessage }>(`/chats/${chat.id}/messages`, {
         method: 'POST',
         body: JSON.stringify({
-          ciphertext: enc.ciphertext,
-          iv: enc.iv,
+          ciphertext: enc?.ciphertext,
+          iv: enc?.iv,
           alg: chat.type === 'group' ? 'group' : 'dm',
+          attachment: attachmentPayload,
           replyTo: replyPayload,
         }),
       });
       removeOptimistic(chat.id, tempId);
       if (res.ok && res.body.message) {
-        mergeMessages(chat.id, [{ ...res.body.message, text, _e2eeDone: true }]);
+        const merged: ChatMessage = { ...res.body.message, text, _e2eeDone: true };
+        if (attachmentPayload && merged.attachment) {
+          // Same reasoning as the optimistic bubble above — we already
+          // have both the plaintext name and the original local file, no
+          // need to round-trip a decrypt of our own just-sent attachment.
+          merged.attachment = { ...merged.attachment, name: attachment!.name, _decryptedUri: attachment!.uri };
+        }
+        mergeMessages(chat.id, [merged]);
       } else {
         // Previously silently restored the input with zero indication
         // anything went wrong — put the text back (so nothing's lost) but
         // now actually say so.
-        setInput(text);
+        if (text) setInput(text);
         setSendError(
           !res.ok && res.networkError ? "Couldn't reach PArA. Check your connection and try again." : "That message didn't send. Try again."
         );
@@ -285,12 +486,12 @@ export default function ChatDetailScreen() {
       // Belt-and-suspenders for the encrypt-throw case above, plus
       // anything else unforeseen — never let a send attempt escape as an
       // uncaught/unhandled rejection.
-      setInput(text);
+      if (text) setInput(text);
       setSendError(e?.message ? `Send failed: ${e.message}` : "That message didn't send. Try again.");
     } finally {
       setSending(false);
     }
-  }, [input, chat, sending, myUserId, editingId, replyTarget, addOptimistic, removeOptimistic, mergeMessages, applyEdit]);
+  }, [input, pendingAttachment, chat, sending, myUserId, editingId, replyTarget, addOptimistic, removeOptimistic, mergeMessages, applyEdit]);
 
   const onChangeText = useCallback(
     (v: string) => {
@@ -302,6 +503,77 @@ export default function ChatDetailScreen() {
   );
 
   const listData = useMemo(() => [...messages].reverse(), [messages]);
+
+  // ---------------- in-chat message search ----------------
+  // Client-side only, same as index.html's msgSearch* implementation
+  // (index.html:9749-9819) — messages are E2EE'd, the server never sees
+  // plaintext to search server-side, so this can only ever match against
+  // what's already been decrypted onto this device. Matches are computed
+  // in `messages`' own chronological order (oldest-first), not listData's
+  // reversed/inverted order, purely because that's what web's
+  // searchMatchIds does and "most recent match first" (below) reads more
+  // naturally off that ordering.
+  const scrollToMessageId = useCallback(
+    (id: string) => {
+      const idx = listData.findIndex((m) => m.id === id);
+      if (idx === -1 || !listRef.current) return;
+      try {
+        listRef.current.scrollToIndex({ index: idx, viewPosition: 0.5, animated: true });
+      } catch {
+        // onScrollToIndexFailed below handles the retry
+      }
+    },
+    [listData]
+  );
+
+  const searchMatchIds = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return [];
+    // Protected messages are excluded from matching entirely (not just
+    // display) — same reasoning as web's identical exclusion: search
+    // shouldn't be able to confirm a protected message contains a given
+    // term via a highlighted hit before it's ever unlocked.
+    return messages
+      .filter((m) => m.type !== 'system' && !m.deleted && !m.protected && m.text && m.text.toLowerCase().includes(q))
+      .map((m) => m.id);
+  }, [messages, searchQuery]);
+
+  // Re-lands on "most recent match" only when the QUERY changes (typing),
+  // not on every re-render where searchMatchIds' contents shift for other
+  // reasons (e.g. a new message arriving) — that would otherwise yank the
+  // user back to the bottom mid-navigation.
+  useEffect(() => {
+    setSearchCurrentIndex(searchMatchIds.length ? searchMatchIds.length - 1 : -1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery]);
+
+  useEffect(() => {
+    if (searchCurrentIndex < 0) return;
+    const id = searchMatchIds[searchCurrentIndex];
+    if (id) scrollToMessageId(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchCurrentIndex]);
+
+  const toggleSearch = useCallback(() => {
+    setSearchOpen((prev) => {
+      const next = !prev;
+      if (!next) {
+        setSearchQuery('');
+        setSearchCurrentIndex(-1);
+      }
+      return next;
+    });
+  }, []);
+
+  const searchStep = useCallback(
+    (dir: number) => {
+      if (!searchMatchIds.length) return;
+      setSearchCurrentIndex((prev) => (prev + dir + searchMatchIds.length) % searchMatchIds.length);
+    },
+    [searchMatchIds]
+  );
+
+  const currentSearchMatchId = searchCurrentIndex >= 0 ? searchMatchIds[searchCurrentIndex] : null;
 
   const mostRecentOwnId = useMemo(() => {
     const found = listData.find((m) => m.fromUserId === myUserId && !m.deleted && m.type !== 'system');
@@ -402,6 +674,8 @@ export default function ChatDetailScreen() {
             isFirstInGroup={isFirstInGroup}
             isLastInGroup={isLastInGroup}
             readReceiptLabel={receiptLabel}
+            highlightQuery={searchMatchIds.includes(item.id) ? searchQuery.trim() : undefined}
+            isCurrentMatch={item.id === currentSearchMatchId}
             onLongPress={() => setActionSheetFor(item.id)}
             onSwipeReply={() => {
               // Clear any in-progress edit — otherwise editingId stays set
@@ -419,7 +693,7 @@ export default function ChatDetailScreen() {
         </View>
       );
     },
-    [myUserId, listData, chat?.type, names, theme, mostRecentOwnId, otherReadTs]
+    [myUserId, listData, chat?.type, names, theme, mostRecentOwnId, otherReadTs, searchMatchIds, searchQuery, currentSearchMatchId]
   );
 
   if (!chat) {
@@ -448,20 +722,67 @@ export default function ChatDetailScreen() {
           // fallback while resolveNames() hasn't returned yet), this just
           // wasn't using it.
           title: dmPeerId ? dmPeerName : chatTitle,
-          headerRight: dmPeerId
-            ? () => (
-                <View style={styles.headerCallBtns}>
+          headerRight: () => (
+            <View style={styles.headerCallBtns}>
+              <Pressable onPress={toggleSearch} hitSlop={8}>
+                <Text style={{ fontSize: 17, opacity: searchOpen ? 1 : 0.85 }}>🔍</Text>
+              </Pressable>
+              {dmPeerId && (
+                <>
                   <Pressable onPress={() => callPeer(false)} hitSlop={8} disabled={inCall} style={{ opacity: inCall ? 0.4 : 1 }}>
                     <Text style={{ fontSize: 18 }}>📞</Text>
                   </Pressable>
                   <Pressable onPress={() => callPeer(true)} hitSlop={8} disabled={inCall} style={{ opacity: inCall ? 0.4 : 1 }}>
                     <Text style={{ fontSize: 18 }}>🎥</Text>
                   </Pressable>
-                </View>
-              )
-            : undefined,
+                </>
+              )}
+              {!dmPeerId && chat?.type === 'group' && (
+                <Pressable
+                  onPress={startGroupMeeting}
+                  hitSlop={8}
+                  disabled={inMeeting || inCall}
+                  style={{ opacity: inMeeting || inCall ? 0.4 : 1 }}
+                >
+                  <Text style={{ fontSize: 18 }}>🎥</Text>
+                </Pressable>
+              )}
+            </View>
+          ),
         }}
       />
+
+      {searchOpen && (
+        <BlurView
+          intensity={45}
+          tint={theme.scheme === 'dark' ? 'dark' : 'light'}
+          style={[styles.searchBar, { borderColor: theme.glassBrdHi }]}
+        >
+          <Text style={{ fontSize: 14 }}>🔍</Text>
+          <TextInput
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            placeholder="Search in this chat"
+            placeholderTextColor={theme.textLow}
+            autoFocus
+            style={[styles.searchInput, { color: theme.textHi }]}
+            returnKeyType="search"
+            onSubmitEditing={() => searchStep(-1)}
+          />
+          <Text style={{ fontSize: 12, color: theme.textLow, minWidth: 34, textAlign: 'center' }}>
+            {searchMatchIds.length ? `${searchCurrentIndex + 1}/${searchMatchIds.length}` : searchQuery.trim() ? '0/0' : ''}
+          </Text>
+          <Pressable onPress={() => searchStep(-1)} hitSlop={8} disabled={!searchMatchIds.length}>
+            <Text style={{ fontSize: 15, color: searchMatchIds.length ? theme.textHi : theme.textLow, opacity: searchMatchIds.length ? 1 : 0.4 }}>‹</Text>
+          </Pressable>
+          <Pressable onPress={() => searchStep(1)} hitSlop={8} disabled={!searchMatchIds.length}>
+            <Text style={{ fontSize: 15, color: searchMatchIds.length ? theme.textHi : theme.textLow, opacity: searchMatchIds.length ? 1 : 0.4 }}>›</Text>
+          </Pressable>
+          <Pressable onPress={toggleSearch} hitSlop={8}>
+            <Text style={{ fontSize: 15, color: theme.textLow }}>✕</Text>
+          </Pressable>
+        </BlurView>
+      )}
 
       {!keyReady && (
         <View style={[styles.keyBanner, { backgroundColor: theme.glass, borderColor: theme.glassBrd }]}>
@@ -474,8 +795,21 @@ export default function ChatDetailScreen() {
         data={listData}
         keyExtractor={(m) => m.id}
         renderItem={renderItem}
+        extraData={`${searchQuery}:${currentSearchMatchId}`}
         inverted
         contentContainerStyle={styles.listContent}
+        // Bubbles are variable-height, so scrollToIndex (used by
+        // scrollToMessageId above to jump to a search match) can't rely on
+        // getItemLayout math and sometimes misses on the first attempt —
+        // this is FlatList's own documented recovery hook: jump to an
+        // approximate offset, then retry the precise scroll once that
+        // render settles.
+        onScrollToIndexFailed={(info) => {
+          listRef.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: false });
+          setTimeout(() => {
+            listRef.current?.scrollToIndex({ index: info.index, viewPosition: 0.5, animated: true });
+          }, 100);
+        }}
         ListEmptyComponent={
           <View style={styles.empty}>
             <Text style={{ color: theme.textMid }}>No messages yet. Say hello.</Text>
@@ -526,11 +860,67 @@ export default function ChatDetailScreen() {
         </BlurView>
       )}
 
+      {pendingAttachment && !isRecording && (
+        <BlurView
+          intensity={45}
+          tint={theme.scheme === 'dark' ? 'dark' : 'light'}
+          style={[styles.composerContext, { borderColor: theme.glassBrdHi }]}
+        >
+          {pendingAttachment.kind === 'image' ? (
+            <Image source={{ uri: pendingAttachment.uri }} style={styles.attachPreviewThumb} />
+          ) : (
+            <View style={[styles.attachPreviewThumb, styles.attachPreviewVoiceIcon, { backgroundColor: theme.glass }]}>
+              <Text style={{ fontSize: 18 }}>🎙</Text>
+            </View>
+          )}
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={{ fontSize: 11.5, fontWeight: '600', color: theme.ice }}>
+              {pendingAttachment.kind === 'image' ? 'Photo' : 'Voice message'}
+            </Text>
+            {pendingAttachment.kind === 'voice' && (
+              <Text style={{ fontSize: 12, color: theme.textLow }}>{pendingAttachment.duration}s</Text>
+            )}
+          </View>
+          <Pressable onPress={() => setPendingAttachment(null)} hitSlop={10} disabled={sending}>
+            <Text style={{ fontSize: 16, color: theme.textLow }}>✕</Text>
+          </Pressable>
+        </BlurView>
+      )}
+
+      {isRecording && (
+        <BlurView
+          intensity={45}
+          tint={theme.scheme === 'dark' ? 'dark' : 'light'}
+          style={[styles.composerContext, { borderColor: theme.danger }]}
+        >
+          <View style={[styles.recordingDot, { backgroundColor: theme.danger }]} />
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={{ fontSize: 12.5, fontWeight: '600', color: theme.textHi }}>
+              Recording… {Math.floor(recorderState.durationMillis / 1000)}s
+            </Text>
+          </View>
+          <Pressable onPress={() => stopVoiceRecording(true)} hitSlop={10} style={{ marginRight: 14 }}>
+            <Text style={{ fontSize: 13, color: theme.textLow }}>Cancel</Text>
+          </Pressable>
+          <Pressable onPress={() => stopVoiceRecording(false)} hitSlop={10}>
+            <Text style={{ fontSize: 13, fontWeight: '700', color: theme.ice }}>Stop</Text>
+          </Pressable>
+        </BlurView>
+      )}
+
       {/* Liquid-glass pill composer bar — a real BlurView (not just a
           tinted rgba fill) so messages scrolling behind it actually
           show through frosted, matching the web app's own
           backdrop-filter:blur() glass panels (index.html's .glass rules). */}
       <BlurView intensity={50} tint={theme.scheme === 'dark' ? 'dark' : 'light'} style={[styles.composerRow, { borderColor: theme.glassBrdHi }]}>
+        <Pressable
+          onPress={openAttachMenu}
+          disabled={sending || isRecording || !!pendingAttachment || !!editingId}
+          hitSlop={8}
+          style={{ opacity: sending || isRecording || pendingAttachment || editingId ? 0.35 : 1, paddingBottom: 8 }}
+        >
+          <Text style={{ fontSize: 22, color: theme.ice }}>+</Text>
+        </Pressable>
         <TextInput
           value={input}
           onChangeText={onChangeText}
@@ -540,16 +930,29 @@ export default function ChatDetailScreen() {
           multiline
           editable={!sending}
         />
-        <Pressable
-          onPress={onSend}
-          disabled={!input.trim() || sending}
-          style={({ pressed }) => [
-            styles.sendBtn,
-            { backgroundColor: theme.ice, opacity: !input.trim() || sending ? 0.35 : pressed ? 0.7 : 1 },
-          ]}
-        >
-          <Text style={{ color: '#0a0d12', fontWeight: '700', fontSize: 16 }}>{editingId ? '✓' : '↑'}</Text>
-        </Pressable>
+        {!input.trim() && !pendingAttachment && !editingId ? (
+          <Pressable
+            onPress={() => (isRecording ? stopVoiceRecording(false) : startVoiceRecording())}
+            disabled={sending}
+            style={({ pressed }) => [
+              styles.sendBtn,
+              { backgroundColor: isRecording ? theme.danger : theme.glass, opacity: sending ? 0.35 : pressed ? 0.7 : 1 },
+            ]}
+          >
+            <Text style={{ fontSize: 17 }}>{isRecording ? '⏹' : '🎙'}</Text>
+          </Pressable>
+        ) : (
+          <Pressable
+            onPress={onSend}
+            disabled={(!input.trim() && !pendingAttachment) || sending}
+            style={({ pressed }) => [
+              styles.sendBtn,
+              { backgroundColor: theme.ice, opacity: (!input.trim() && !pendingAttachment) || sending ? 0.35 : pressed ? 0.7 : 1 },
+            ]}
+          >
+            <Text style={{ color: '#0a0d12', fontWeight: '700', fontSize: 16 }}>{editingId ? '✓' : '↑'}</Text>
+          </Pressable>
+        )}
       </BlurView>
 
       <MessageActionSheet
@@ -559,6 +962,14 @@ export default function ChatDetailScreen() {
         canEdit={!!actionSheetMessage && actionSheetMessage.fromUserId === myUserId && !actionSheetMessage.attachment && !actionSheetMessage.deleted}
         canDelete={!!actionSheetMessage && actionSheetMessage.fromUserId === myUserId && !actionSheetMessage.deleted}
         myReaction={myReactionOnActionSheet}
+        senderName={
+          actionSheetMessage
+            ? actionSheetMessage.fromUserId === myUserId
+              ? 'You'
+              : names[actionSheetMessage.fromUserId] || 'Message'
+            : ''
+        }
+        senderColor={actionSheetMessage ? colorFromString(actionSheetMessage.fromUserId, theme.ice, theme.fire) : theme.ice}
         onReact={sendReaction}
         onReply={startReplyFromSheet}
         onCopy={copyFromSheet}
@@ -613,4 +1024,20 @@ const styles = StyleSheet.create({
   },
   sendBtn: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center' },
   headerCallBtns: { flexDirection: 'row', gap: 16, paddingRight: 4 },
+  attachPreviewThumb: { width: 40, height: 40, borderRadius: 8 },
+  attachPreviewVoiceIcon: { alignItems: 'center', justifyContent: 'center' },
+  recordingDot: { width: 10, height: 10, borderRadius: 5 },
+  searchBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginHorizontal: 10,
+    marginBottom: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 14,
+    borderWidth: 1,
+    overflow: 'hidden',
+  },
+  searchInput: { flex: 1, fontSize: 14, paddingVertical: 2 },
 });

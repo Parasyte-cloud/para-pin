@@ -95,6 +95,17 @@ interface SessionState {
   // app/(tabs)/_layout.tsx already redirects on.
   lockNow: () => void;
   logout: () => Promise<void>;
+  // Mirrors index.html's profileSaveBtn handler (index.html:8530-8566).
+  // `avatarUrl` here is the ALREADY-UPLOADED result — this action never
+  // touches the file picker or /api/upload itself (see
+  // ProfileModal.tsx/utils/profilePhotoUpload.ts for that), it only saves
+  // the final {displayName, avatarUrl} pair. Passing `avatarUrl: undefined`
+  // keeps the existing photo; there's no "remove photo" affordance here,
+  // same as web.
+  updateProfile: (
+    displayName: string,
+    avatarUrl?: string
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
 }
 
 export const useSessionStore = create<SessionState>((set, get) => ({
@@ -284,6 +295,21 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   lockNow: () => set({ isLocked: true }),
+
+  updateProfile: async (displayName, avatarUrl) => {
+    const name = displayName.trim();
+    if (!name) return { ok: false, error: 'Enter a display name.' };
+    const res = await apiFetch<{ displayName?: string; avatarUrl?: string | null }>('/profile', {
+      method: 'POST',
+      body: JSON.stringify({ displayName: name, avatarUrl }),
+    });
+    if (!res.ok) return { ok: false, error: "Couldn't save your profile. Try again." };
+    set({
+      displayName: res.body.displayName ?? name,
+      avatarUrl: res.body.avatarUrl ?? avatarUrl ?? get().avatarUrl,
+    });
+    return { ok: true };
+  },
 
   logout: async () => {
     await SecureStore.deleteItemAsync(PIN_HASH_KEY);
