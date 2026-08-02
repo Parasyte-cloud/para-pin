@@ -321,6 +321,52 @@ split, just not reached yet.
   repeatable `npm test` target. Worth promoting into a real test if this
   crypto module changes again.
 
+## EAS build fix: peer-dependency conflict blocked every build
+
+First real `eas build` attempt failed on both platforms — iOS locally
+during a pre-build step, Android remotely in the "Install dependencies"
+phase, same underlying cause both times: `npm install` failing outright
+with `ERESOLVE`. `@config-plugins/react-native-webrtc`'s latest published
+release (15.0.1, confirmed directly against the npm registry — nothing
+newer exists) still declares `peerDependencies.expo: "^56"`, but this
+project is on Expo SDK 57. The plugin itself just edits
+Info.plist/AndroidManifest via `@expo/config-plugins`, which is stable
+across this bump, so it's a stale version range upstream, not a real
+incompatibility — but npm's default strict peer-dep resolution fails hard
+on it regardless.
+
+Fixed with `mobile-app/.npmrc` (`legacy-peer-deps=true`), which EAS Build
+respects for its own remote install step too. Also cleaned up a
+side effect of the first failed attempt: `eas build` had interactively
+offered to install `expo-updates` (since `eas.json`'s `preview`/
+`production` profiles specified `channel` keys) and got far enough to add
+`expo-updates` to `package.json` before the same ERESOLVE error killed the
+`npm install` that would've written a matching `package-lock.json` —
+left the two files out of sync, which is exactly what broke the *remote*
+Android install too. Reverted `package.json`, dropped the now-unused
+`channel` keys from `eas.json` (EAS Update/OTA channels were never
+actually requested this session — easy to add back deliberately later if
+wanted), and regenerated `package-lock.json` clean.
+
+`app.json` picked up some legitimate changes from that same build attempt,
+kept as-is: `extra.eas.projectId` (required — links this checkout to the
+`@parasyte-cloud/para-pin-mobile` EAS project), `bitcode: false`, and a
+longer Android permissions list (`MODIFY_AUDIO_SETTINGS`,
+`FOREGROUND_SERVICE`, `WAKE_LOCK`, `BLUETOOTH`, etc. — auto-detected from
+react-native-webrtc's own manifest requirements, all things a real calling
+app needs on Android). One line needs a human decision, not a silent
+default: `infoPlist.ITSAppUsesNonExemptEncryption: false` got set from
+answering "yes" to `eas build`'s "only uses standard/exempt encryption?"
+prompt. This app implements its own E2EE (`@noble/curves`/`@noble/ciphers`
+— X25519 + AES-256-GCM, both public, industry-standard algorithms, not
+proprietary crypto), which is the category Apple's export-compliance
+question is actually asking about. Whether that qualifies as "exempt"
+under EAR License Exception ENC depends on specifics (mass-market
+classification, annual self-classification filing, etc.) that are a real
+legal/export-control question, not a coding one — worth a lawyer's or
+compliance advisor's sign-off before shipping, not something to take on
+faith from an interactive CLI prompt's default.
+
 ## Liquid-glass + pill UI pass (messaging + calls)
 
 `expo-blur`'s `BlurView` replaced flat tinted `View`s on: the message

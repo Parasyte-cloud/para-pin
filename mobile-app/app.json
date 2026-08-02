@@ -16,8 +16,10 @@
       "infoPlist": {
         "NSCameraUsageDescription": "Used for video calls and sending photos in chats.",
         "NSMicrophoneUsageDescription": "Used for audio and video calls.",
-        "NSFaceIDUsageDescription": "Use Face ID to unlock PArA PIN faster than typing your PIN."
-      }
+        "NSFaceIDUsageDescription": "Use Face ID to unlock PArA PIN faster than typing your PIN.",
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "bitcode": false
     },
     "android": {
       "package": "cloud.parasyte.parapin",
@@ -29,7 +31,20 @@
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
-      "permissions": ["CAMERA", "RECORD_AUDIO"],
+      "permissions": [
+        "CAMERA",
+        "RECORD_AUDIO",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.CAMERA",
+        "android.permission.INTERNET",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.WAKE_LOCK",
+        "android.permission.BLUETOOTH"
+      ],
       "googleServicesFile": "./google-services.json"
     },
     "web": {
@@ -59,6 +74,12 @@
     ],
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "f5a78637-be30-459f-9c21-6c1ffb3baa6a"
+      }
     }
   }
 }

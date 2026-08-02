@@ -13,13 +13,11 @@
     },
     "preview": {
       "distribution": "internal",
-      "channel": "preview",
       "env": {
         "EXPO_PUBLIC_API_BASE_URL": "https://chat.parasyte.cloud"
       }
     },
     "production": {
-      "channel": "production",
       "autoIncrement": true,
       "env": {
         "EXPO_PUBLIC_API_BASE_URL": "https://chat.parasyte.cloud"
