@@ -6,11 +6,21 @@ import { PinKeypad } from '../../src/components/PinKeypad';
 import { authErrorMessage } from '../../src/utils/authErrors';
 import { AuthBackdrop } from '../../src/components/AuthBackdrop';
 import { DeviceApprovalGate } from '../../src/components/DeviceApprovalGate';
+import { MfaVerifyGate } from '../../src/components/MfaVerifyGate';
 
 // lock-logo.png is the same badge+wordmark asset extracted from web's
 // #lockLogoImg (index.html:1526), 640x502 transparent PNG — keeps the two
 // clients showing the literal same artwork instead of a redrawn approximation.
 const LOGO_ASPECT = 640 / 502;
+
+// Either of these can interrupt a plain PIN submit and need one more step
+// before retrying it — mirrors web's initSession() branching into
+// openDeviceApprovalFlow()/openMfaVerifyFlow() (index.html:3245-3248). Held
+// only long enough to retry once that step clears, same as web's
+// `pendingPin` (index.html:3227).
+type PendingGate =
+  | { type: 'device'; pin: string; pinHash: string }
+  | { type: 'mfa'; pin: string; pinHash: string; methods: { totp?: boolean; webauthn?: boolean } };
 
 export default function PinScreen() {
   const theme = useTheme();
@@ -20,9 +30,7 @@ export default function PinScreen() {
   const [showName, setShowName] = useState(false);
   const [name, setName] = useState('');
   const [error, setError] = useState<string | null>(null);
-  // Held only long enough to retry submitPin once an already-trusted
-  // device approves this one — mirrors web's `pendingPin` (index.html:3227).
-  const [pendingApproval, setPendingApproval] = useState<{ pin: string; pinHash: string } | null>(null);
+  const [pendingGate, setPendingGate] = useState<PendingGate | null>(null);
 
   const attemptSubmit = useCallback(
     async (pin: string) => {
@@ -30,7 +38,11 @@ export default function PinScreen() {
       const result = await submitPin(pin, { displayName: name.trim() || undefined });
       if (!result.ok) {
         if (result.error?.error === 'device_approval_required' && deviceId) {
-          setPendingApproval({ pin, pinHash: await hashPin(pin) });
+          setPendingGate({ type: 'device', pin, pinHash: await hashPin(pin) });
+          return;
+        }
+        if (result.error?.error === 'mfa_required' && deviceId) {
+          setPendingGate({ type: 'mfa', pin, pinHash: await hashPin(pin), methods: result.error.methods || {} });
           return;
         }
         // Real status now (was hardcoded to 0), which masked every
@@ -44,12 +56,12 @@ export default function PinScreen() {
     [submitPin, name, deviceId]
   );
 
-  const onApproved = useCallback(() => {
-    if (!pendingApproval) return;
-    const { pin } = pendingApproval;
-    setPendingApproval(null);
+  const onGateCleared = useCallback(() => {
+    if (!pendingGate) return;
+    const { pin } = pendingGate;
+    setPendingGate(null);
     attemptSubmit(pin);
-  }, [pendingApproval, attemptSubmit]);
+  }, [pendingGate, attemptSubmit]);
 
   return (
     <AuthBackdrop>
@@ -60,12 +72,12 @@ export default function PinScreen() {
           <Text style={[styles.tagline, { color: theme.textMid }]}>
             Your number is for everyone.{'\n'}Your PArA PIN is for the ones that matter.
           </Text>
-          {!pendingApproval && (
+          {!pendingGate && (
             <Text style={[styles.instruction, { color: theme.textHi }]}>
               Enter your 7-digit PIN. New here? Just make one up — it creates your account.
             </Text>
           )}
-          {!pendingApproval && (
+          {!pendingGate && (
             <Pressable onPress={() => setShowName((s) => !s)} hitSlop={8}>
               <Text style={[styles.nameToggle, { color: theme.ice }]}>
                 {showName ? 'Hide name field' : 'First time? Add your name'}
@@ -74,12 +86,20 @@ export default function PinScreen() {
           )}
         </View>
 
-        {pendingApproval ? (
+        {pendingGate?.type === 'device' ? (
           <DeviceApprovalGate
-            pinHash={pendingApproval.pinHash}
+            pinHash={pendingGate.pinHash}
             deviceId={deviceId!}
-            onApproved={onApproved}
-            onCancel={() => setPendingApproval(null)}
+            onApproved={onGateCleared}
+            onCancel={() => setPendingGate(null)}
+          />
+        ) : pendingGate?.type === 'mfa' ? (
+          <MfaVerifyGate
+            pinHash={pendingGate.pinHash}
+            deviceId={deviceId!}
+            methods={pendingGate.methods}
+            onVerified={onGateCleared}
+            onCancel={() => setPendingGate(null)}
           />
         ) : (
           <>

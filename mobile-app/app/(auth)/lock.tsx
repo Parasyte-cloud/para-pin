@@ -6,9 +6,18 @@ import { PinKeypad } from '../../src/components/PinKeypad';
 import { authErrorMessage } from '../../src/utils/authErrors';
 import { AuthBackdrop } from '../../src/components/AuthBackdrop';
 import { DeviceApprovalGate } from '../../src/components/DeviceApprovalGate';
+import { MfaVerifyGate } from '../../src/components/MfaVerifyGate';
 
 // Same badge+wordmark asset as pin.tsx — see the comment there.
 const LOGO_ASPECT = 640 / 502;
+
+// Same two gates pin.tsx can hit — see its comment. On lock.tsx these fire
+// against the already-stored credential (e.g. this device was remotely
+// removed from Settings > Security > Devices, or MFA got turned on from
+// another client since this device last unlocked).
+type PendingGate =
+  | { type: 'device'; pin: string }
+  | { type: 'mfa'; pin: string; methods: { totp?: boolean; webauthn?: boolean } };
 
 export default function LockScreen() {
   const theme = useTheme();
@@ -21,12 +30,7 @@ export default function LockScreen() {
   const [showPinFallback, setShowPinFallback] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [attempting, setAttempting] = useState(false);
-  // Set when this device's own already-stored credential still hits
-  // device_approval_required — e.g. an admin removed this device from
-  // Settings > Security > Devices on another client, so re-entry needs a
-  // fresh approval same as a brand-new sign-in would. Holds the pin only
-  // long enough to retry unlockWithPin once approved.
-  const [pendingApproval, setPendingApproval] = useState<{ pin: string } | null>(null);
+  const [pendingGate, setPendingGate] = useState<PendingGate | null>(null);
 
   const tryBiometric = useCallback(async () => {
     setAttempting(true);
@@ -54,7 +58,11 @@ export default function LockScreen() {
       const result = await unlockWithPin(pin);
       if (!result.ok) {
         if (result.error?.error === 'device_approval_required') {
-          setPendingApproval({ pin });
+          setPendingGate({ type: 'device', pin });
+          return;
+        }
+        if (result.error?.error === 'mfa_required') {
+          setPendingGate({ type: 'mfa', pin, methods: result.error.methods || {} });
           return;
         }
         // Real status now (was hardcoded to 0) — see pin.tsx's onComplete.
@@ -64,12 +72,12 @@ export default function LockScreen() {
     [unlockWithPin]
   );
 
-  const onApproved = useCallback(() => {
-    if (!pendingApproval) return;
-    const { pin } = pendingApproval;
-    setPendingApproval(null);
+  const onGateCleared = useCallback(() => {
+    if (!pendingGate) return;
+    const { pin } = pendingGate;
+    setPendingGate(null);
     onPinComplete(pin);
-  }, [pendingApproval, onPinComplete]);
+  }, [pendingGate, onPinComplete]);
 
   return (
     <AuthBackdrop>
@@ -85,15 +93,23 @@ export default function LockScreen() {
           </Text>
         </View>
 
-        {pendingApproval ? (
-          // storedPinHash/deviceId are guaranteed set here — this screen only
-          // ever renders once hydrate() has both (see app/_layout.tsx's
-          // isHydrated gate and this screen's own pinHash-required routing).
+        {/* storedPinHash/deviceId are guaranteed set below — this screen only
+            ever renders once hydrate() has both (see app/_layout.tsx's
+            isHydrated gate and this screen's own pinHash-required routing). */}
+        {pendingGate?.type === 'device' ? (
           <DeviceApprovalGate
             pinHash={storedPinHash!}
             deviceId={deviceId!}
-            onApproved={onApproved}
-            onCancel={() => setPendingApproval(null)}
+            onApproved={onGateCleared}
+            onCancel={() => setPendingGate(null)}
+          />
+        ) : pendingGate?.type === 'mfa' ? (
+          <MfaVerifyGate
+            pinHash={storedPinHash!}
+            deviceId={deviceId!}
+            methods={pendingGate.methods}
+            onVerified={onGateCleared}
+            onCancel={() => setPendingGate(null)}
           />
         ) : !showPinFallback ? (
           <View style={styles.center}>

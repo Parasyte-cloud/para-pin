@@ -577,3 +577,62 @@ Built both halves to close the gap:
   message in each one.
 
 Verified: `tsc --noEmit` clean.
+
+## MFA (TOTP/backup codes) sign-in on mobile + a device-trust hardening fix
+
+Same shape of gap as device approval: `submitPin`/`unlockWithPin` could
+receive `mfa_required` (an account with TOTP or a passkey configured) but
+mobile had no UI to clear it — only the punt-to-web message. Built
+`src/components/MfaVerifyGate.tsx`, wired into `app/(auth)/pin.tsx` and
+`app/(auth)/lock.tsx` the same way `DeviceApprovalGate` is (both screens
+now track a single `pendingGate` that's either `'device'` or `'mfa'`,
+since a sign-in can only hit one of the two at a time): a code field for a
+live TOTP code or a backup code, `POST /mfa/verify-login`, retry the
+original PIN submit on success. Scope cut: TOTP + backup codes only, not
+WebAuthn/passkeys — there's no built-in React Native equivalent to the
+browser's `navigator.credentials.get()`, that would need a native module
+(e.g. `react-native-passkey`) as a separate piece of work. An account with
+*only* a passkey configured (no TOTP) is told plainly that it needs to
+finish sign-in on web, rather than being shown a code box it can't use —
+matches web's own `methods.totp !== false` gating.
+
+While wiring this up, checked whether the server-side gate this all leans
+on actually holds up end to end, since the user specifically asked: can
+MFA verification on web ever succeed for a device that isn't already
+trusted, or for the wrong PIN? The "wrong PIN" half was already solid —
+`/mfa/verify-login` and `/webauthn/auth-verify` both look up the account
+via `pinHash` from the request, so a code only ever validates against the
+matching account's own `mfaSecret`/passkeys, no cross-account confusion
+possible.
+
+The "already trusted device" half had a real gap, found while re-reading
+`worker.js`'s `/session` handler: the device-trust check (`worker.js:
+1904-1913`, returns `device_approval_required`) runs *before* the MFA
+check (`worker.js:1925-1927`, returns `mfa_required`) in that handler, so
+a client only ever sees `mfa_required` after its `deviceId` is already in
+`user.deviceIds` — that part was correctly ordered. But `/mfa/verify-login`
+and `/webauthn/auth-verify` are their own standalone endpoints, reachable
+directly rather than only in response to a real `mfa_required`, and
+neither one checked `user.deviceIds.includes(deviceId)` before accepting
+a valid code/assertion and adding `deviceId` to `mfaVerifiedDeviceIds`.
+Anyone who knew the PIN and had a valid TOTP code (or a passkey, if one
+existed) could pre-clear MFA for an arbitrary, never-approved `deviceId`
+of their own choosing — harmless on its own since `/session`'s device gate
+still blocks that `deviceId` from actually signing in, but it meant that
+device would sail through the MFA check with zero fresh verification the
+moment it was later added to `user.deviceIds` by any means (e.g. a
+successful device-link approval), instead of the account owner having to
+enter a new code post-approval like the design intends.
+
+Fixed by adding `if (!Array.isArray(user.deviceIds) ||
+!user.deviceIds.includes(deviceId)) return json({ error:
+'device_not_trusted' }, 403);` to both endpoints (`worker.js`, right
+after their existing account/not-registered checks). Confirmed this
+can't break the legitimate flow: every real `mfa_required` a client ever
+receives already implies `deviceId` is in `user.deviceIds`, since the
+device-trust check runs first in `/session` and returns early otherwise.
+`node --check worker.js` passes; no web client changes needed since this
+is purely a server-side tightening, transparent to any well-behaved
+caller.
+
+Verified: `tsc --noEmit` clean, `node --check worker.js` clean.
