@@ -6,12 +6,18 @@
 // relayed through the other person's UserChannel DO. Audio/video itself is
 // peer-to-peer WebRTC and never touches the Worker.
 //
-// Known cut vs. web: no synthesized ringback/ringtone audio (that's a Web
-// Audio oscillator trick with no direct RN equivalent) — the incoming/
-// outgoing call screens are the signal for now. Group/meeting calls
-// (Cloudflare Calls SFU) are a separate, not-yet-built path — see
-// mobile-app/README.md.
+// Known cut vs. web: no synthesized ringback/ringtone AUDIO (that's a Web
+// Audio oscillator trick with no direct RN equivalent) — an incoming call
+// now vibrates (see startRinging/stopRinging below) but doesn't play a
+// tone. This only fires while the app is foregrounded and the always-open
+// notify socket is connected; a backgrounded/killed app has no CallKit/
+// VoIP-push integration, so it only gets whatever the push-notification
+// path delivers (see mobile-app/src/state/push.ts) — a real background
+// ring would need that separate, bigger native piece of work.
+// Group/meeting calls (Cloudflare Calls SFU) are a separate, not-yet-built
+// path — see mobile-app/README.md.
 
+import { Vibration } from 'react-native';
 import { create } from 'zustand';
 import {
   RTCPeerConnection,
@@ -66,6 +72,16 @@ interface CallStoreState {
   toggleCamera: () => void;
   handleCallSignal: (signal: CallSignal) => void;
   dismissConnectError: () => void;
+}
+
+// Repeating buzz-pause-buzz pattern, closest thing to "ringing" available
+// without a bundled audio asset + expo-audio playback wiring. `true` as
+// the second arg repeats the pattern until Vibration.cancel() is called.
+function startRinging() {
+  Vibration.vibrate([0, 700, 500], true);
+}
+function stopRinging() {
+  Vibration.cancel();
 }
 
 function clearAllTimers() {
@@ -144,6 +160,7 @@ export const useCallStore = create<CallStoreState>((set, get) => {
   }
 
   function finishCall(reason: string | undefined, alreadyLogged: boolean) {
+    stopRinging();
     clearAllTimers();
     const state = get();
     if (!alreadyLogged && state.peerId) {
@@ -269,6 +286,7 @@ export const useCallStore = create<CallStoreState>((set, get) => {
     acceptCall: async () => {
       const s = get();
       if (s.callState !== 'ringing-in' || !s.peerId) return;
+      stopRinging();
       if (ringTimeoutTimer) {
         clearTimeout(ringTimeoutTimer);
         ringTimeoutTimer = null;
@@ -386,6 +404,7 @@ export const useCallStore = create<CallStoreState>((set, get) => {
           hasVideo: !!signal.video,
           connectError: null,
         });
+        startRinging();
         ringTimeoutTimer = setTimeout(() => {
           if (get().callState === 'ringing-in') get().declineCall('no-answer');
         }, RING_TIMEOUT_MS);
