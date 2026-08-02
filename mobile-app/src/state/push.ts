@@ -27,20 +27,32 @@ Notifications.setNotificationHandler({
   }),
 });
 
+export type PushRegisterResult =
+  | { ok: true }
+  | { ok: false; reason: 'unsupported_platform' | 'permission_denied' | 'no_token' | 'server_rejected' | 'exception'; detail?: string };
+
 let registeredToken: string | null = null;
-let registering: Promise<void> | null = null;
+let registering: Promise<PushRegisterResult> | null = null;
+// Settings screen reads this synchronously to explain WHY push looks off,
+// instead of the silent console.warn this used to be the only trace of.
+let lastResult: PushRegisterResult | null = null;
+export function getLastPushRegisterResult(): PushRegisterResult | null {
+  return lastResult;
+}
 
 // Idempotent — safe to call on every app foreground/login, matches
-// ensureMyE2eeKeyPair's "keep the server copy in sync" pattern. Silently
-// no-ops if the user hasn't granted permission or this build doesn't have
-// a real Firebase/APNs config wired up yet (see mobile-app/README.md);
-// this is a nice-to-have layered on top of the always-open notify socket,
-// not something the rest of the app depends on.
-export async function ensurePushRegistered(): Promise<void> {
+// ensureMyE2eeKeyPair's "keep the server copy in sync" pattern. Never
+// throws — push is additive on top of the always-open notify socket, not
+// something the rest of the app depends on — but now RETURNS why it
+// didn't work instead of only a console.warn nobody but a developer with
+// a cable plugged in would ever see.
+export async function ensurePushRegistered(): Promise<PushRegisterResult> {
   if (registering) return registering;
   registering = (async () => {
     try {
-      if (Platform.OS !== 'ios' && Platform.OS !== 'android') return;
+      if (Platform.OS !== 'ios' && Platform.OS !== 'android') {
+        return (lastResult = { ok: false, reason: 'unsupported_platform' });
+      }
 
       let perms = await Notifications.getPermissionsAsync();
       if (!perms.granted) {
@@ -48,23 +60,24 @@ export async function ensurePushRegistered(): Promise<void> {
           ios: { allowAlert: true, allowSound: true, allowBadge: false },
         });
       }
-      if (!perms.granted) return;
+      if (!perms.granted) return (lastResult = { ok: false, reason: 'permission_denied' });
 
       const devicePushToken = await Notifications.getDevicePushTokenAsync();
       const token = typeof devicePushToken.data === 'string' ? devicePushToken.data : null;
-      if (!token || token === registeredToken) return;
+      if (!token) return (lastResult = { ok: false, reason: 'no_token' });
+      if (token === registeredToken) return (lastResult = { ok: true });
 
       const res = await apiFetch('/push/register-device', {
         method: 'POST',
         body: JSON.stringify({ platform: devicePushToken.type, token }),
       });
-      if (res.ok) registeredToken = token;
+      if (!res.ok) return (lastResult = { ok: false, reason: 'server_rejected', detail: `status ${res.status}` });
+      registeredToken = token;
+      return (lastResult = { ok: true });
     } catch (e) {
       // Missing google-services.json, no real APNs entitlement yet in a
-      // dev build, simulator (no push capability at all), etc. — none of
-      // this should ever crash the app, push is additive on top of the
-      // always-open notify socket.
-      console.warn('[push] registration failed', String(e));
+      // dev build, simulator (no push capability at all), etc.
+      return (lastResult = { ok: false, reason: 'exception', detail: String(e) });
     } finally {
       registering = null;
     }

@@ -3,7 +3,7 @@ import { View, Text, Pressable, StyleSheet, ScrollView, Switch, Platform, TextIn
 import * as Notifications from 'expo-notifications';
 import { useTheme } from '../../src/hooks/useTheme';
 import { useSessionStore } from '../../src/state/session';
-import { ensurePushRegistered } from '../../src/state/push';
+import { ensurePushRegistered, type PushRegisterResult } from '../../src/state/push';
 import { apiFetch } from '../../src/api/client';
 import { rewrapAllChatsForDevice } from '../../src/state/e2ee';
 import type { ApiErrorBody } from '../../src/types';
@@ -21,6 +21,9 @@ export default function SettingsScreen() {
   const [biometricBusy, setBiometricBusy] = useState(false);
   const [pushGranted, setPushGranted] = useState<boolean | null>(null);
   const [pushBusy, setPushBusy] = useState(false);
+  const [pushRegisterResult, setPushRegisterResult] = useState<PushRegisterResult | null>(null);
+  const [testPushBusy, setTestPushBusy] = useState(false);
+  const [testPushResult, setTestPushResult] = useState<string | null>(null);
   const deviceId = useSessionStore((s) => s.deviceId);
   const [approveCode, setApproveCode] = useState('');
   const [approveBusy, setApproveBusy] = useState(false);
@@ -40,10 +43,58 @@ export default function SettingsScreen() {
 
   const onEnablePush = async () => {
     setPushBusy(true);
-    await ensurePushRegistered();
+    setPushRegisterResult(await ensurePushRegistered());
     const p = await Notifications.getPermissionsAsync().catch(() => null);
     setPushGranted(p ? !!p.granted : null);
     setPushBusy(false);
+  };
+
+  const pushRegisterReasonText = (r: PushRegisterResult | null): string | null => {
+    if (!r || r.ok) return null;
+    switch (r.reason) {
+      case 'permission_denied':
+        return "Notifications are blocked for this app — check your phone's system Settings > Notifications > PArA.";
+      case 'unsupported_platform':
+        return "Push isn't available on this platform.";
+      case 'no_token':
+        return "Couldn't get a device push token — if this is a simulator, that's expected (simulators can't receive real push).";
+      case 'server_rejected':
+        return `Server rejected registration (${r.detail || 'no detail'}).`;
+      case 'exception':
+        return `Registration failed: ${r.detail || 'unknown error'}`;
+      default:
+        return 'Registration failed for an unknown reason.';
+    }
+  };
+
+  // Sends a real push straight to whatever's registered for this account
+  // (worker.js's /api/push/test → /push-test) and reports exactly what
+  // came back — delivered count, total registered targets, and per-target
+  // errors (e.g. missing APNS_*/FCM_* secrets server-side, a dead token).
+  // This turns "not getting notifications" from a total guessing game into
+  // something with an actual answer.
+  const onTestPush = async () => {
+    setTestPushBusy(true);
+    setTestPushResult(null);
+    // /push-test (worker.js:5603) replies 200 even for the "nothing
+    // registered" case, just with an `error` field alongside delivered:0 —
+    // not a 4xx, so this has to be checked inside the ok branch too, not
+    // just via !r.ok.
+    const r = await apiFetch<{ delivered: number; total: number; errors?: string[]; error?: string }>('/push/test', {
+      method: 'POST',
+    });
+    setTestPushBusy(false);
+    if (!r.ok) {
+      setTestPushResult("Couldn't run the test.");
+      return;
+    }
+    if (r.body.error === 'no_subscriptions') {
+      setTestPushResult('No push registered yet — tap Enable above first.');
+      return;
+    }
+    const parts = [`${r.body.delivered}/${r.body.total} delivered`];
+    if (r.body.errors?.length) parts.push(...r.body.errors);
+    setTestPushResult(parts.join(' — '));
   };
 
   // Mirrors index.html's #approveDeviceSubmitBtn handler (index.html:3541-
@@ -145,6 +196,17 @@ export default function SettingsScreen() {
             </Pressable>
           )}
         </View>
+        {pushRegisterReasonText(pushRegisterResult) && (
+          <Text style={[styles.rowHint, { color: theme.danger, marginTop: 6 }]}>{pushRegisterReasonText(pushRegisterResult)}</Text>
+        )}
+        <Pressable onPress={onTestPush} disabled={testPushBusy} hitSlop={8} style={{ marginTop: 8 }}>
+          <Text style={{ color: theme.ice, fontSize: 12.5, fontWeight: '600' }}>
+            {testPushBusy ? 'Sending test push…' : 'Send test push'}
+          </Text>
+        </Pressable>
+        {testPushResult && (
+          <Text style={[styles.rowHint, { color: theme.textMid, marginTop: 4 }]}>{testPushResult}</Text>
+        )}
       </View>
 
       <View style={[styles.card, { backgroundColor: theme.glass, borderColor: theme.glassBrd }]}>
