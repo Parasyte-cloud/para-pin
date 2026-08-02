@@ -676,4 +676,102 @@ Net effect: this account now has TOTP as a second, mobile-usable factor
 alongside its passkey, and any future passkey-only account has a way out
 that doesn't require the web app's passkey flow to be working.
 
+## First real-device bug sweep: chat list, send, ringing, push
+
+First round of feedback after actually signing in on a real phone.
+
+**Chat list showed generic "Direct message"/"Encrypted message" for every
+row, with a generic "DM" avatar.** Genuine bug, not a stub: web resolves
+a DM's real display name via `chatDisplayName()`/`ensureNamesLoaded()`
+(index.html:4030-4052) since a DM's `name` field is always `null`
+server-side by design (only group chats get a real name) — the OTHER
+member's profile name is what's actually shown. Mobile already had this
+exact logic ported as `src/state/names.ts` (`resolveNames`/
+`getCachedName`), correctly used by the chat *detail* screen, but nobody
+had wired it into the chat *list* (`app/(tabs)/index.tsx`) — it just fell
+back to the generic label every time. Fixed: the list now resolves and
+caches every DM's other-member name the same way web does, re-rendering
+via `extraData`/a `namesVersion` bump once names come back (the cache
+itself is a plain non-reactive Map, same design as web's
+`userNameCache`). The last-message preview text ("Encrypted message" for
+every row) is a real, separate, and still-open gap — mobile has no
+last-message cache at the list level at all yet, unlike web's
+`messagesByChat`/`previewText()`; left as-is rather than half-building it
+under this round's time budget.
+
+Bonus find while in this file: `app/chat/[id].tsx`'s header title used
+the wrong variable (`chatTitle`, which is only ever the generic fallback)
+instead of `dmPeerName` (which already correctly resolves the real DM
+peer name) — so a DM's header said "Direct message" even once the real
+name had loaded. One-line fix.
+
+**Sending a message could silently do nothing**, in two spots in
+`onSend` (`app/chat/[id].tsx`): if `ensureChatKey(chat)` returned `null`
+(this chat's E2EE key isn't wrapped for this device yet), or if the final
+`POST /chats/:id/messages` itself failed — both branches just `return`ed
+with zero UI feedback beyond the pre-existing "Setting up encryption…"
+banner not updating. Web's equivalent (`index.html:11472-11476`) shows an
+explicit banner for the key case; mobile had the same no-op branch but
+had dropped the message. Added a dismissable error banner
+(`sendError` state) above the composer for both cases, and stopped
+silently swallowing the edit-failure case too.
+
+The **actual root cause** behind "can't send" on a brand-new device is
+almost certainly a missing chat-key wrap: this device was approved via
+device-link, but `rewrapAllChatsForDevice`'s original call
+(`index.html:3562`, or the mobile Settings equivalent) is fire-and-forget
+with no confirmation and no retry if it fails partway or ran before this
+device's E2EE public key had finished uploading — `ensureChatKey` then
+returns `null` forever for any chat that already existed before this
+device was trusted, since nothing else ever re-triggers a wrap on its
+own. New self-service fix: web's Settings > Devices list (`index.html:
+9171-9210`) now has a **"Re-sync keys"** button next to each non-current
+device, which just re-runs `rewrapAllChatsForDevice(deviceId)` for every
+chat on demand — safe to run any number of times (re-wrapping an
+already-wrapped chat is a harmless overwrite of the same underlying key,
+not a rotation). The mobile error banner for the missing-key case now
+tells the user to ask whoever's on web to do exactly this.
+
+**Incoming calls didn't ring.** Was already a documented scope cut
+(`src/state/call.ts`'s header comment, README's own Phase 3 section) —
+no ringtone audio, web's Web-Audio-oscillator trick has no direct RN
+equivalent, and this only ever worked while foregrounded with the notify
+socket connected in the first place (no CallKit/VoIP-push integration
+for background/killed-app ringing — that's a separate, much bigger native
+piece of work, still out of scope here). Improved what's achievable in
+this round without a new native dependency: an incoming call now
+vibrates in a repeating buzz-pause pattern (`Vibration.vibrate([0, 700,
+500], true)`) for as long as it's ringing, stopping the moment it's
+accepted, declined, or ends. Real audio ringing (and any background
+ringing at all) remains unbuilt.
+
+**Push notifications weren't arriving**, with no visible reason —
+`ensurePushRegistered()` (`src/state/push.ts`) already ran automatically
+on every sign-in/unlock (`app/_layout.tsx`), and the request-shape/
+server-side send logic (`worker.js`'s `sendApnsPush`/`sendFcmPush`) both
+checked out correctly end to end — but registration failures were only
+ever a `console.warn`, invisible to anyone without a cable plugged in,
+and there was no way to tell "registered but delivery failed
+server-side" (most likely: `APNS_KEY_ID`/`APNS_TEAM_ID`/
+`APNS_PRIVATE_KEY_P8` or `FCM_SERVICE_ACCOUNT_JSON` secrets aren't set on
+the Worker yet, per `worker.js:1378`'s own comment) apart from
+"registered but delivery failed at Apple/Google" apart from "never
+registered at all." Two fixes to make this diagnosable instead of a
+guessing game:
+- `ensurePushRegistered()` now returns a typed result
+  (`{ok:false, reason: 'permission_denied' | 'no_token' | 'server_rejected' | 'exception' | ...}`)
+  instead of `void`, surfaced as an actual error line in Settings instead
+  of a swallowed `console.warn`.
+- A new **"Send test push"** button in Settings calls the existing
+  `POST /api/push/test` (worker.js:7234, already built server-side but
+  never exposed on mobile) and shows exactly what came back —
+  `delivered/total` plus any per-target error strings (e.g. an APNs/FCM
+  rejection reason), so a missing-secrets problem now says so directly
+  instead of just "nothing arrived."
+
+None of these four required a new dependency or lockfile change.
+
+Verified: `tsc --noEmit` clean, `node --check worker.js` clean (index.html's
+resync-button JS was checked by hand — no build step for that file).
+
 Verified: `tsc --noEmit` clean.
