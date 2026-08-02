@@ -636,3 +636,44 @@ is purely a server-side tightening, transparent to any well-behaved
 caller.
 
 Verified: `tsc --noEmit` clean, `node --check worker.js` clean.
+
+## Passkey-only accounts weren't unblockable on mobile at all
+
+Found immediately after the round above: an account with a passkey but
+no TOTP hit `MfaVerifyGate`'s "sign in from web instead" dead end — and
+separately, web's own passkey verification (`navigator.credentials.get()`)
+wasn't reliably completing either (cross-device/hybrid transport flakiness
+is a known rough edge of that browser API, outside this app's control).
+Net result: no path to sign in at all for that account, on either client.
+
+Rather than leave it there, `MfaVerifyGate` now offers "Set up an
+authenticator app instead" right from the passkey-only dead end. This
+works because `/mfa/setup` and `/mfa/confirm` (`worker.js:2113-2142`) only
+ever required knowing the PIN (`pinHash`) — no established session, no
+already-trusted/MFA-cleared device — since web's equivalent UI always ran
+these from an already-signed-in Settings screen and never needed to check
+for less. `apiFetch` already sends `X-Para-Pin-Hash` the moment a PIN's
+been typed in (well before `/session` ever succeeds), so the same
+unauthenticated-but-PIN-holding pattern device approval and MFA-verify
+already use here works for setup too.
+
+Flow: enter the PIN → hit `mfa_required` (passkey-only) → tap the setup
+button → `/mfa/setup` returns a TOTP secret, shown as selectable text for
+manual entry into any authenticator app (no QR code — rendering one would
+need a new native dependency like `react-native-qrcode-svg`; manual-entry
+setup keys are supported by every mainstream authenticator app, so this
+was cut rather than adding a dependency for a round already about closing
+a sign-in dead end) → enter the code it produces → `/mfa/confirm` enables
+TOTP account-wide and returns one-time backup codes, shown on their own
+screen (`phase: 'backupCodes'`, mirrors web's `mfaSetupBackupCodes` step,
+index.html:9374) since they're never retrievable again after this →
+because `/mfa/confirm` doesn't take a `deviceId` (it enables TOTP for the
+account, not for a specific device — same as web, which always runs it
+from a device that's already past every gate), one more fresh code via
+`/mfa/verify-login` finishes clearing *this* device specifically.
+
+Net effect: this account now has TOTP as a second, mobile-usable factor
+alongside its passkey, and any future passkey-only account has a way out
+that doesn't require the web app's passkey flow to be working.
+
+Verified: `tsc --noEmit` clean.
