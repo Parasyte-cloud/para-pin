@@ -2169,6 +2169,24 @@ export class Registry {
       const user = await this.state.storage.get(`user:${pinHash}`);
       if (!user) return json({ error: 'not_registered' }, 401);
       if (!user.mfaEnabled) return json({ error: 'not_enabled' }, 400);
+      // This endpoint used to accept ANY deviceId here as long as the
+      // caller had the right PIN and a valid TOTP/backup code, with no
+      // check that deviceId was already in user.deviceIds. In the normal
+      // client flow that's harmless — /session's own gate (see the
+      // device_approval_required check above it) never even lets a client
+      // SEE mfa_required until its deviceId is already trusted, since that
+      // check runs first and returns early. But this endpoint doesn't have
+      // to be reached via /session; called directly, it let anyone who
+      // merely knows the PIN pre-clear MFA for an arbitrary, never-approved
+      // deviceId of their choosing, so that device would sail through MFA
+      // the moment it was later (or ever) added to user.deviceIds by any
+      // means, without the account owner entering a fresh code at that
+      // point. Requiring the device to already be trusted closes that
+      // without breaking anything: every legitimate mfa_required response
+      // already implies deviceId is in user.deviceIds by construction.
+      if (!Array.isArray(user.deviceIds) || !user.deviceIds.includes(deviceId)) {
+        return json({ error: 'device_not_trusted' }, 403);
+      }
       const rl = await checkRateLimit(this.state.storage, `mfa:${pinHash}`, {
         maxAttempts: 10, windowMs: 10 * 60 * 1000, lockoutMs: 15 * 60 * 1000,
       });
@@ -2308,6 +2326,13 @@ export class Registry {
       if (!user) return json({ error: 'not_registered' }, 401);
       const credentials = user.webauthnCredentials || [];
       if (!credentials.length) return json({ error: 'not_enabled' }, 400);
+      // Same trusted-device requirement as /mfa/verify-login just above,
+      // for the same reason — see its comment. A valid passkey assertion
+      // alone shouldn't be enough to mark an arbitrary, never-approved
+      // deviceId as MFA-cleared.
+      if (!Array.isArray(user.deviceIds) || !user.deviceIds.includes(deviceId)) {
+        return json({ error: 'device_not_trusted' }, 403);
+      }
       // Shares one rate-limit bucket with TOTP login verification (same
       // key), a brute-force budget against this account's second factor is
       // one budget regardless of which method is being tried.
