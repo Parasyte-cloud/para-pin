@@ -469,3 +469,71 @@ so a future session doesn't accidentally scope a Phase-5 change too
 broadly and gate chat itself. What mobile actually excludes is narrower
 and already listed above: HR, admin console, billing, and SSO/SAML
 settings — never the chats/calls themselves.
+
+## Critical sign-in fix + branding/lock-screen round
+
+**Sign-in was completely broken** (every PIN creation and unlock attempt
+returned `missing_pin_hash`, shown to the user as "Couldn't reach PArA.
+Check your connection and try again."). Root cause: `submitPin` and
+`unlockWithPin` (`src/state/session.ts`) sent the PIN hash only in the
+request body and set `skipAuth: true`. But `worker.js`'s `authHash()`
+(worker.js:830) never reads the body — it only reads the
+`X-Para-Pin-Hash` header or a `?pinHash=` query param, exactly like web's
+`initSession()` does. Every request from these two call sites was
+rejected before the body was even parsed. Fixed by sending the header
+explicitly (`headers: { 'X-Para-Pin-Hash': pinHash }`) and removing
+`skipAuth` from `src/api/client.ts` entirely — it no longer has a reason
+to exist now that every caller sets its own auth header when needed.
+
+A second bug compounded the first: `app/(auth)/pin.tsx` and
+`app/(auth)/lock.tsx` both hardcoded `authErrorMessage(result.error, 0)`,
+so any error status — including the real 401 above — displayed the same
+generic network-failure message instead of the real one. `submitPin`/
+`unlockWithPin` now return `status` on failure, and both screens pass
+`result.status` through instead of `0`.
+
+**App icon was stale and two Android adaptive-icon layers were flat-out
+broken**, not just outdated: `android-icon-background.png` was a leftover
+Figma alignment-guide grid, and `android-icon-monochrome.png` was an
+unrelated gray chevron — neither had anything to do with the PArA logo.
+All five icon assets under `assets/` (`icon.png`, `favicon.png`,
+`android-icon-foreground.png`, `android-icon-background.png`,
+`android-icon-monochrome.png`) were regenerated from `icon-192.png` at
+the repo root — the current, correct ringed-P badge — via Pillow
+(padded-canvas + Lanczos resize for the standard icons, a luminance-
+threshold silhouette for the Android 13+ monochrome variant, a solid
+`#050608` fill for the background layer). The two matching stale files at
+the web repo root, `icon-512.png` and `favicon.png`, were fixed the same
+way as a bonus, since they'd drifted the same way independently. Note:
+`assets/splash-icon.png` still has the old ring-less artwork at higher
+resolution — left as-is since it wasn't in scope for this round, but it's
+now the one visibly inconsistent asset left; worth a follow-up.
+
+App display name changed from "PArA PIN" to "PArA" in `app.json`. This is
+local-only — the App Store Connect listing name was set at app-creation
+time and needs updating separately in App Store Connect's own metadata if
+it should match.
+
+**PIN and lock screens were redesigned to mirror web's actual lock
+screen** (`index.html`'s `#lock`), which the mobile screens didn't
+resemble at all before this (plain black background, plain text
+"PArA PIN" header). Changes to `app/(auth)/pin.tsx` and
+`app/(auth)/lock.tsx`:
+- New shared `src/components/AuthBackdrop.tsx` — a static two-circle glow
+  (ice top-left, fire bottom-right, `opacity: 0.16`) approximating web's
+  animated `#bgfx` ambient background. Not animated: RN `Animated` looping
+  on two large blurred circles isn't worth the perf/battery cost for
+  motion that's barely perceptible at this scale on web either.
+- `assets/lock-logo.png` — the literal badge+wordmark artwork extracted
+  from web's embedded `#lockLogoImg` (640x502, transparent), not a
+  redrawn approximation, so both clients show the same image.
+- Persistent tagline copy matches web verbatim: "Your number is for
+  everyone. Your PArA PIN is for the ones that matter."
+
+Deliberately **not** carried over: web's "Reset local PIN" (clears a
+local-only vault PIN — a web-specific concept with no mobile equivalent)
+and "Sign in with email instead" (SSO/SAML, not implemented on mobile
+yet). Both are noted inline in the two screen files rather than silently
+dropped.
+
+Verified after all changes: `tsc --noEmit` clean.
