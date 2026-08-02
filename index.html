@@ -2011,8 +2011,8 @@
         <div class="hint" id="workspaceEmailDomainHint" style="margin-top:4px;">Anyone with a matching company email can request a sign-in link and join automatically, no invite needed. Leave blank to only let existing verified members' emails work.</div>
         <select id="workspaceCountrySelect" style="margin-top:10px; width:100%;"></select>
         <div class="hint" style="margin-top:4px;">Used to populate the public holidays calendar in People & HR.</div>
-        <div style="display:flex; gap:8px; margin-top:10px;">
-          <input type="text" id="workspaceCustomDomainInput" placeholder="Custom login domain, e.g. chat.yourcompany.com" style="flex:1;">
+        <div style="display:flex; align-items:center; gap:8px; margin-top:10px;">
+          <input type="text" id="workspaceCustomDomainInput" placeholder="Custom login domain, e.g. chat.yourcompany.com" autocomplete="off" style="flex:1;">
           <div class="btn" id="workspaceCustomDomainAddBtn" style="flex-shrink:0; white-space:nowrap;">Add</div>
         </div>
         <div class="hint" style="margin-top:4px;">Point each domain at PArA (add it as a Custom Domain on the Worker in your Cloudflare dashboard first), and the sign-in screen there shows this workspace's name and logo before anyone signs in. The domain-hosting step itself has to be done in Cloudflare, not here. You can add more than one.</div>
