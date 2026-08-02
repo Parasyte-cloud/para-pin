@@ -32,6 +32,7 @@ export function useChatSocket(chat: ChatSummary | null, handlers: ChatSocketHand
   const mergeMessages = useMessagesStore((s) => s.mergeMessages);
   const applyDelete = useMessagesStore((s) => s.applyDelete);
   const applyEdit = useMessagesStore((s) => s.applyEdit);
+  const applyReaction = useMessagesStore((s) => s.applyReaction);
 
   const chatId = chat?.id ?? null;
 
@@ -102,7 +103,16 @@ export function useChatSocket(chat: ChatSummary | null, handlers: ChatSocketHand
             applyDelete(activeChatId, data.messageId);
             return;
           case 'edit':
+            // No knownText here (this client didn't type the edit), so
+            // applyEdit marks the message pending re-decrypt — without
+            // this onMessage() call nothing would ever actually decrypt
+            // it; the message would sit blank until some unrelated event
+            // happened to trigger decryptChat again.
             applyEdit(activeChatId, data.messageId, data.ciphertext, data.iv);
+            handlersRef.current.onMessage?.();
+            return;
+          case 'reaction':
+            applyReaction(activeChatId, data.messageId, data.reactions || {});
             return;
           default:
             return;

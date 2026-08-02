@@ -88,6 +88,10 @@ export interface ChatMessage {
   edited?: boolean;
   type?: 'system' | 'message';
   system?: boolean;
+  // emoji -> userIds who reacted with it (worker.js's ChatRoom /react
+  // handler — one reaction per user per message, toggled). Plaintext,
+  // never E2EE'd, same as the web app.
+  reactions?: Record<string, string[]>;
   // Client-only:
   text?: string;
   _e2eeDone?: boolean;

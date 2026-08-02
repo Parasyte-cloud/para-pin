@@ -105,7 +105,8 @@ interface MessagesState {
   mergeMessages: (chatId: string, incoming: ChatMessage[]) => void;
   decryptChat: (chat: ChatSummary) => Promise<boolean>; // returns true if anything is still pending decryption
   applyDelete: (chatId: string, messageId: string) => void;
-  applyEdit: (chatId: string, messageId: string, ciphertext: string, iv: string) => void;
+  applyEdit: (chatId: string, messageId: string, ciphertext: string, iv: string, knownText?: string) => void;
+  applyReaction: (chatId: string, messageId: string, reactions: Record<string, string[]>) => void;
   addOptimistic: (chatId: string, message: ChatMessage) => void;
   removeOptimistic: (chatId: string, tempId: string) => void;
 }
@@ -211,13 +212,33 @@ export const useMessagesStore = create<MessagesState>((set, get) => ({
     });
   },
 
-  applyEdit: (chatId, messageId, ciphertext, iv) => {
+  applyEdit: (chatId, messageId, ciphertext, iv, knownText) => {
     set((state) => {
       const msgs = state.byChat[chatId];
       if (!msgs) return state;
+      // Local edit (I typed it — knownText passed): apply the plaintext
+      // immediately, no need to round-trip through decryptChat. Remote
+      // edit arriving over the socket (no knownText): this client doesn't
+      // know the plaintext, so mark it pending — the caller is responsible
+      // for triggering a decryptChat pass right after (see
+      // useChatSocket.ts's 'edit' case), otherwise it would sit
+      // undecrypted until the next unrelated re-render.
       const next = msgs.map((m) =>
-        m.id === messageId ? { ...m, ciphertext, iv, edited: true, _e2eeDone: false, text: undefined } : m
+        m.id === messageId
+          ? knownText !== undefined
+            ? { ...m, ciphertext, iv, edited: true, _e2eeDone: true, text: knownText }
+            : { ...m, ciphertext, iv, edited: true, _e2eeDone: false, text: undefined }
+          : m
       );
+      return { byChat: { ...state.byChat, [chatId]: next } };
+    });
+  },
+
+  applyReaction: (chatId, messageId, reactions) => {
+    set((state) => {
+      const msgs = state.byChat[chatId];
+      if (!msgs) return state;
+      const next = msgs.map((m) => (m.id === messageId ? { ...m, reactions } : m));
       return { byChat: { ...state.byChat, [chatId]: next } };
     });
   },

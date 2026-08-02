@@ -409,8 +409,24 @@ export const useCallStore = create<CallStoreState>((set, get) => {
         return;
       }
       if (signal.kind === 'ice-candidate') {
-        if (rtcPeerConn && signal.candidate) {
-          if (rtcPeerConn.remoteDescription) {
+        // BUG FIXED HERE (this was silently dropping candidates, the
+        // likely #1 cause of "calls sometimes just don't connect"): the
+        // caller starts trickling ICE candidates the instant its offer is
+        // sent, but the callee doesn't create `rtcPeerConn` until
+        // acceptCall() runs — and a human tapping "Accept" always takes
+        // at least a second or two. Every candidate that arrives during
+        // that ringing window used to be thrown away outright instead of
+        // queued, because the old check was `if (rtcPeerConn && ...)`.
+        // A call could still connect if the few candidates that happened
+        // to arrive AFTER accept were enough, which is exactly what
+        // "inconsistent, works sometimes" looks like. Now every candidate
+        // is queued whenever there's no peer connection yet OR the remote
+        // description isn't set yet, and flushPendingIceCandidates() (see
+        // acceptCall/the 'answer' handler) drains the queue once it's
+        // actually possible to add them. Applies identically to audio and
+        // video calls — this was never track-type-specific.
+        if (signal.candidate) {
+          if (rtcPeerConn && rtcPeerConn.remoteDescription) {
             rtcPeerConn.addIceCandidate(new RTCIceCandidate(signal.candidate as any)).catch(() => {});
           } else {
             pendingIceCandidates.push(signal.candidate);

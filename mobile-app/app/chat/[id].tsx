@@ -1,19 +1,30 @@
+// iMessage-style chat detail screen: grouped/tailed bubbles, date
+// separators, tapback reactions, reply/edit/delete, swipe-to-reply, and
+// (DM-only) delivered/read receipts — see src/components/MessageBubble.tsx
+// and MessageActionSheet.tsx for the two extracted pieces this composes.
+//
+// Deliberately NOT included here: sending new photo/voice attachments.
+// Receiving/decrypting them (from the web app) works — see
+// MessageAttachments.tsx — but authoring one from mobile needs a photo
+// picker + raw-byte upload path (worker.js's POST /api/upload) that hasn't
+// been built or verified yet, and this session had no way to test an
+// actual binary upload from a real device. Flagged in the README rather
+// than shipping a "+" button that doesn't do anything.
+
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
-  Image,
   FlatList,
   TextInput,
   Pressable,
   StyleSheet,
   KeyboardAvoidingView,
   Platform,
-  ActivityIndicator,
 } from 'react-native';
 import { useLocalSearchParams, Stack, router } from 'expo-router';
-import * as Sharing from 'expo-sharing';
-import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
+import * as Clipboard from 'expo-clipboard';
+import { BlurView } from 'expo-blur';
 import { useTheme } from '../../src/hooks/useTheme';
 import { useSessionStore } from '../../src/state/session';
 import { useMessagesStore } from '../../src/state/messages';
@@ -23,109 +34,33 @@ import { encryptString } from '../../src/crypto/e2ee';
 import { resolveNames } from '../../src/state/names';
 import { apiFetch } from '../../src/api/client';
 import { useCallStore } from '../../src/state/call';
-import type { ChatMessage, MessageAttachment } from '../../src/types';
+import { colorFromString } from '../../src/utils/avatar';
+import MessageBubble, { formatTime } from '../../src/components/MessageBubble';
+import MessageActionSheet from '../../src/components/MessageActionSheet';
+import type { ChatMessage } from '../../src/types';
 
 const DECRYPT_RETRY_MS = 5000;
+const GROUP_GAP_MS = 60 * 1000; // same-sender messages within this window render as one visual group
+const DATE_SEPARATOR_GAP_MS = 3 * 60 * 60 * 1000; // 3h gap (or a new day) gets its own separator
 
-function formatBytes(size?: number): string {
-  if (!size || size <= 0) return '';
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(0)} KB`;
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+function isGroupable(a: ChatMessage, b: ChatMessage | undefined): boolean {
+  if (!b) return false;
+  if (a.type === 'system' || b.type === 'system' || a.system || b.system) return false;
+  return a.fromUserId === b.fromUserId && Math.abs(a.ts - b.ts) < GROUP_GAP_MS;
 }
 
-function formatDuration(sec: number): string {
-  if (!isFinite(sec) || sec <= 0) return '0:00';
-  const m = Math.floor(sec / 60);
-  const s = Math.floor(sec % 60);
-  return `${m}:${String(s).padStart(2, '0')}`;
-}
-
-// Image attachments once decrypted — a local file:// URI is enough for RN's
-// Image component, no separate download step needed (unlike a file/voice
-// row, which has to be tapped to be useful).
-function ImageAttachment({ attachment, mine, theme }: { attachment: MessageAttachment; mine: boolean; theme: any }) {
-  if (attachment._decryptedUri) {
-    return (
-      <Pressable onPress={() => Sharing.shareAsync(attachment._decryptedUri!).catch(() => {})}>
-        <Image source={{ uri: attachment._decryptedUri }} style={styles.attachmentImage} resizeMode="cover" />
-      </Pressable>
-    );
-  }
-  return (
-    <View style={[styles.attachmentPlaceholder, { backgroundColor: mine ? 'rgba(10,13,18,0.15)' : theme.glass }]}>
-      {attachment._decryptedUri === null ? (
-        <Text style={{ fontSize: 11, color: mine ? '#0a0d12' : theme.textLow }}>Couldn't load image</Text>
-      ) : (
-        <ActivityIndicator color={mine ? '#0a0d12' : theme.ice} size="small" />
-      )}
-    </View>
-  );
-}
-
-// Voice notes: a play/pause button plus elapsed/duration, using
-// expo-audio's player hooks. Source is only handed to the hook once bytes
-// are actually decrypted; before that this just shows a loading dot,
-// matching the same _decryptedUri/_decrypting states as file/image rows.
-function AudioAttachment({ attachment, mine, theme }: { attachment: MessageAttachment; mine: boolean; theme: any }) {
-  const player = useAudioPlayer(attachment._decryptedUri ? { uri: attachment._decryptedUri } : undefined);
-  const status = useAudioPlayerStatus(player);
-
-  if (!attachment._decryptedUri) {
-    return (
-      <View style={[styles.attachmentRow, { backgroundColor: mine ? 'rgba(10,13,18,0.1)' : theme.glass }]}>
-        {attachment._decryptedUri === null ? (
-          <Text style={{ fontSize: 12, color: mine ? '#0a0d12' : theme.textLow }}>Couldn't load voice note</Text>
-        ) : (
-          <ActivityIndicator color={mine ? '#0a0d12' : theme.ice} size="small" />
-        )}
-      </View>
-    );
-  }
-
-  const elapsed = status.playing ? status.currentTime : 0;
-  const duration = status.duration || attachment.duration || 0;
-
-  return (
-    <Pressable
-      onPress={() => (status.playing ? player.pause() : player.play())}
-      style={[styles.attachmentRow, { backgroundColor: mine ? 'rgba(10,13,18,0.1)' : theme.glass }]}
-    >
-      <Text style={{ fontSize: 18 }}>{status.playing ? '⏸' : '▶️'}</Text>
-      <Text style={{ fontSize: 12.5, color: mine ? '#0a0d12' : theme.textHi }}>
-        {formatDuration(elapsed)} / {formatDuration(duration)}
-      </Text>
-    </Pressable>
-  );
-}
-
-function FileAttachment({ attachment, mine, theme }: { attachment: MessageAttachment; mine: boolean; theme: any }) {
-  const canOpen = !!attachment._decryptedUri;
-  return (
-    <Pressable
-      disabled={!canOpen}
-      onPress={() => canOpen && Sharing.shareAsync(attachment._decryptedUri!).catch(() => {})}
-      style={[styles.attachmentRow, { backgroundColor: mine ? 'rgba(10,13,18,0.1)' : theme.glass, opacity: canOpen ? 1 : 0.7 }]}
-    >
-      <Text style={{ fontSize: 18 }}>📎</Text>
-      <View style={{ flex: 1, minWidth: 0 }}>
-        <Text numberOfLines={1} style={{ fontSize: 12.5, color: mine ? '#0a0d12' : theme.textHi }}>
-          {attachment.name || 'Attachment'}
-        </Text>
-        <Text style={{ fontSize: 10.5, color: mine ? 'rgba(10,13,18,0.6)' : theme.textLow }}>
-          {attachment._decryptedUri === null ? "Couldn't decrypt" : attachment._decrypting ? 'Decrypting…' : formatBytes(attachment.size)}
-        </Text>
-      </View>
-      {attachment._decrypting && <ActivityIndicator color={mine ? '#0a0d12' : theme.ice} size="small" />}
-    </Pressable>
-  );
-}
-
-function AttachmentView({ attachment, mine, theme }: { attachment: MessageAttachment; mine: boolean; theme: any }) {
-  const mime = attachment.mime || '';
-  if (mime.startsWith('image/')) return <ImageAttachment attachment={attachment} mine={mine} theme={theme} />;
-  if (mime.startsWith('audio/')) return <AudioAttachment attachment={attachment} mine={mine} theme={theme} />;
-  return <FileAttachment attachment={attachment} mine={mine} theme={theme} />;
+function dateSeparatorLabel(ts: number, prevTs: number | null): string | null {
+  const d = new Date(ts);
+  if (prevTs === null) return d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
+  const gap = ts - prevTs;
+  const sameDay = d.toDateString() === new Date(prevTs).toDateString();
+  if (sameDay && gap < DATE_SEPARATOR_GAP_MS) return null;
+  const now = new Date();
+  if (sameDay === false && d.toDateString() === now.toDateString()) return `Today ${formatTime(ts)}`;
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) return `Yesterday ${formatTime(ts)}`;
+  return `${d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })} ${formatTime(ts)}`;
 }
 
 export default function ChatDetailScreen() {
@@ -139,14 +74,22 @@ export default function ChatDetailScreen() {
   const addOptimistic = useMessagesStore((s) => s.addOptimistic);
   const removeOptimistic = useMessagesStore((s) => s.removeOptimistic);
   const mergeMessages = useMessagesStore((s) => s.mergeMessages);
+  const applyDelete = useMessagesStore((s) => s.applyDelete);
+  const applyEdit = useMessagesStore((s) => s.applyEdit);
+  const applyReaction = useMessagesStore((s) => s.applyReaction);
 
   const [names, setNames] = useState<Record<string, string>>({});
   const [typingLabel, setTypingLabel] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [keyReady, setKeyReady] = useState(false);
+  const [actionSheetFor, setActionSheetFor] = useState<string | null>(null);
+  const [replyTarget, setReplyTarget] = useState<{ id: string; fromName: string; text: string } | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [otherReadTs, setOtherReadTs] = useState(0);
   const typingClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const listRef = useRef<FlatList<ChatMessage>>(null);
 
   const chatTitle = chat?.name || (chat?.type === 'dm' ? 'Direct message' : 'Group');
   const dmPeerId = chat?.type === 'dm' ? chat.memberIds?.find((mid) => mid !== myUserId) || null : null;
@@ -170,16 +113,13 @@ export default function ChatDetailScreen() {
       typingClearTimer.current = setTimeout(() => setTypingLabel(null), 3000);
     },
     onMessage: () => {
-      // New live message landed — nudge decrypt in case it needed a key
-      // that's since become available (see e2ee.ts's 5s cooldown).
       if (chat) decryptChat(chat);
+    },
+    onReadReceipt: (userId, upToTs) => {
+      if (dmPeerId && userId === dmPeerId) setOtherReadTs((prev) => Math.max(prev, upToTs));
     },
   });
 
-  // Initial load: history, member names (for group sender labels), mark
-  // read, and kick off decryption (with a retry loop matching
-  // index.html's startE2eeRetryPolling — chat-key establishment can
-  // legitimately take a beat, e.g. waiting on a device-key round trip).
   useEffect(() => {
     if (!chat) return;
     let cancelled = false;
@@ -204,6 +144,22 @@ export default function ChatDetailScreen() {
           }
         }, DECRYPT_RETRY_MS);
       }
+      if (chat.type === 'dm' && chat.memberIds?.length) {
+        // Server computes the member-id list itself from the verified chat
+        // record (see worker.js's /api/chats/:id/read-state route) — no
+        // query params needed here, it can't be spoofed to read another
+        // chat's state anyway.
+        const readRes = await apiFetch<{ reads?: Record<string, number> }>(`/chats/${chat.id}/read-state`);
+        const otherId = chat.memberIds.find((mid) => mid !== myUserId);
+        if (readRes.ok && otherId && readRes.body.reads?.[otherId]) {
+          // Functional max-merge, not a plain set — the live WS
+          // 'read_receipt' handler (below) can resolve before this fetch
+          // does, and a plain set here would clobber that newer value back
+          // to a stale cached one.
+          const fetchedTs = readRes.body.reads[otherId];
+          if (!cancelled) setOtherReadTs((prev) => Math.max(prev, fetchedTs));
+        }
+      }
       apiFetch(`/chats/${chat.id}/read`, {
         method: 'POST',
         body: JSON.stringify({ upToTs: Date.now(), silent: false }),
@@ -222,36 +178,61 @@ export default function ChatDetailScreen() {
     const text = input.trim();
     if (!text || !chat || sending) return;
     setSending(true);
-    setInput('');
     const key = await ensureChatKey(chat);
     if (!key) {
       setSending(false);
-      setInput(text);
       return;
     }
     const enc = encryptString(key, text);
+
+    if (editingId) {
+      const res = await apiFetch<{ message?: ChatMessage }>(`/chats/${chat.id}/messages/${editingId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ ciphertext: enc.ciphertext, iv: enc.iv }),
+      });
+      setSending(false);
+      if (res.ok) {
+        // Pass the plaintext we already have (knownText) so the bubble
+        // updates immediately instead of showing "Waiting for
+        // encryption…" until the next unrelated decrypt pass.
+        applyEdit(chat.id, editingId, enc.ciphertext, enc.iv, text);
+        setInput('');
+        setEditingId(null);
+      }
+      return;
+    }
+
+    setInput('');
+    const replyPayload = replyTarget ? { id: replyTarget.id, fromName: replyTarget.fromName, text: replyTarget.text } : undefined;
     const tempId = `pending-${Date.now()}`;
     const optimistic: ChatMessage = {
       id: tempId,
       fromUserId: myUserId || '',
       ts: Date.now(),
       text,
+      replyTo: replyPayload || null,
       _e2eeDone: true,
       _pending: true,
     };
     addOptimistic(chat.id, optimistic);
+    setReplyTarget(null);
     const res = await apiFetch<{ message?: ChatMessage }>(`/chats/${chat.id}/messages`, {
       method: 'POST',
-      body: JSON.stringify({ ciphertext: enc.ciphertext, iv: enc.iv, alg: chat.type === 'group' ? 'group' : 'dm' }),
+      body: JSON.stringify({
+        ciphertext: enc.ciphertext,
+        iv: enc.iv,
+        alg: chat.type === 'group' ? 'group' : 'dm',
+        replyTo: replyPayload,
+      }),
     });
     setSending(false);
     removeOptimistic(chat.id, tempId);
     if (res.ok && res.body.message) {
       mergeMessages(chat.id, [{ ...res.body.message, text, _e2eeDone: true }]);
     } else {
-      setInput(text); // don't lose what they typed
+      setInput(text);
     }
-  }, [input, chat, sending, myUserId, addOptimistic, removeOptimistic, mergeMessages]);
+  }, [input, chat, sending, myUserId, editingId, replyTarget, addOptimistic, removeOptimistic, mergeMessages, applyEdit]);
 
   const onChangeText = useCallback(
     (v: string) => {
@@ -263,41 +244,123 @@ export default function ChatDetailScreen() {
 
   const listData = useMemo(() => [...messages].reverse(), [messages]);
 
+  const mostRecentOwnId = useMemo(() => {
+    const found = listData.find((m) => m.fromUserId === myUserId && !m.deleted && m.type !== 'system');
+    return found?.id ?? null;
+  }, [listData, myUserId]);
+
+  const actionSheetMessage = useMemo(() => listData.find((m) => m.id === actionSheetFor) ?? null, [listData, actionSheetFor]);
+  const myReactionOnActionSheet = useMemo(() => {
+    if (!actionSheetMessage?.reactions || !myUserId) return null;
+    for (const [emoji, ids] of Object.entries(actionSheetMessage.reactions)) {
+      if (ids.includes(myUserId)) return emoji;
+    }
+    return null;
+  }, [actionSheetMessage, myUserId]);
+
+  const sendReaction = useCallback(
+    async (emoji: string) => {
+      if (!chat || !actionSheetFor) return;
+      setActionSheetFor(null);
+      const res = await apiFetch<{ reactions?: Record<string, string[]> }>(`/chats/${chat.id}/messages/${actionSheetFor}/react`, {
+        method: 'POST',
+        body: JSON.stringify({ emoji }),
+      });
+      if (res.ok && res.body.reactions) applyReaction(chat.id, actionSheetFor, res.body.reactions);
+    },
+    [chat, actionSheetFor, applyReaction]
+  );
+
+  const deleteMessage = useCallback(async () => {
+    if (!chat || !actionSheetFor) return;
+    const targetId = actionSheetFor;
+    const original = listData.find((m) => m.id === targetId) || null;
+    setActionSheetFor(null);
+    applyDelete(chat.id, targetId);
+    const res = await apiFetch(`/chats/${chat.id}/messages/${targetId}`, { method: 'DELETE' }).catch(() => null);
+    // Roll back the optimistic delete if the server never actually deleted
+    // it — otherwise a dropped request left the bubble permanently showing
+    // "Message deleted" while the server still has the real content.
+    if ((!res || !res.ok) && original) mergeMessages(chat.id, [original]);
+  }, [chat, actionSheetFor, applyDelete, listData, mergeMessages]);
+
+  const startEdit = useCallback(() => {
+    if (!actionSheetMessage) return;
+    setEditingId(actionSheetMessage.id);
+    setInput(actionSheetMessage.text || '');
+    setReplyTarget(null);
+    setActionSheetFor(null);
+  }, [actionSheetMessage]);
+
+  const startReplyFromSheet = useCallback(() => {
+    if (!actionSheetMessage) return;
+    setReplyTarget({
+      id: actionSheetMessage.id,
+      fromName: actionSheetMessage.fromUserId === myUserId ? 'You' : names[actionSheetMessage.fromUserId] || 'Message',
+      text: actionSheetMessage.deleted ? 'Message deleted' : actionSheetMessage.text || (actionSheetMessage.attachment ? 'Attachment' : ''),
+    });
+    setEditingId(null);
+    setActionSheetFor(null);
+  }, [actionSheetMessage, myUserId, names]);
+
+  const copyFromSheet = useCallback(async () => {
+    if (actionSheetMessage?.text) await Clipboard.setStringAsync(actionSheetMessage.text);
+    setActionSheetFor(null);
+  }, [actionSheetMessage]);
+
   const renderItem = useCallback(
     ({ item, index }: { item: ChatMessage; index: number }) => {
       const mine = item.fromUserId === myUserId;
-      const prev = listData[index + 1]; // one earlier in time, since list is reversed
-      const showSender = chat?.type === 'group' && !mine && prev?.fromUserId !== item.fromUserId;
-      const bodyText = item.deleted ? 'Message deleted' : item.text || '…';
+      const prev = listData[index + 1]; // older
+      const next = listData[index - 1]; // newer
+      const isFirstInGroup = !isGroupable(item, prev);
+      const isLastInGroup = !isGroupable(item, next);
+      const showSenderName = chat?.type === 'group' && !mine && isFirstInGroup && item.type !== 'system';
+      const separator = item.type === 'system' ? null : dateSeparatorLabel(item.ts, prev ? prev.ts : null);
+
+      const receiptLabel =
+        chat?.type === 'dm' && mine && item.id === mostRecentOwnId
+          ? item._pending
+            ? null
+            : otherReadTs >= item.ts
+              ? `Read ${formatTime(otherReadTs)}`
+              : 'Delivered'
+          : null;
+
       return (
-        <View style={[styles.bubbleRow, mine ? styles.bubbleRowMine : styles.bubbleRowTheirs]}>
-          <View
-            style={[
-              styles.bubble,
-              {
-                backgroundColor: mine ? theme.ice : theme.glass,
-                borderColor: mine ? 'transparent' : theme.glassBrd,
-              },
-            ]}
-          >
-            {showSender && (
-              <Text style={[styles.senderLabel, { color: theme.textLow }]}>{names[item.fromUserId] || ''}</Text>
-            )}
-            {item.attachment && !item.deleted && (
-              <View style={styles.attachmentWrap}>
-                <AttachmentView attachment={item.attachment} mine={mine} theme={theme} />
-              </View>
-            )}
-            {(!item.attachment || item.text || item.deleted) && (
-              <Text style={{ color: mine ? '#0a0d12' : theme.textHi, fontSize: 14.5, lineHeight: 20 }}>
-                {item.deleted ? <Text style={{ fontStyle: 'italic', opacity: 0.7 }}>{bodyText}</Text> : bodyText}
-              </Text>
-            )}
-          </View>
+        <View>
+          {separator && (
+            <Text style={[styles.dateSeparator, { color: theme.textLow }]}>{separator}</Text>
+          )}
+          <MessageBubble
+            item={item}
+            mine={mine}
+            myUserId={myUserId}
+            theme={theme}
+            showSenderName={showSenderName}
+            senderName={names[item.fromUserId]}
+            senderColor={colorFromString(item.fromUserId, theme.ice, theme.fire)}
+            isFirstInGroup={isFirstInGroup}
+            isLastInGroup={isLastInGroup}
+            readReceiptLabel={receiptLabel}
+            onLongPress={() => setActionSheetFor(item.id)}
+            onSwipeReply={() => {
+              // Clear any in-progress edit — otherwise editingId stays set
+              // after this reply is sent (onSend's editingId branch runs
+              // first and returns early), and the *next* message send
+              // would silently attach this stale reply target.
+              setEditingId(null);
+              setReplyTarget({
+                id: item.id,
+                fromName: mine ? 'You' : names[item.fromUserId] || 'Message',
+                text: item.deleted ? 'Message deleted' : item.text || (item.attachment ? 'Attachment' : ''),
+              });
+            }}
+          />
         </View>
       );
     },
-    [myUserId, listData, chat?.type, names, theme]
+    [myUserId, listData, chat?.type, names, theme, mostRecentOwnId, otherReadTs]
   );
 
   if (!chat) {
@@ -339,6 +402,7 @@ export default function ChatDetailScreen() {
       )}
 
       <FlatList
+        ref={listRef}
         data={listData}
         keyExtractor={(m) => m.id}
         renderItem={renderItem}
@@ -351,17 +415,50 @@ export default function ChatDetailScreen() {
         }
       />
 
-      {typingLabel && (
-        <Text style={[styles.typing, { color: theme.textLow }]}>{typingLabel} is typing…</Text>
+      {typingLabel && <Text style={[styles.typing, { color: theme.textLow }]}>{typingLabel} is typing…</Text>}
+
+      {(replyTarget || editingId) && (
+        <BlurView
+          intensity={45}
+          tint={theme.scheme === 'dark' ? 'dark' : 'light'}
+          style={[styles.composerContext, { borderColor: theme.glassBrdHi }]}
+        >
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={{ fontSize: 11.5, fontWeight: '600', color: theme.ice }}>
+              {editingId ? 'Editing message' : `Replying to ${replyTarget?.fromName}`}
+            </Text>
+            {replyTarget && (
+              <Text numberOfLines={1} style={{ fontSize: 12, color: theme.textLow }}>
+                {replyTarget.text}
+              </Text>
+            )}
+          </View>
+          <Pressable
+            onPress={() => {
+              setReplyTarget(null);
+              if (editingId) {
+                setEditingId(null);
+                setInput('');
+              }
+            }}
+            hitSlop={10}
+          >
+            <Text style={{ fontSize: 16, color: theme.textLow }}>✕</Text>
+          </Pressable>
+        </BlurView>
       )}
 
-      <View style={[styles.composerRow, { borderColor: theme.glassBrd, backgroundColor: theme.bg1 }]}>
+      {/* Liquid-glass pill composer bar — a real BlurView (not just a
+          tinted rgba fill) so messages scrolling behind it actually
+          show through frosted, matching the web app's own
+          backdrop-filter:blur() glass panels (index.html's .glass rules). */}
+      <BlurView intensity={50} tint={theme.scheme === 'dark' ? 'dark' : 'light'} style={[styles.composerRow, { borderColor: theme.glassBrdHi }]}>
         <TextInput
           value={input}
           onChangeText={onChangeText}
           placeholder="Message"
           placeholderTextColor={theme.textLow}
-          style={[styles.input, { color: theme.textHi, backgroundColor: theme.glass, borderColor: theme.glassBrd }]}
+          style={[styles.input, { color: theme.textHi, backgroundColor: theme.glass, borderColor: theme.glassBrdHi }]}
           multiline
           editable={!sending}
         />
@@ -370,41 +467,60 @@ export default function ChatDetailScreen() {
           disabled={!input.trim() || sending}
           style={({ pressed }) => [
             styles.sendBtn,
-            { backgroundColor: theme.ice, opacity: !input.trim() || sending ? 0.4 : pressed ? 0.7 : 1 },
+            { backgroundColor: theme.ice, opacity: !input.trim() || sending ? 0.35 : pressed ? 0.7 : 1 },
           ]}
         >
-          <Text style={{ color: '#0a0d12', fontWeight: '700', fontSize: 13 }}>Send</Text>
+          <Text style={{ color: '#0a0d12', fontWeight: '700', fontSize: 16 }}>{editingId ? '✓' : '↑'}</Text>
         </Pressable>
-      </View>
+      </BlurView>
+
+      <MessageActionSheet
+        visible={!!actionSheetFor}
+        theme={theme}
+        canCopy={!!actionSheetMessage?.text && !actionSheetMessage.deleted}
+        canEdit={!!actionSheetMessage && actionSheetMessage.fromUserId === myUserId && !actionSheetMessage.attachment && !actionSheetMessage.deleted}
+        canDelete={!!actionSheetMessage && actionSheetMessage.fromUserId === myUserId && !actionSheetMessage.deleted}
+        myReaction={myReactionOnActionSheet}
+        onReact={sendReaction}
+        onReply={startReplyFromSheet}
+        onCopy={copyFromSheet}
+        onEdit={startEdit}
+        onDelete={deleteMessage}
+        onClose={() => setActionSheetFor(null)}
+      />
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  listContent: { padding: 12, flexGrow: 1, justifyContent: 'flex-end' },
+  listContent: { paddingHorizontal: 10, paddingVertical: 12, flexGrow: 1, justifyContent: 'flex-end' },
   empty: { transform: [{ scaleY: -1 }], alignItems: 'center', padding: 24 },
   keyBanner: { padding: 8, borderBottomWidth: 1, alignItems: 'center' },
-  bubbleRow: { marginVertical: 3, flexDirection: 'row' },
-  bubbleRowMine: { justifyContent: 'flex-end' },
-  bubbleRowTheirs: { justifyContent: 'flex-start' },
-  bubble: { maxWidth: '78%', borderRadius: 16, borderWidth: 1, paddingHorizontal: 13, paddingVertical: 9 },
-  senderLabel: { fontSize: 11, fontWeight: '600', marginBottom: 2 },
-  typing: { fontSize: 11.5, paddingHorizontal: 14, paddingBottom: 2 },
-  composerRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, padding: 10, borderTopWidth: 1 },
+  dateSeparator: { textAlign: 'center', fontSize: 11.5, fontWeight: '600', marginVertical: 10 },
+  typing: { fontSize: 11.5, paddingHorizontal: 16, paddingBottom: 2 },
+  composerContext: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginHorizontal: 10,
+    marginBottom: 6,
+    padding: 10,
+    borderRadius: 18,
+    borderWidth: 1,
+    overflow: 'hidden',
+  },
+  composerRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, padding: 10, borderTopWidth: 1, overflow: 'hidden' },
   input: {
     flex: 1,
     borderWidth: 1,
-    borderRadius: 16,
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-    fontSize: 14,
+    borderRadius: 22,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    fontSize: 15,
     maxHeight: 120,
+    minHeight: 40,
   },
-  sendBtn: { borderRadius: 999, paddingHorizontal: 16, paddingVertical: 11 },
+  sendBtn: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center' },
   headerCallBtns: { flexDirection: 'row', gap: 16, paddingRight: 4 },
-  attachmentWrap: { marginBottom: 4 },
-  attachmentImage: { width: 200, height: 200, borderRadius: 12 },
-  attachmentPlaceholder: { width: 200, height: 120, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  attachmentRow: { flexDirection: 'row', alignItems: 'center', gap: 8, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 8, minWidth: 160 },
 });

@@ -210,10 +210,10 @@ ever. This is a data-availability limitation of the frozen-legacy-key
 design itself (see index.html:10328-10332), not something more mobile
 code can close.
 
-**Other Phase 2 scope cuts still standing:**
-- Sending edits/reactions/replies/deleting from mobile isn't built —
-  receiving those live updates is (the WS handler applies them), sending
-  them isn't yet.
+**Other Phase 2 scope cuts — now closed.** Sending edits/reactions/
+replies/deletes from mobile is built (see the iMessage-redesign section
+below) — this used to only receive those live updates, now it sends them
+too, same `PATCH`/`DELETE`/`POST .../react` endpoints web already used.
 
 **Phase 4 — Push notifications — done**
 - `worker.js`: `sendApnsPush`/`sendFcmPush` alongside the existing Web Push
@@ -246,6 +246,62 @@ code can close.
 - Requires the same custom dev client Phase 3 already introduced —
   `expo-notifications` isn't part of Expo Go's module set either.
 
+**iMessage/FaceTime redesign + call-reliability fix — done**
+- **Real bug fixed: ICE candidates arriving before the callee tapped
+  Accept were silently dropped.** In `src/state/call.ts`'s
+  `handleCallSignal`, the `ice-candidate` case only ever queued a
+  candidate if `rtcPeerConn` already existed — but the callee doesn't
+  create `rtcPeerConn` until `acceptCall()` runs, and a human always takes
+  at least a second or two to tap Accept. Every candidate the caller
+  trickled out during that window was thrown away outright instead of
+  queued, which is exactly what "calls sometimes just don't connect,
+  inconsistently" looks like. Now everything is queued whenever there's no
+  peer connection yet OR no remote description yet, same as the existing
+  (already-correct) caller-side handling, and drained by the existing
+  `flushPendingIceCandidates()` calls right after each side sets its
+  remote description. **This bug exists in `index.html` too** (identical
+  code, `index.html:6851-6856`) — not touched this round since the
+  redesign was scoped to mobile only, but worth fixing there too; ask if
+  you want that done.
+- Also fixed: mute/camera controls were gated to `callState === 'connected'`
+  only, so you couldn't pre-mute before the other side picked up — real
+  local audio/video tracks exist well before that. Now active for
+  `ringing-out` too, matching FaceTime and matching how video's camera
+  toggle already behaved (that half wasn't gated, mute was — the
+  asymmetry itself was inconsistent, not audio vs. video specifically).
+- **Not fixed, flagged instead:** there's no explicit speaker/earpiece
+  toggle, and `react-native-webrtc`'s JS API doesn't expose one — real
+  apps solve this with a separate native module
+  (`react-native-incall-manager` or similar). Adding a new native
+  dependency without being able to test it on a real device felt like the
+  wrong tradeoff for this session; if audio calls default to the earpiece
+  (quiet, screen-off-able) while video calls default to the speaker,
+  that's a plausible remaining source of "inconsistent" audio behavior
+  worth revisiting with that library.
+- `app/chat/[id].tsx` + new `src/components/MessageBubble.tsx`,
+  `MessageActionSheet.tsx`: tailed/grouped bubbles (tail only on the last
+  bubble of a consecutive run, tight spacing within a group), date/time
+  separators, long-press → quick-reaction row (same six emoji as web's
+  `QUICK_REACTIONS`) + Reply/Copy/Edit/Delete, swipe-right-to-reply
+  (`PanResponder`, no reanimated dependency), and — DMs only — a
+  "Delivered"/"Read HH:MM" line under your most recent message, backed by
+  `GET /api/chats/:id/read-state` plus the existing `read_receipt` socket
+  event. Compose bar redesigned to a growing pill with a circular send
+  arrow (checkmark while editing).
+- `src/components/CallOverlay.tsx`: full-bleed remote video (or a soft
+  two-tone glow backdrop for audio-only/pre-connect, instead of flat
+  black), a draggable corner-snapping local self-view (`PanResponder` +
+  `Animated`, FaceTime's PiP behavior), and a translucent bottom control
+  bar with per-control labels.
+- **Deliberately not built: sending new photo/voice attachments from
+  mobile.** Receiving/decrypting them works (see Attachments above).
+  Authoring one needs a photo/voice picker (new native permission,
+  `expo-image-picker` isn't installed) plus a raw-byte upload to `POST
+  /api/upload` (confirmed exact contract in `index.html`, but never
+  exercised from React Native in this sandbox — no way to verify an actual
+  binary upload without a real device). Rather than ship an unverified "+"
+  button, the composer just doesn't have one yet.
+
 **Phase 5 (HR, admin console, billing, SSO/SAML settings, workspace custom
 domains) is intentionally excluded from mobile, not just "not yet built."**
 Mobile is the free product; Workspace/billing/admin surfaces are the paid,
@@ -264,3 +320,89 @@ split, just not reached yet.
   `scratch_e2ee_interop_check.mjs` is a one-off verification script, not a
   repeatable `npm test` target. Worth promoting into a real test if this
   crypto module changes again.
+
+## Liquid-glass + pill UI pass (messaging + calls)
+
+`expo-blur`'s `BlurView` replaced flat tinted `View`s on: the message
+composer bar, the reply/edit context bar, `MessageActionSheet`'s card, and
+`CallOverlay`'s control bar (plus a new frosted status pill for the call
+label). Message bubbles got rounder (pill-shaped on single-line messages)
+and a brighter glass edge on "theirs" bubbles. No config plugin needed —
+`expo-blur` has no native setup step. Android's `BlurView` falls back to a
+softer translucent fill without true blur (no experimental-blur-method
+opt-in was added) — still reads as glass chrome, just less pronounced than
+iOS.
+
+## Critical bug sweep (this round)
+
+Re-read every mobile-app file touched this session end to end specifically
+hunting for races, leaks, and null-safety/API-contract gaps. Found and
+fixed five real bugs, all in the messaging path (the call path had already
+had its one real bug — dropped ICE candidates — fixed in the previous
+round and came back clean on a second pass this time):
+
+1. **Editing your own message showed "Waiting for encryption…" for a few
+   seconds.** `applyEdit` in `src/state/messages.ts` always cleared the
+   message's text and marked it pending re-decrypt — correct for an edit
+   arriving from someone else over the socket (this client doesn't know
+   their plaintext), wrong for your own edit (you just typed the plaintext
+   seconds ago). `applyEdit` now takes an optional `knownText`; the local
+   edit path in `app/chat/[id].tsx` passes it and the bubble updates
+   instantly instead of round-tripping through the decrypt-retry loop.
+
+2. **A message someone else edited could stay blank forever.** Worse
+   version of #1, in the other direction: `useChatSocket.ts`'s `'edit'`
+   case correctly marked the incoming edit as pending decrypt, but nothing
+   ever triggered an actual decrypt pass afterward — the chat screen's
+   retry timer only runs once, right after the screen mounts, and stops
+   itself as soon as decryption catches up. A remote edit arriving any time
+   after that had nothing left to wake it. Fixed by firing the same
+   `onMessage()` hook the `'message'` case already uses, which re-runs
+   `decryptChat`.
+
+3. **A failed delete request left the message looking deleted anyway.**
+   `deleteMessage` in `app/chat/[id].tsx` applied the delete optimistically
+   and then silently swallowed the DELETE request's failure — if the
+   network dropped it, the bubble permanently showed "Message deleted"
+   while the server still had the real message. Now captures the original
+   message first and restores it via `mergeMessages` if the request didn't
+   actually succeed.
+
+4. **Swiping to reply while mid-edit could attach a stale reply to your
+   next message.** `onSwipeReply` set `replyTarget` but never cleared
+   `editingId`. If you were editing a message, swiped a different message
+   to reply, sent (which correctly took the edit path and ignored
+   `replyTarget`), the leftover `replyTarget` from the swipe was still
+   sitting in state and would silently attach itself to whatever you sent
+   *next*. Now swiping to reply also clears `editingId`.
+
+5. **A slow read-receipt fetch could roll back the read indicator.** The
+   initial `GET .../read-state` fetch in `app/chat/[id].tsx` did a plain
+   `setOtherReadTs(...)`, while the live WebSocket `'read_receipt'` handler
+   correctly used a functional max-merge. If the WS event happened to
+   arrive first (pushing the read indicator forward) and the slower initial
+   fetch resolved after with an older cached value, it would silently pull
+   the indicator backward. Both paths now use the same max-merge.
+
+Also fixed, not a functional bug but a real visual defect given this round
+was explicitly about matching iMessage's design: `MessageBubble.tsx`'s
+grouped-bubble corner radii had a no-op ternary (both branches of
+`isFirstInGroup ? roundRadius : roundRadius` resolved to the same value),
+so every bubble in the middle of a consecutive run rendered fully rounded
+instead of visually connecting to its neighbors like iMessage/WhatsApp
+grouping actually looks. Tail-side corners now tighten correctly for
+non-edge bubbles in a group; the non-tail side stays fully rounded
+throughout.
+
+Checked and found clean (no changes needed): `src/state/call.ts` (second
+full pass — the ICE-candidate queuing fix from the previous round still
+holds, symmetric for caller/callee, timers/media teardown all correctly
+reset on every call end), `src/state/e2ee.ts`, `src/state/push.ts`,
+`src/components/MessageAttachments.tsx`, `app/(tabs)/calls.tsx`,
+`CallOverlay.tsx`'s PiP drag/snap logic and control-gating.
+
+Verified after all fixes: `tsc --noEmit` clean, `expo export` for iOS
+bundles all 1445 modules with zero JS/import errors (fails only at the
+final native Hermes-bytecode step, which this sandbox can't execute —
+expected, not a code issue, same as every previous verification pass this
+session).
