@@ -1,8 +1,14 @@
 // iMessage-style bubble: tail on the last bubble of a consecutive run,
-// tight corner radii within a group, tapback-style reaction pills, and a
-// swipe-right-to-reply gesture (built on core RN Animated + PanResponder —
-// no reanimated/gesture-handler-swipeable dependency, which would need
-// its own native config; PanResponder ships with React Native itself).
+// tight corner radii within a group, tapback-style reaction pills, and two
+// horizontal swipe gestures — right reveals a reply icon and triggers
+// onSwipeReply past a threshold (bubble itself slides with the drag, same
+// as Messages/WhatsApp's swipe-to-reply), left reveals this message's
+// timestamp without moving the bubble (real iMessage doesn't shift bubbles
+// on this gesture, just fades the time in at the trailing edge — mirrored
+// here rather than reusing the reply-swipe's translate). Both built on core
+// RN Animated + PanResponder — no reanimated/gesture-handler-swipeable
+// dependency, which would need its own native config; PanResponder ships
+// with React Native itself.
 
 import { useMemo, useRef } from 'react';
 import { View, Text, Pressable, StyleSheet, Animated, PanResponder } from 'react-native';
@@ -50,25 +56,40 @@ export default function MessageBubble({
 }: Props) {
   const dragX = useRef(new Animated.Value(0)).current;
   const replyIconOpacity = useRef(new Animated.Value(0)).current;
+  const timeOpacity = useRef(new Animated.Value(0)).current;
+  const SWIPE_LEFT_REVEAL_DISTANCE = 50; // fully revealed by this far, no threshold/trigger — just a peek, same as iMessage
 
   const panResponder = useRef(
     PanResponder.create({
       onMoveShouldSetPanResponder: (_evt, gesture) =>
-        Math.abs(gesture.dx) > 8 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.5 && gesture.dx > 0,
+        Math.abs(gesture.dx) > 8 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.5,
       onPanResponderMove: (_evt, gesture) => {
-        const clamped = Math.min(Math.max(gesture.dx, 0), SWIPE_MAX_DISTANCE);
-        dragX.setValue(clamped);
-        replyIconOpacity.setValue(Math.min(clamped / SWIPE_TRIGGER_DISTANCE, 1));
+        if (gesture.dx >= 0) {
+          const clamped = Math.min(gesture.dx, SWIPE_MAX_DISTANCE);
+          dragX.setValue(clamped);
+          replyIconOpacity.setValue(Math.min(clamped / SWIPE_TRIGGER_DISTANCE, 1));
+          timeOpacity.setValue(0);
+        } else {
+          // Left: reveal-only, no bubble translation and no release
+          // "trigger" — matches real iMessage's swipe-to-peek-timestamps,
+          // which is purely visual and has no action attached to it.
+          const clamped = Math.min(-gesture.dx, SWIPE_LEFT_REVEAL_DISTANCE);
+          dragX.setValue(0);
+          replyIconOpacity.setValue(0);
+          timeOpacity.setValue(clamped / SWIPE_LEFT_REVEAL_DISTANCE);
+        }
       },
       onPanResponderRelease: (_evt, gesture) => {
         const triggered = gesture.dx > SWIPE_TRIGGER_DISTANCE;
         Animated.spring(dragX, { toValue: 0, useNativeDriver: true, bounciness: 8 }).start();
         Animated.timing(replyIconOpacity, { toValue: 0, duration: 150, useNativeDriver: true }).start();
+        Animated.timing(timeOpacity, { toValue: 0, duration: 220, useNativeDriver: true }).start();
         if (triggered) onSwipeReply();
       },
       onPanResponderTerminate: () => {
         Animated.spring(dragX, { toValue: 0, useNativeDriver: true }).start();
         Animated.timing(replyIconOpacity, { toValue: 0, duration: 150, useNativeDriver: true }).start();
+        Animated.timing(timeOpacity, { toValue: 0, duration: 220, useNativeDriver: true }).start();
       },
     })
   ).current;
@@ -112,6 +133,14 @@ export default function MessageBubble({
         pointerEvents="none"
       >
         <Text style={{ fontSize: 18, color: theme.textLow }}>↩️</Text>
+      </Animated.View>
+
+      {/* Swipe-left reveal: peeks this message's own timestamp at the
+          trailing edge, same side regardless of mine/theirs (iMessage
+          always reveals on the right, since the gesture itself is always
+          leftward) — purely a fade-in, the bubble itself never moves. */}
+      <Animated.View style={[styles.timeReveal, { opacity: timeOpacity }]} pointerEvents="none">
+        <Text style={{ fontSize: 11, color: theme.textLow }}>{formatTime(item.ts)}</Text>
       </Animated.View>
 
       <Animated.View
@@ -237,6 +266,7 @@ const styles = StyleSheet.create({
     borderBottomRightRadius: 10,
   },
   replyIcon: { position: 'absolute', top: '35%', width: 32, alignItems: 'center' },
+  timeReveal: { position: 'absolute', top: '38%', right: -50, width: 46, alignItems: 'center' },
   replyPreview: { borderLeftWidth: 3, paddingLeft: 8, marginBottom: 4, maxWidth: '100%' },
   replyPreviewName: { fontSize: 11.5, fontWeight: '600' },
   replyPreviewText: { fontSize: 11.5 },
