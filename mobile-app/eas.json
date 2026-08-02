@@ -28,7 +28,7 @@
     "production": {
       "ios": {
         "appleId": "infra@parasyte.cloud",
-        "ascAppId": "REPLACE_WITH_APP_STORE_CONNECT_APP_ID"
+        "ascAppId": "6797147716"
       },
       "android": {
         "serviceAccountKeyPath": "./google-service-account.json",
