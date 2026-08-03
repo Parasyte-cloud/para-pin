@@ -106,7 +106,11 @@ export default function MembersModal({ visible, onClose }: { visible: boolean; o
       const name = item.displayName || 'PArA PIN user';
       const isMe = item.id === myUserId;
       return (
-        <View style={[styles.row, { borderBottomColor: theme.glassBrd }]}>
+        // Mirrors index.html's `.pick-row` exactly (index.html:1141-1143,
+        // used by the same member list this modal ports) — no divider
+        // lines, a soft rounded-rect row instead, was a flat bordered-list
+        // row before this pass.
+        <View style={styles.row}>
           {item.avatarUrl ? (
             <Image source={{ uri: item.avatarUrl }} style={styles.avatar} />
           ) : (
@@ -126,17 +130,21 @@ export default function MembersModal({ visible, onClose }: { visible: boolean; o
               {busyId === item.id ? (
                 <ActivityIndicator color={theme.ice} size="small" style={{ width: 30 }} />
               ) : (
-                <Pressable onPress={() => messageMember(item)} hitSlop={8} style={[styles.actionBtn, { backgroundColor: theme.glass }]}>
-                  <Text style={{ fontSize: 14 }}>💬</Text>
+                <Pressable
+                  onPress={() => messageMember(item)}
+                  hitSlop={8}
+                  style={[styles.actionBtn, { backgroundColor: theme.glass, borderColor: theme.glassBrd }]}
+                >
+                  <Text style={{ fontSize: 13 }}>💬</Text>
                 </Pressable>
               )}
               <Pressable
                 onPress={() => callMember(item)}
                 disabled={inCall}
                 hitSlop={8}
-                style={[styles.actionBtn, { backgroundColor: theme.glass, opacity: inCall ? 0.4 : 1 }]}
+                style={[styles.actionBtn, { backgroundColor: theme.glass, borderColor: theme.glassBrd, opacity: inCall ? 0.4 : 1 }]}
               >
-                <Text style={{ fontSize: 14 }}>📞</Text>
+                <Text style={{ fontSize: 13 }}>📞</Text>
               </Pressable>
             </View>
           )}
@@ -183,13 +191,21 @@ const styles = StyleSheet.create({
   sheetWrap: { paddingHorizontal: 0 },
   sheet: { borderTopLeftRadius: 24, borderTopRightRadius: 24, borderWidth: 1, borderBottomWidth: 0, padding: 16, maxHeight: '75%', minHeight: 260 },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
-  title: { fontSize: 16, fontWeight: '700' },
+  // Matches web's `.modal h3` (index.html:1133: font-size:19px).
+  title: { fontSize: 19, fontWeight: '700' },
   list: { flexGrow: 0 },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth },
-  avatar: { width: 36, height: 36, borderRadius: 18 },
+  // Mirrors index.html's `.pick-row` exactly (index.html:1141-1143:
+  // padding:8px, border-radius:10px, gap:10px) — was a divider-line row.
+  row: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 8, borderRadius: 10 },
+  // Web's pick-row avatar is 32x32/12px font for this list specifically
+  // (index.html:4698), was 36x36/13px here.
+  avatar: { width: 32, height: 32, borderRadius: 16 },
   avatarFallback: { alignItems: 'center', justifyContent: 'center' },
-  avatarText: { color: '#0a0d12', fontWeight: '700', fontSize: 13 },
+  avatarText: { color: '#0a0d12', fontWeight: '700', fontSize: 12 },
   name: { fontSize: 14.5, fontWeight: '600' },
   actions: { flexDirection: 'row', gap: 8 },
-  actionBtn: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
+  // Matches web's `.icon-btn` sized down for this row (index.html:4713:
+  // width:28px;height:28px;font-size:13px) — circular with a visible
+  // border, was borderless before this pass.
+  actionBtn: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', borderWidth: 1 },
 });

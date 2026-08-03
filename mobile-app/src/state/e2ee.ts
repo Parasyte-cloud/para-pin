@@ -213,6 +213,65 @@ export async function rewrapAllChatsForDevice(newDeviceId: string): Promise<void
   }
 }
 
+// Self-service, mobile-native version of web's Settings > Devices "Re-sync
+// keys" button (index.html:9174-9176) — added because that button was, up
+// to now, the ONLY way to recover from a missing chat-key wrap: onSend's
+// own error banner (chat/[id].tsx) told mobile users to "ask whoever's
+// already signed in on web" to click it, which is no help at all for two
+// accounts that only ever use iOS/Android and never touch web. This is the
+// most likely real cause behind "messages between iOS and Android don't
+// sync" reports that aren't actually a crypto-math bug (the ECDH/HKDF/AES
+// primitives in ../crypto/e2ee.ts are pure, platform-independent JS — same
+// bytecode runs on both platforms, there's nothing there that could decrypt
+// differently by OS): rewrapAllChatsForDevice already runs automatically
+// the moment a new device gets approved, but it's fire-and-forget with no
+// retry — a single dropped request (one chat out of many, a network blip
+// right as the new device's key finished uploading) leaves that one device
+// permanently missing a wrap for that one chat, with previously no way for
+// either the new device or any other device on the account to ever
+// re-trigger it again.
+//
+// Unlike rewrapAllChatsForDevice (which targets one just-approved device
+// mobile already knows the id of), this device doesn't have a device-list
+// UI to pick a specific target from, so it re-wraps for every OTHER device
+// on the account at once — `/users?ids=` already returns the full
+// devicePublicKeys map, not just one entry. Re-wrapping a chat that's
+// already correctly wrapped for a given device is a harmless overwrite of
+// the same underlying key (see rewrapAllChatsForDevice's own comment) —
+// idempotent by construction, safe to run as many times as needed.
+export async function resyncAllMyDevices(): Promise<{ devicesWrapped: number; chatsAttempted: number; failed: number }> {
+  const { userId: myUserId, deviceId: myDeviceId, chats } = useSessionStore.getState();
+  if (!myUserId || !myDeviceId) return { devicesWrapped: 0, chatsAttempted: 0, failed: 0 };
+  peerDeviceKeysCache.delete(myUserId); // force a fresh lookup, don't resync against a stale device list
+  const mine = await fetchPeerDeviceKeys(myUserId);
+  const otherDeviceIds = Object.keys(mine).filter((id) => id !== myDeviceId);
+  let chatsAttempted = 0;
+  let failed = 0;
+  for (const chat of chats) {
+    const key = await ensureChatKey(chat);
+    if (!key) {
+      failed++;
+      continue;
+    }
+    for (const deviceId of otherDeviceIds) {
+      const pub = mine[deviceId];
+      if (!pub) continue;
+      chatsAttempted++;
+      try {
+        const wrap = wrapRawKeyForDevice(key, pub);
+        const res = await apiFetch(`/chats/${chat.id}/e2ee-wraps`, {
+          method: 'POST',
+          body: JSON.stringify({ wraps: { [myUserId]: { [deviceId]: wrap } } }),
+        });
+        if (!res.ok) failed++;
+      } catch {
+        failed++;
+      }
+    }
+  }
+  return { devicesWrapped: otherDeviceIds.length, chatsAttempted, failed };
+}
+
 // Legacy pre-multi-device pairwise DM key — decrypt-only fallback for old
 // DM history (index.html:10467-10506's fetchPeerLegacyPublicKey /
 // ensureLegacyDmKey). `e2eePublicKey` on the /users record is the OTHER

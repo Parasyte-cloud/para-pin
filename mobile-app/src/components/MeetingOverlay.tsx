@@ -97,13 +97,15 @@ export default function MeetingOverlay() {
           </Text>
           <View style={[styles.row, { marginTop: 40 }]}>
             <View style={styles.controlCol}>
-              <Pressable onPress={declineInvite} style={[styles.roundBtn, { backgroundColor: '#ff453a' }]}>
+              {/* Colors match index.html's .incoming-call-decline/.accept
+                  exactly (index.html:489/491), same fix as CallOverlay. */}
+              <Pressable onPress={declineInvite} style={[styles.roundBtn, { backgroundColor: '#ff4d4d' }]}>
                 <Text style={styles.roundBtnLabel}>✕</Text>
               </Pressable>
               <Text style={[styles.controlLabel, { color: theme.textLow }]}>Decline</Text>
             </View>
             <View style={styles.controlCol}>
-              <Pressable onPress={acceptInvite} style={[styles.roundBtn, { backgroundColor: '#34c759' }]}>
+              <Pressable onPress={acceptInvite} style={[styles.roundBtn, { backgroundColor: '#2ecf7a' }]}>
                 <Text style={styles.roundBtnLabel}>✓</Text>
               </Pressable>
               <Text style={[styles.controlLabel, { color: theme.textLow }]}>Join</Text>
@@ -158,7 +160,9 @@ export default function MeetingOverlay() {
             <View style={styles.controlCol}>
               <Pressable
                 onPress={toggleMute}
-                style={[styles.gridBtn, { backgroundColor: muted ? '#fff' : 'rgba(255,255,255,0.16)' }]}
+                // Matches index.html's `.video-call-btn.active` exactly
+                // (index.html:571: rgba(255,255,255,0.35)), was solid #fff.
+                style={[styles.gridBtn, { backgroundColor: muted ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.16)' }]}
               >
                 <Text style={{ fontSize: 21 }}>{muted ? '🔇' : '🎤'}</Text>
               </Pressable>
@@ -167,14 +171,14 @@ export default function MeetingOverlay() {
             <View style={styles.controlCol}>
               <Pressable
                 onPress={toggleCamera}
-                style={[styles.gridBtn, { backgroundColor: !cameraOff ? '#fff' : 'rgba(255,255,255,0.16)' }]}
+                style={[styles.gridBtn, { backgroundColor: !cameraOff ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.16)' }]}
               >
                 <Text style={{ fontSize: 21 }}>🎥</Text>
               </Pressable>
               <Text style={[styles.controlLabel, { color: theme.textLow }]}>Camera</Text>
             </View>
             <View style={styles.controlCol}>
-              <Pressable onPress={() => leaveMeeting()} style={[styles.gridBtn, styles.endBtn, { backgroundColor: '#ff453a' }]}>
+              <Pressable onPress={() => leaveMeeting()} style={[styles.gridBtn, styles.endBtn, { backgroundColor: '#ff4d4d' }]}>
                 <Text style={styles.endBtnLabel}>✕</Text>
               </Pressable>
               <Text style={[styles.controlLabel, { color: theme.textLow }]}>Leave</Text>

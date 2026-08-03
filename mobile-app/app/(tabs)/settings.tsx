@@ -5,7 +5,7 @@ import { useTheme } from '../../src/hooks/useTheme';
 import { useSessionStore } from '../../src/state/session';
 import { ensurePushRegistered, type PushRegisterResult } from '../../src/state/push';
 import { apiFetch } from '../../src/api/client';
-import { rewrapAllChatsForDevice } from '../../src/state/e2ee';
+import { rewrapAllChatsForDevice, resyncAllMyDevices } from '../../src/state/e2ee';
 import { AuthBackdrop } from '../../src/components/AuthBackdrop';
 import type { ApiErrorBody } from '../../src/types';
 
@@ -29,6 +29,8 @@ export default function SettingsScreen() {
   const [approveCode, setApproveCode] = useState('');
   const [approveBusy, setApproveBusy] = useState(false);
   const [approveMsg, setApproveMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  const [resyncBusy, setResyncBusy] = useState(false);
+  const [resyncMsg, setResyncMsg] = useState<{ text: string; ok: boolean } | null>(null);
 
   useEffect(() => {
     Notifications.getPermissionsAsync()
@@ -133,6 +135,34 @@ export default function SettingsScreen() {
               ? `Too many attempts. Try again in ${err.retryAfterMs ? Math.ceil(err.retryAfterMs / 1000) : 'a bit'}s.`
               : "Couldn't approve that device. Try again.";
     setApproveMsg({ text, ok: false });
+  };
+
+  // Mobile-native version of web's Settings > Devices "Re-sync keys" button
+  // (index.html:9174-9176) — see resyncAllMyDevices's own header comment in
+  // state/e2ee.ts for the full reasoning. Without this, a device stuck
+  // missing a chat-key wrap (e.g. the automatic rewrap right after approval
+  // silently dropped one request) had no self-service fix at all unless
+  // someone on the account also happened to have a web session open.
+  const onResync = async () => {
+    setResyncBusy(true);
+    setResyncMsg(null);
+    const r = await resyncAllMyDevices();
+    setResyncBusy(false);
+    if (r.devicesWrapped === 0) {
+      setResyncMsg({ text: 'No other devices on this account to sync with yet.', ok: true });
+      return;
+    }
+    if (r.failed > 0) {
+      setResyncMsg({
+        text: `Synced what it could (${r.chatsAttempted - r.failed}/${r.chatsAttempted} chat keys across ${r.devicesWrapped} device${r.devicesWrapped === 1 ? '' : 's'}) — ${r.failed} failed. Try again in a bit.`,
+        ok: false,
+      });
+      return;
+    }
+    setResyncMsg({
+      text: `Done — synced ${r.chatsAttempted} chat key${r.chatsAttempted === 1 ? '' : 's'} across ${r.devicesWrapped} other device${r.devicesWrapped === 1 ? '' : 's'} on this account.`,
+      ok: true,
+    });
   };
 
   return (
@@ -244,6 +274,28 @@ export default function SettingsScreen() {
         >
           <Text style={{ color: '#0a0d12', fontWeight: '700', fontSize: 13 }}>Approve</Text>
         </Pressable>
+      </View>
+
+      <View style={[styles.card, { backgroundColor: theme.glass, borderColor: theme.glassBrd }]}>
+        <Text style={[styles.value, { color: theme.textHi }]}>Re-sync encryption keys</Text>
+        <Text style={[styles.rowHint, { color: theme.textMid }]}>
+          If messages aren't decrypting on one of your other devices (another phone, or the web app), tap this on a
+          device that already has them working. It re-sends this device's copy of every chat key to your other
+          devices — safe to run any time.
+        </Text>
+        <Pressable
+          onPress={onResync}
+          disabled={resyncBusy}
+          style={({ pressed }) => [
+            styles.approveBtn,
+            { backgroundColor: theme.ice, opacity: resyncBusy ? 0.5 : pressed ? 0.7 : 1 },
+          ]}
+        >
+          <Text style={{ color: '#0a0d12', fontWeight: '700', fontSize: 13 }}>{resyncBusy ? 'Syncing…' : 'Re-sync now'}</Text>
+        </Pressable>
+        {resyncMsg && (
+          <Text style={[styles.rowHint, { color: resyncMsg.ok ? theme.ok : theme.danger }]}>{resyncMsg.text}</Text>
+        )}
       </View>
 
       <Pressable

@@ -204,7 +204,9 @@ export default function ProfileModal({ visible, onClose }: { visible: boolean; o
 
 const styles = StyleSheet.create({
   backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center', padding: 24 },
-  card: { borderRadius: 24, borderWidth: 1, padding: 24, alignItems: 'center', overflow: 'hidden' },
+  // 20px radius / 22px padding — matches web's .modal exactly
+  // (index.html:1132: `border-radius:20px; padding:22px`), was 24/24.
+  card: { borderRadius: 20, borderWidth: 1, padding: 22, alignItems: 'center', overflow: 'hidden' },
   title: { fontSize: 17, fontWeight: '700', marginBottom: 16 },
   avatarImg: { width: 84, height: 84, borderRadius: 42, marginBottom: 12 },
   avatarFallback: { width: 84, height: 84, borderRadius: 42, alignItems: 'center', justifyContent: 'center', marginBottom: 12 },
@@ -222,9 +224,13 @@ const styles = StyleSheet.create({
     borderColor: '#0a0d12',
   },
   name: { fontSize: 18, fontWeight: '700', marginBottom: 18 },
-  nameInput: { width: '100%', borderWidth: 1, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, fontSize: 15, textAlign: 'center', marginBottom: 14 },
-  secBtn: { width: '100%', borderWidth: 1, borderRadius: 16, padding: 14, marginBottom: 10 },
+  // Pill radius (999) matches web's `.modal input[type=text]` exactly
+  // (index.html:1135-1137), was a boxy 12px corner.
+  nameInput: { width: '100%', borderWidth: 1, borderRadius: 999, paddingHorizontal: 16, paddingVertical: 11, fontSize: 15, textAlign: 'center', marginBottom: 14 },
+  // Pill radius matches web's `.btn`/`.modal-actions` buttons
+  // (index.html:1319, 999px), was 16px.
+  secBtn: { width: '100%', borderWidth: 1, borderRadius: 999, padding: 14, marginBottom: 10 },
   editActions: { flexDirection: 'row', gap: 10, width: '100%', marginBottom: 10 },
-  editBtn: { flex: 1, borderWidth: 1, borderRadius: 16, paddingVertical: 12, alignItems: 'center', justifyContent: 'center' },
+  editBtn: { flex: 1, borderWidth: 1, borderRadius: 999, paddingVertical: 12, alignItems: 'center', justifyContent: 'center' },
   closeBtn: { paddingVertical: 10, paddingHorizontal: 20 },
 });

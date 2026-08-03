@@ -165,15 +165,19 @@ export default function CallOverlay() {
 
         <View style={styles.controlsWrap}>
           {callState === 'ringing-in' ? (
+            // Colors match index.html's `.incoming-call-decline`/
+            // `.incoming-call-accept` exactly (index.html:489/491:
+            // #ff4d4d / #2ecf7a) — were iOS system red/green before this
+            // pass, close but not literally web's palette.
             <View style={styles.row}>
               <View style={styles.controlCol}>
-                <Pressable onPress={() => declineCall()} style={[styles.roundBtn, { backgroundColor: '#ff453a' }]}>
+                <Pressable onPress={() => declineCall()} style={[styles.roundBtn, { backgroundColor: '#ff4d4d' }]}>
                   <Text style={styles.roundBtnLabel}>✕</Text>
                 </Pressable>
                 <Text style={styles.controlLabel}>Decline</Text>
               </View>
               <View style={styles.controlCol}>
-                <Pressable onPress={() => acceptCall()} style={[styles.roundBtn, { backgroundColor: '#34c759' }]}>
+                <Pressable onPress={() => acceptCall()} style={[styles.roundBtn, { backgroundColor: '#2ecf7a' }]}>
                   <Text style={styles.roundBtnLabel}>{hasVideo ? '🎥' : '✓'}</Text>
                 </Pressable>
                 <Text style={styles.controlLabel}>Accept</Text>
@@ -189,12 +193,16 @@ export default function CallOverlay() {
             // track to flip) renders visibly dimmed rather than silently
             // doing nothing, so it doesn't read as broken.
             <View style={styles.grid}>
+              {/* Active/toggled state matches index.html's
+                  `.video-call-btn.active` exactly (index.html:571:
+                  rgba(255,255,255,0.35), a translucent lift, not opaque
+                  white) — was solid #fff before this pass. */}
               <View style={styles.gridRow}>
                 <View style={styles.controlCol}>
                   <Pressable
                     onPress={toggleSpeaker}
                     disabled={!controlsActive}
-                    style={[styles.gridBtn, { backgroundColor: speakerOn ? '#fff' : 'rgba(255,255,255,0.16)', opacity: controlsActive ? 1 : 0.4 }]}
+                    style={[styles.gridBtn, { backgroundColor: speakerOn ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.16)', opacity: controlsActive ? 1 : 0.4 }]}
                   >
                     <Text style={{ fontSize: 21 }}>🔊</Text>
                   </Pressable>
@@ -206,7 +214,7 @@ export default function CallOverlay() {
                     disabled={!controlsActive || !hasVideo}
                     style={[
                       styles.gridBtn,
-                      { backgroundColor: hasVideo && !cameraOff ? '#fff' : 'rgba(255,255,255,0.16)', opacity: controlsActive && hasVideo ? 1 : 0.4 },
+                      { backgroundColor: hasVideo && !cameraOff ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.16)', opacity: controlsActive && hasVideo ? 1 : 0.4 },
                     ]}
                   >
                     <Text style={{ fontSize: 21 }}>🎥</Text>
@@ -217,7 +225,7 @@ export default function CallOverlay() {
                   <Pressable
                     onPress={toggleMute}
                     disabled={!controlsActive}
-                    style={[styles.gridBtn, { backgroundColor: muted ? '#fff' : 'rgba(255,255,255,0.16)', opacity: controlsActive ? 1 : 0.4 }]}
+                    style={[styles.gridBtn, { backgroundColor: muted ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.16)', opacity: controlsActive ? 1 : 0.4 }]}
                   >
                     <Text style={{ fontSize: 21 }}>{muted ? '🔇' : '🎤'}</Text>
                   </Pressable>
@@ -236,7 +244,10 @@ export default function CallOverlay() {
                   <Text style={styles.controlLabel}>Flip</Text>
                 </View>
                 <View style={styles.controlCol}>
-                  <Pressable onPress={() => endCall()} style={[styles.gridBtn, styles.endBtn, { backgroundColor: '#ff453a' }]}>
+                  {/* End-call color matches index.html's
+                      `.video-call-end-btn` exactly (index.html:572:
+                      #ff4d4d), was iOS system red (#ff453a). */}
+                  <Pressable onPress={() => endCall()} style={[styles.gridBtn, styles.endBtn, { backgroundColor: '#ff4d4d' }]}>
                     <Text style={styles.endBtnLabel}>✕</Text>
                   </Pressable>
                   <Text style={styles.controlLabel}>End</Text>
