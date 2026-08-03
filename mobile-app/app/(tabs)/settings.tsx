@@ -265,7 +265,10 @@ const styles = StyleSheet.create({
   // Bottom padding clears the floating BottomNav pill (app/(tabs)/_layout.tsx) —
   // see index.tsx's identical comment.
   content: { padding: 16, paddingBottom: 110, gap: 12 },
-  card: { borderWidth: 1, borderRadius: 16, padding: 14, gap: 4 },
+  // 20px (was 16) — matches web's general panel radius (.sidebar/.conv
+  // both border-radius:20px, index.html:619/745) rather than a slightly
+  // tighter native-card radius that didn't correspond to anything on web.
+  card: { borderWidth: 1, borderRadius: 20, padding: 14, gap: 4 },
   label: { fontSize: 11.5, textTransform: 'uppercase', letterSpacing: 0.5 },
   value: { fontSize: 15, fontWeight: '600' },
   row: { flexDirection: 'row', alignItems: 'center', gap: 12 },
