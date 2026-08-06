@@ -2085,6 +2085,7 @@
     <div class="modal-actions" style="margin-bottom:14px; flex-shrink:0; flex-wrap:wrap;">
       <div class="btn" id="workspaceOpenAuditLogBtn" style="display:none;">Audit Log</div>
       <div class="btn" id="workspaceOpenHrBtn">People & HR</div>
+      <div class="btn" id="workspaceOpenCrmBtn">CRM</div>
       <div class="btn" onclick="closeModal('workspaceMembersOverlay')">Close</div>
     </div>
   </div>
@@ -2232,6 +2233,70 @@
           <table class="hr-history-table" id="hrCalendarTable"></table>
           <div class="hint" id="hrCalendarEmpty" style="display:none;">No public holidays found for this country/year.</div>
         </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<!-- ============ CRM ============ -->
+<div class="overlay admin-console-overlay" id="crmOverlay">
+  <div class="modal lg admin-console">
+    <div class="admin-console-head">
+      <h2 id="crmOverlayTitle">CRM</h2>
+    </div>
+    <div class="admin-console-tabs">
+      <div class="admin-console-tab active" data-tab="companies">Companies</div>
+      <div class="admin-console-tab" data-tab="contacts">Contacts</div>
+      <div class="admin-console-tab" data-tab="pipeline">Pipeline</div>
+    </div>
+    <div class="admin-console-body">
+      <section class="admin-console-section" data-section="companies">
+        <div id="crmCompanyAddRow" style="display:none; margin-bottom:16px; padding:12px; border-radius:14px; background:rgba(var(--tint-rgb),0.05); border:1px solid var(--glass-brd);">
+          <h3 style="margin-top:0;">Add company</h3>
+          <div class="hr-field-grid">
+            <label>Name<input type="text" id="crmCompanyNameInput" placeholder="Acme Inc."></label>
+            <label>Industry<input type="text" id="crmCompanyIndustryInput" placeholder="Logistics"></label>
+            <label>Website<input type="text" id="crmCompanyWebsiteInput" placeholder="acme.com"></label>
+            <label>Notes<input type="text" id="crmCompanyNotesInput" placeholder="Optional"></label>
+          </div>
+          <div class="btn primary" id="crmCompanySaveBtn" style="margin-top:10px;">Save company</div>
+          <div class="hint" id="crmCompanyHint" style="display:none; margin-top:6px;"></div>
+        </div>
+        <input type="text" id="crmCompanySearch" placeholder="Search companies…" style="width:100%; margin-bottom:10px;">
+        <div id="crmCompanyList"></div>
+        <div class="hint" id="crmCompanyEmpty" style="display:none;">No companies yet.</div>
+      </section>
+      <section class="admin-console-section" data-section="contacts" style="display:none;">
+        <div id="crmContactAddRow" style="display:none; margin-bottom:16px; padding:12px; border-radius:14px; background:rgba(var(--tint-rgb),0.05); border:1px solid var(--glass-brd);">
+          <h3 style="margin-top:0;">Add contact</h3>
+          <div class="hr-field-grid">
+            <label>Name<input type="text" id="crmContactNameInput" placeholder="Jane Doe"></label>
+            <label>Email<input type="text" id="crmContactEmailInput" placeholder="jane@acme.com"></label>
+            <label>Phone<input type="text" id="crmContactPhoneInput" placeholder="Optional"></label>
+            <label>Title<input type="text" id="crmContactTitleInput" placeholder="Optional"></label>
+            <label>Company<select id="crmContactCompanySelect"><option value="">— None —</option></select></label>
+          </div>
+          <div class="btn primary" id="crmContactSaveBtn" style="margin-top:10px;">Save contact</div>
+          <div class="hint" id="crmContactHint" style="display:none; margin-top:6px;"></div>
+        </div>
+        <input type="text" id="crmContactSearch" placeholder="Search contacts…" style="width:100%; margin-bottom:10px;">
+        <div id="crmContactList"></div>
+        <div class="hint" id="crmContactEmpty" style="display:none;">No contacts yet.</div>
+      </section>
+      <section class="admin-console-section" data-section="pipeline" style="display:none;">
+        <div id="crmDealAddRow" style="display:none; margin-bottom:16px; padding:12px; border-radius:14px; background:rgba(var(--tint-rgb),0.05); border:1px solid var(--glass-brd);">
+          <h3 style="margin-top:0;">Add deal</h3>
+          <div class="hr-field-grid">
+            <label>Title<input type="text" id="crmDealTitleInput" placeholder="Q3 renewal"></label>
+            <label>Value<input type="number" id="crmDealValueInput" min="0" step="1" placeholder="0"></label>
+            <label>Company<select id="crmDealCompanySelect"><option value="">— None —</option></select></label>
+            <label>Contact<select id="crmDealContactSelect"><option value="">— None —</option></select></label>
+          </div>
+          <div class="btn primary" id="crmDealSaveBtn" style="margin-top:10px;">Save deal</div>
+          <div class="hint" id="crmDealHint" style="display:none; margin-top:6px;"></div>
+        </div>
+        <div id="crmPipelineBoard" style="display:flex; gap:12px; overflow-x:auto; padding-bottom:8px;"></div>
+        <div class="hint" id="crmPipelineEmpty" style="display:none;">No deals yet.</div>
       </section>
     </div>
   </div>
@@ -5108,6 +5173,384 @@
     openModal('hrOverlay');
     loadHrHome();
   }
+
+  // ==================== CRM (Companies / Contacts / Pipeline) ====================
+  // Same workspace-isolation + admin-console pattern as Arrivo People above.
+  // Read is open to any org member; every add/edit/delete/stage-move control
+  // is hidden (not just disabled) for anyone without manage_crm, computed
+  // from myWorkspacePermissions which openWorkspaceMembers already refreshes
+  // every time the Members modal opens (crmOverlay only ever opens from there).
+  const CRM_STAGES = ['lead', 'qualified', 'proposal', 'negotiation', 'won', 'lost'];
+  const CRM_STAGE_LABELS = { lead: 'Lead', qualified: 'Qualified', proposal: 'Proposal', negotiation: 'Negotiation', won: 'Won', lost: 'Lost' };
+  let crmActiveOrg = null;
+  let crmCanManage = false;
+  let crmCompaniesCache = [];
+  let crmContactsCache = [];
+  let crmDealsCache = [];
+  let crmEditingCompanyId = null;
+  let crmEditingContactId = null;
+
+  document.querySelectorAll('#crmOverlay .admin-console-tab').forEach(tab=>{
+    tab.addEventListener('click', ()=>{
+      document.querySelectorAll('#crmOverlay .admin-console-tab').forEach(t=>t.classList.remove('active'));
+      tab.classList.add('active');
+      const target = tab.dataset.tab;
+      document.querySelectorAll('#crmOverlay .admin-console-section').forEach(sec=>{
+        sec.style.display = sec.dataset.section === target ? 'block' : 'none';
+      });
+      if (target === 'contacts') loadCrmContacts();
+      if (target === 'pipeline') loadCrmDeals();
+    });
+  });
+
+  document.getElementById('workspaceOpenCrmBtn').addEventListener('click', ()=>{
+    if (!activeWorkspaceForMembers || !activeWorkspaceForMembers.id) return;
+    openCrmOverlay(activeWorkspaceForMembers);
+  });
+
+  function openCrmOverlay(org){
+    crmActiveOrg = org;
+    crmCanManage = !!(org.isAdmin || myWorkspacePermissions.includes('manage_crm'));
+    document.getElementById('crmOverlayTitle').textContent = `${org.name} · CRM`;
+    document.querySelectorAll('#crmOverlay .admin-console-tab').forEach(t=>t.classList.remove('active'));
+    document.querySelector('#crmOverlay .admin-console-tab[data-tab="companies"]').classList.add('active');
+    document.querySelectorAll('#crmOverlay .admin-console-section').forEach(sec=>{
+      sec.style.display = sec.dataset.section === 'companies' ? 'block' : 'none';
+    });
+    document.getElementById('crmCompanyAddRow').style.display = crmCanManage ? 'block' : 'none';
+    document.getElementById('crmContactAddRow').style.display = crmCanManage ? 'block' : 'none';
+    document.getElementById('crmDealAddRow').style.display = crmCanManage ? 'block' : 'none';
+    crmResetCompanyForm();
+    crmResetContactForm();
+    crmResetDealForm();
+    closeModal('workspaceMembersOverlay');
+    openModal('crmOverlay');
+    loadCrmCompanies();
+  }
+
+  // ---- Companies ----
+  async function loadCrmCompanies(){
+    if (!crmActiveOrg) return;
+    const listEl = document.getElementById('crmCompanyList');
+    listEl.innerHTML = '<div class="hint">Loading…</div>';
+    const r = await apiFetch(`/org/crm/companies?orgId=${encodeURIComponent(crmActiveOrg.id)}`);
+    if (!r.ok || !r.body || !Array.isArray(r.body.companies)){
+      listEl.innerHTML = '<div class="hint">Could not load companies. Try again.</div>';
+      return;
+    }
+    crmCompaniesCache = r.body.companies;
+    renderCrmCompanies();
+    crmPopulateCompanySelects();
+  }
+
+  function crmCompanyName(companyId){
+    const c = crmCompaniesCache.find(x => x.id === companyId);
+    return c ? c.name : '';
+  }
+
+  function renderCrmCompanies(){
+    const listEl = document.getElementById('crmCompanyList');
+    const emptyEl = document.getElementById('crmCompanyEmpty');
+    const q = document.getElementById('crmCompanySearch').value.trim().toLowerCase();
+    const filtered = q ? crmCompaniesCache.filter(c => (c.name || '').toLowerCase().includes(q) || (c.industry || '').toLowerCase().includes(q)) : crmCompaniesCache;
+    listEl.innerHTML = filtered.map(c => `
+      <div class="pick-row">
+        <div style="flex:1; min-width:0;">
+          <div style="font-weight:600;">${escapeHtml(c.name)}</div>
+          <div class="hint">${escapeHtml([c.industry, c.website].filter(Boolean).join(' · ') || 'No details yet')}</div>
+        </div>
+        ${crmCanManage ? `
+          <span class="icon-btn" style="width:28px; height:28px; font-size:13px;" title="Edit" onclick="crmEditCompany('${c.id}')">✎</span>
+          <span class="icon-btn" style="width:28px; height:28px; font-size:13px;" title="Delete" onclick="crmDeleteCompany('${c.id}')">🗑</span>
+        ` : ''}
+      </div>
+    `).join('');
+    emptyEl.style.display = filtered.length ? 'none' : 'block';
+  }
+  document.getElementById('crmCompanySearch').addEventListener('input', renderCrmCompanies);
+
+  function crmResetCompanyForm(){
+    crmEditingCompanyId = null;
+    document.getElementById('crmCompanyNameInput').value = '';
+    document.getElementById('crmCompanyIndustryInput').value = '';
+    document.getElementById('crmCompanyWebsiteInput').value = '';
+    document.getElementById('crmCompanyNotesInput').value = '';
+    document.getElementById('crmCompanyHint').style.display = 'none';
+    document.getElementById('crmCompanySaveBtn').textContent = 'Save company';
+  }
+
+  function crmEditCompany(id){
+    const c = crmCompaniesCache.find(x => x.id === id);
+    if (!c) return;
+    crmEditingCompanyId = id;
+    document.getElementById('crmCompanyNameInput').value = c.name || '';
+    document.getElementById('crmCompanyIndustryInput').value = c.industry || '';
+    document.getElementById('crmCompanyWebsiteInput').value = c.website || '';
+    document.getElementById('crmCompanyNotesInput').value = c.notes || '';
+    document.getElementById('crmCompanySaveBtn').textContent = 'Update company';
+    document.getElementById('crmCompanyNameInput').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  document.getElementById('crmCompanySaveBtn').addEventListener('click', async ()=>{
+    if (!crmActiveOrg) return;
+    const hintEl = document.getElementById('crmCompanyHint');
+    const name = document.getElementById('crmCompanyNameInput').value.trim();
+    if (!name){
+      hintEl.textContent = 'Name is required.';
+      hintEl.style.display = 'block';
+      return;
+    }
+    const payload = {
+      orgId: crmActiveOrg.id,
+      name,
+      industry: document.getElementById('crmCompanyIndustryInput').value.trim(),
+      website: document.getElementById('crmCompanyWebsiteInput').value.trim(),
+      notes: document.getElementById('crmCompanyNotesInput').value.trim(),
+    };
+    const r = crmEditingCompanyId
+      ? await apiFetch(`/org/crm/companies/${encodeURIComponent(crmEditingCompanyId)}`, { method: 'PATCH', body: JSON.stringify(payload) })
+      : await apiFetch('/org/crm/companies', { method: 'POST', body: JSON.stringify(payload) });
+    if (!r.ok){
+      hintEl.textContent = 'Could not save. Try again.';
+      hintEl.style.display = 'block';
+      return;
+    }
+    crmResetCompanyForm();
+    loadCrmCompanies();
+  });
+
+  async function crmDeleteCompany(id){
+    if (!crmActiveOrg) return;
+    if (!confirm('Delete this company? Contacts and deals linked to it keep their history but lose the company link.')) return;
+    await apiFetch(`/org/crm/companies/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ orgId: crmActiveOrg.id }) });
+    loadCrmCompanies();
+  }
+
+  function crmPopulateCompanySelects(){
+    const opts = '<option value="">— None —</option>' + crmCompaniesCache.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+    document.getElementById('crmContactCompanySelect').innerHTML = opts;
+    document.getElementById('crmDealCompanySelect').innerHTML = opts;
+  }
+
+  // ---- Contacts ----
+  async function loadCrmContacts(){
+    if (!crmActiveOrg) return;
+    const listEl = document.getElementById('crmContactList');
+    listEl.innerHTML = '<div class="hint">Loading…</div>';
+    if (!crmCompaniesCache.length){
+      const cr = await apiFetch(`/org/crm/companies?orgId=${encodeURIComponent(crmActiveOrg.id)}`);
+      if (cr.ok && cr.body && Array.isArray(cr.body.companies)) crmCompaniesCache = cr.body.companies;
+      crmPopulateCompanySelects();
+    }
+    const r = await apiFetch(`/org/crm/contacts?orgId=${encodeURIComponent(crmActiveOrg.id)}`);
+    if (!r.ok || !r.body || !Array.isArray(r.body.contacts)){
+      listEl.innerHTML = '<div class="hint">Could not load contacts. Try again.</div>';
+      return;
+    }
+    crmContactsCache = r.body.contacts;
+    renderCrmContacts();
+  }
+
+  function renderCrmContacts(){
+    const listEl = document.getElementById('crmContactList');
+    const emptyEl = document.getElementById('crmContactEmpty');
+    const q = document.getElementById('crmContactSearch').value.trim().toLowerCase();
+    const filtered = q ? crmContactsCache.filter(c => (c.name || '').toLowerCase().includes(q) || (c.email || '').toLowerCase().includes(q)) : crmContactsCache;
+    listEl.innerHTML = filtered.map(c => `
+      <div class="pick-row">
+        <div style="flex:1; min-width:0;">
+          <div style="font-weight:600;">${escapeHtml(c.name)}</div>
+          <div class="hint">${escapeHtml([c.title, crmCompanyName(c.companyId)].filter(Boolean).join(' · ') || c.email || 'No details yet')}</div>
+        </div>
+        ${crmCanManage ? `
+          <span class="icon-btn" style="width:28px; height:28px; font-size:13px;" title="Edit" onclick="crmEditContact('${c.id}')">✎</span>
+          <span class="icon-btn" style="width:28px; height:28px; font-size:13px;" title="Delete" onclick="crmDeleteContact('${c.id}')">🗑</span>
+        ` : ''}
+      </div>
+    `).join('');
+    emptyEl.style.display = filtered.length ? 'none' : 'block';
+  }
+  document.getElementById('crmContactSearch').addEventListener('input', renderCrmContacts);
+
+  function crmResetContactForm(){
+    crmEditingContactId = null;
+    document.getElementById('crmContactNameInput').value = '';
+    document.getElementById('crmContactEmailInput').value = '';
+    document.getElementById('crmContactPhoneInput').value = '';
+    document.getElementById('crmContactTitleInput').value = '';
+    document.getElementById('crmContactCompanySelect').value = '';
+    document.getElementById('crmContactHint').style.display = 'none';
+    document.getElementById('crmContactSaveBtn').textContent = 'Save contact';
+  }
+
+  function crmEditContact(id){
+    const c = crmContactsCache.find(x => x.id === id);
+    if (!c) return;
+    crmEditingContactId = id;
+    document.getElementById('crmContactNameInput').value = c.name || '';
+    document.getElementById('crmContactEmailInput').value = c.email || '';
+    document.getElementById('crmContactPhoneInput').value = c.phone || '';
+    document.getElementById('crmContactTitleInput').value = c.title || '';
+    document.getElementById('crmContactCompanySelect').value = c.companyId || '';
+    document.getElementById('crmContactSaveBtn').textContent = 'Update contact';
+    document.getElementById('crmContactNameInput').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  document.getElementById('crmContactSaveBtn').addEventListener('click', async ()=>{
+    if (!crmActiveOrg) return;
+    const hintEl = document.getElementById('crmContactHint');
+    const name = document.getElementById('crmContactNameInput').value.trim();
+    if (!name){
+      hintEl.textContent = 'Name is required.';
+      hintEl.style.display = 'block';
+      return;
+    }
+    const payload = {
+      orgId: crmActiveOrg.id,
+      name,
+      email: document.getElementById('crmContactEmailInput').value.trim(),
+      phone: document.getElementById('crmContactPhoneInput').value.trim(),
+      title: document.getElementById('crmContactTitleInput').value.trim(),
+      companyId: document.getElementById('crmContactCompanySelect').value || null,
+    };
+    const r = crmEditingContactId
+      ? await apiFetch(`/org/crm/contacts/${encodeURIComponent(crmEditingContactId)}`, { method: 'PATCH', body: JSON.stringify(payload) })
+      : await apiFetch('/org/crm/contacts', { method: 'POST', body: JSON.stringify(payload) });
+    if (!r.ok){
+      hintEl.textContent = 'Could not save. Try again.';
+      hintEl.style.display = 'block';
+      return;
+    }
+    crmResetContactForm();
+    loadCrmContacts();
+  });
+
+  async function crmDeleteContact(id){
+    if (!crmActiveOrg) return;
+    if (!confirm('Delete this contact?')) return;
+    await apiFetch(`/org/crm/contacts/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ orgId: crmActiveOrg.id }) });
+    loadCrmContacts();
+  }
+
+  // ---- Pipeline (deals) ----
+  async function loadCrmDeals(){
+    if (!crmActiveOrg) return;
+    const boardEl = document.getElementById('crmPipelineBoard');
+    boardEl.innerHTML = '<div class="hint">Loading…</div>';
+    if (!crmCompaniesCache.length || !crmContactsCache.length){
+      const [cr, kr] = await Promise.all([
+        crmCompaniesCache.length ? Promise.resolve(null) : apiFetch(`/org/crm/companies?orgId=${encodeURIComponent(crmActiveOrg.id)}`),
+        crmContactsCache.length ? Promise.resolve(null) : apiFetch(`/org/crm/contacts?orgId=${encodeURIComponent(crmActiveOrg.id)}`),
+      ]);
+      if (cr && cr.ok && cr.body && Array.isArray(cr.body.companies)) crmCompaniesCache = cr.body.companies;
+      if (kr && kr.ok && kr.body && Array.isArray(kr.body.contacts)) crmContactsCache = kr.body.contacts;
+      crmPopulateCompanySelects();
+    }
+    crmPopulateDealContactSelect();
+    const r = await apiFetch(`/org/crm/deals?orgId=${encodeURIComponent(crmActiveOrg.id)}`);
+    if (!r.ok || !r.body || !Array.isArray(r.body.deals)){
+      boardEl.innerHTML = '<div class="hint">Could not load the pipeline. Try again.</div>';
+      return;
+    }
+    crmDealsCache = r.body.deals;
+    renderCrmPipeline();
+  }
+
+  function crmPopulateDealContactSelect(){
+    const companyId = document.getElementById('crmDealCompanySelect').value;
+    const relevant = companyId ? crmContactsCache.filter(c => c.companyId === companyId) : crmContactsCache;
+    document.getElementById('crmDealContactSelect').innerHTML = '<option value="">— None —</option>' + relevant.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+  }
+  document.getElementById('crmDealCompanySelect').addEventListener('change', crmPopulateDealContactSelect);
+
+  function crmFmtMoney(v){
+    const n = Number(v) || 0;
+    return n.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+  }
+
+  function renderCrmPipeline(){
+    const boardEl = document.getElementById('crmPipelineBoard');
+    const emptyEl = document.getElementById('crmPipelineEmpty');
+    emptyEl.style.display = crmDealsCache.length ? 'none' : 'block';
+    boardEl.innerHTML = CRM_STAGES.map(stage => {
+      const deals = crmDealsCache.filter(d => d.stage === stage);
+      return `
+        <div style="flex:0 0 220px; min-width:220px;">
+          <h3 style="font-size:13px; text-transform:uppercase; letter-spacing:0.04em; opacity:0.7;">${CRM_STAGE_LABELS[stage]} <span class="hint">(${deals.length})</span></h3>
+          <div style="display:flex; flex-direction:column; gap:8px;">
+            ${deals.map(d => crmDealCardHtml(d, stage)).join('') || '<div class="hint" style="font-size:12px;">Empty</div>'}
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function crmDealCardHtml(d, stage){
+    const idx = CRM_STAGES.indexOf(stage);
+    const prevStage = idx > 0 ? CRM_STAGES[idx - 1] : null;
+    const nextStage = idx < CRM_STAGES.length - 1 ? CRM_STAGES[idx + 1] : null;
+    const sub = [crmCompanyName(d.companyId), d.value ? crmFmtMoney(d.value) : ''].filter(Boolean).join(' · ');
+    return `
+      <div style="padding:10px; border-radius:12px; background:rgba(var(--tint-rgb),0.05); border:1px solid var(--glass-brd);">
+        <div style="font-weight:600; font-size:13px;">${escapeHtml(d.title)}</div>
+        ${sub ? `<div class="hint" style="margin-top:2px;">${escapeHtml(sub)}</div>` : ''}
+        ${crmCanManage ? `
+          <div style="display:flex; gap:6px; margin-top:8px;">
+            ${prevStage ? `<span class="icon-btn" style="width:24px; height:24px; font-size:11px;" title="Move to ${CRM_STAGE_LABELS[prevStage]}" onclick="crmMoveDeal('${d.id}','${prevStage}')">‹</span>` : ''}
+            ${nextStage ? `<span class="icon-btn" style="width:24px; height:24px; font-size:11px;" title="Move to ${CRM_STAGE_LABELS[nextStage]}" onclick="crmMoveDeal('${d.id}','${nextStage}')">›</span>` : ''}
+            <span class="icon-btn" style="width:24px; height:24px; font-size:11px;" title="Delete" onclick="crmDeleteDeal('${d.id}')">🗑</span>
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }
+
+  async function crmMoveDeal(id, stage){
+    if (!crmActiveOrg) return;
+    await apiFetch(`/org/crm/deals/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ orgId: crmActiveOrg.id, stage }) });
+    loadCrmDeals();
+  }
+
+  async function crmDeleteDeal(id){
+    if (!crmActiveOrg) return;
+    if (!confirm('Delete this deal?')) return;
+    await apiFetch(`/org/crm/deals/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ orgId: crmActiveOrg.id }) });
+    loadCrmDeals();
+  }
+
+  function crmResetDealForm(){
+    document.getElementById('crmDealTitleInput').value = '';
+    document.getElementById('crmDealValueInput').value = '';
+    document.getElementById('crmDealCompanySelect').value = '';
+    document.getElementById('crmDealContactSelect').value = '';
+    document.getElementById('crmDealHint').style.display = 'none';
+  }
+
+  document.getElementById('crmDealSaveBtn').addEventListener('click', async ()=>{
+    if (!crmActiveOrg) return;
+    const hintEl = document.getElementById('crmDealHint');
+    const title = document.getElementById('crmDealTitleInput').value.trim();
+    if (!title){
+      hintEl.textContent = 'Title is required.';
+      hintEl.style.display = 'block';
+      return;
+    }
+    const payload = {
+      orgId: crmActiveOrg.id,
+      title,
+      value: Number(document.getElementById('crmDealValueInput').value) || 0,
+      companyId: document.getElementById('crmDealCompanySelect').value || null,
+      contactId: document.getElementById('crmDealContactSelect').value || null,
+    };
+    const r = await apiFetch('/org/crm/deals', { method: 'POST', body: JSON.stringify(payload) });
+    if (!r.ok){
+      hintEl.textContent = 'Could not save. Try again.';
+      hintEl.style.display = 'block';
+      return;
+    }
+    crmResetDealForm();
+    loadCrmDeals();
+  });
 
   function hrFmtDate(ts){
     if (!ts) return '';

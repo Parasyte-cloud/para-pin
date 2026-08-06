@@ -996,7 +996,10 @@ async function isOrgAdminIgnoringBilling(storage, orgId, userId) {
 // start_meetings    - start/join the unlimited workspace Meeting Room (recording + AI assistant)
 // create_channels   - create a new group chat/channel within this workspace
 // moderate_messages - delete any member's message in a workspace group chat, not just your own
-const ORG_PERMISSIONS = ['manage_workspace', 'manage_members', 'manage_hr', 'start_meetings', 'create_channels', 'moderate_messages'];
+// manage_crm        - create/edit/delete companies, contacts, and deals (any member can still VIEW the
+//                     CRM once they're an org member at all — same "read is org-wide, write is gated"
+//                     split as HR's directory vs. profile-editing)
+const ORG_PERMISSIONS = ['manage_workspace', 'manage_members', 'manage_hr', 'start_meetings', 'create_channels', 'moderate_messages', 'manage_crm'];
 
 // Whether an ordinary (non-admin) member has each permission before any
 // explicit admin override. manage_* and moderate_messages default OFF, they
@@ -1014,6 +1017,7 @@ const ORG_PERMISSION_DEFAULTS = {
   start_meetings: true,
   create_channels: true,
   moderate_messages: false,
+  manage_crm: false,
 };
 
 // Raw admin-set overrides for one member, `{ [permission]: true|false }`.
@@ -4267,6 +4271,285 @@ export class Registry {
         return { ...e, runningBalance: e.type === 'annual' ? runningAnnual : runningSick };
       }).reverse();
       return json({ rows, hireDate: employee.hireDate });
+    }
+
+    // ==================== CRM (Companies / Contacts / Deals) ====================
+    // Same shape as the HR module above: workspace-scoped (Personal has no
+    // CRM, same as it has no HR), list-of-ids index + individual records per
+    // entity, read is any org member (isOrgMember — a CRM only pulling up
+    // customer chat/call history for the person looking at it is the whole
+    // point, same reasoning as HR's directory being member-readable), write
+    // needs manage_crm (admins always have it via hasOrgPermission). Every
+    // write appends an audit-log entry, same as every other workspace-
+    // settings/HR mutation already does.
+    //
+    // Pipeline stages are a fixed list for now (not per-workspace
+    // configurable) — same "ship a sane default, no role/stage CRUD to
+    // build" call ORG_PERMISSIONS itself already made. 'won'/'lost' are
+    // terminal: a deal moved into either gets `closedAt` stamped.
+    const CRM_STAGES = ['lead', 'qualified', 'proposal', 'negotiation', 'won', 'lost'];
+    const CRM_CLOSED_STAGES = ['won', 'lost'];
+
+    function crmSanitizeCompany(input) {
+      return {
+        name: (input.name || '').toString().trim().slice(0, 120),
+        domain: input.domain ? String(input.domain).trim().toLowerCase().slice(0, 120) : null,
+        industry: input.industry ? String(input.industry).trim().slice(0, 80) : null,
+        website: input.website ? String(input.website).trim().slice(0, 300) : null,
+        phone: input.phone ? String(input.phone).trim().slice(0, 40) : null,
+        notes: input.notes ? String(input.notes).trim().slice(0, 4000) : null,
+      };
+    }
+    function crmSanitizeContact(input) {
+      return {
+        companyId: input.companyId ? String(input.companyId) : null,
+        firstName: (input.firstName || '').toString().trim().slice(0, 80),
+        lastName: input.lastName ? String(input.lastName).trim().slice(0, 80) : null,
+        email: input.email ? String(input.email).trim().slice(0, 200) : null,
+        phone: input.phone ? String(input.phone).trim().slice(0, 40) : null,
+        title: input.title ? String(input.title).trim().slice(0, 100) : null,
+        notes: input.notes ? String(input.notes).trim().slice(0, 4000) : null,
+      };
+    }
+    function crmSanitizeDeal(input) {
+      const stage = CRM_STAGES.includes(input.stage) ? input.stage : 'lead';
+      return {
+        companyId: input.companyId ? String(input.companyId) : null,
+        contactId: input.contactId ? String(input.contactId) : null,
+        name: (input.name || '').toString().trim().slice(0, 160),
+        value: Number.isFinite(Number(input.value)) ? Math.max(0, Number(input.value)) : 0,
+        currency: input.currency ? String(input.currency).trim().slice(0, 6).toUpperCase() : 'USD',
+        stage,
+        expectedCloseDate: input.expectedCloseDate ? String(input.expectedCloseDate).slice(0, 10) : null,
+        notes: input.notes ? String(input.notes).trim().slice(0, 4000) : null,
+      };
+    }
+
+    if (request.method === 'POST' && url.pathname === '/org/crm/companies') {
+      const { pinHash, orgId, ...fields } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+      if (!(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_crm'))) return json({ error: 'forbidden' }, 403);
+      const clean = crmSanitizeCompany(fields);
+      if (!clean.name) return json({ error: 'missing_name' }, 400);
+      const id = crypto.randomUUID();
+      const now = Date.now();
+      const company = { id, orgId, ...clean, createdAt: now, updatedAt: now, createdBy: me.id };
+      await this.state.storage.put(`crmCompany:${orgId}:${id}`, company);
+      const ids = (await this.state.storage.get(`crmCompanyIds:${orgId}`)) || [];
+      await this.state.storage.put(`crmCompanyIds:${orgId}`, [...ids, id]);
+      await appendAuditLog(this.state.storage, orgId, {
+        actorId: me.id, actorName: me.displayName || 'Someone', action: 'crm_company_created',
+        details: `Added company: ${clean.name}`,
+      });
+      return json({ company });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/org/crm/companies') {
+      const pinHash = url.searchParams.get('pinHash');
+      const orgId = url.searchParams.get('orgId');
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+      const ids = (await this.state.storage.get(`crmCompanyIds:${orgId}`)) || [];
+      const companies = [];
+      for (const id of ids) {
+        const c = await this.state.storage.get(`crmCompany:${orgId}:${id}`);
+        if (c) companies.push(c);
+      }
+      companies.sort((a, b) => a.name.localeCompare(b.name));
+      return json({ companies });
+    }
+
+    if (url.pathname.match(/^\/org\/crm\/companies\/[^/]+$/) && (request.method === 'PATCH' || request.method === 'DELETE')) {
+      const companyId = url.pathname.split('/')[4];
+      const { pinHash, orgId, ...fields } = await request.json().catch(() => ({}));
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+      if (!(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_crm'))) return json({ error: 'forbidden' }, 403);
+      const existing = await this.state.storage.get(`crmCompany:${orgId}:${companyId}`);
+      if (!existing) return json({ error: 'not_found' }, 404);
+
+      if (request.method === 'DELETE') {
+        await this.state.storage.delete(`crmCompany:${orgId}:${companyId}`);
+        const ids = (await this.state.storage.get(`crmCompanyIds:${orgId}`)) || [];
+        await this.state.storage.put(`crmCompanyIds:${orgId}`, ids.filter((id) => id !== companyId));
+        // Contacts/deals that pointed at this company aren't cascade-deleted
+        // (real customer data — a company being removed from the CRM
+        // shouldn't silently vaporize its contacts/deal history) — they just
+        // read back with a companyId that no longer resolves; the UI shows
+        // them as "no company" rather than erroring.
+        await appendAuditLog(this.state.storage, orgId, {
+          actorId: me.id, actorName: me.displayName || 'Someone', action: 'crm_company_deleted',
+          details: `Deleted company: ${existing.name}`,
+        });
+        return json({ ok: true });
+      }
+
+      const clean = crmSanitizeCompany({ ...existing, ...fields });
+      if (!clean.name) return json({ error: 'missing_name' }, 400);
+      const company = { ...existing, ...clean, updatedAt: Date.now() };
+      await this.state.storage.put(`crmCompany:${orgId}:${companyId}`, company);
+      await appendAuditLog(this.state.storage, orgId, {
+        actorId: me.id, actorName: me.displayName || 'Someone', action: 'crm_company_updated',
+        details: `Updated company: ${clean.name}`,
+      });
+      return json({ company });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/org/crm/contacts') {
+      const { pinHash, orgId, ...fields } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+      if (!(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_crm'))) return json({ error: 'forbidden' }, 403);
+      const clean = crmSanitizeContact(fields);
+      if (!clean.firstName) return json({ error: 'missing_name' }, 400);
+      const id = crypto.randomUUID();
+      const now = Date.now();
+      const contact = { id, orgId, ...clean, createdAt: now, updatedAt: now, createdBy: me.id };
+      await this.state.storage.put(`crmContact:${orgId}:${id}`, contact);
+      const ids = (await this.state.storage.get(`crmContactIds:${orgId}`)) || [];
+      await this.state.storage.put(`crmContactIds:${orgId}`, [...ids, id]);
+      await appendAuditLog(this.state.storage, orgId, {
+        actorId: me.id, actorName: me.displayName || 'Someone', action: 'crm_contact_created',
+        details: `Added contact: ${clean.firstName} ${clean.lastName || ''}`.trim(),
+      });
+      return json({ contact });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/org/crm/contacts') {
+      const pinHash = url.searchParams.get('pinHash');
+      const orgId = url.searchParams.get('orgId');
+      const companyId = url.searchParams.get('companyId') || null;
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+      const ids = (await this.state.storage.get(`crmContactIds:${orgId}`)) || [];
+      let contacts = [];
+      for (const id of ids) {
+        const c = await this.state.storage.get(`crmContact:${orgId}:${id}`);
+        if (c) contacts.push(c);
+      }
+      if (companyId) contacts = contacts.filter((c) => c.companyId === companyId);
+      contacts.sort((a, b) => a.firstName.localeCompare(b.firstName));
+      return json({ contacts });
+    }
+
+    if (url.pathname.match(/^\/org\/crm\/contacts\/[^/]+$/) && (request.method === 'PATCH' || request.method === 'DELETE')) {
+      const contactId = url.pathname.split('/')[4];
+      const { pinHash, orgId, ...fields } = await request.json().catch(() => ({}));
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+      if (!(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_crm'))) return json({ error: 'forbidden' }, 403);
+      const existing = await this.state.storage.get(`crmContact:${orgId}:${contactId}`);
+      if (!existing) return json({ error: 'not_found' }, 404);
+
+      if (request.method === 'DELETE') {
+        await this.state.storage.delete(`crmContact:${orgId}:${contactId}`);
+        const ids = (await this.state.storage.get(`crmContactIds:${orgId}`)) || [];
+        await this.state.storage.put(`crmContactIds:${orgId}`, ids.filter((id) => id !== contactId));
+        await appendAuditLog(this.state.storage, orgId, {
+          actorId: me.id, actorName: me.displayName || 'Someone', action: 'crm_contact_deleted',
+          details: `Deleted contact: ${existing.firstName} ${existing.lastName || ''}`.trim(),
+        });
+        return json({ ok: true });
+      }
+
+      const clean = crmSanitizeContact({ ...existing, ...fields });
+      if (!clean.firstName) return json({ error: 'missing_name' }, 400);
+      const contact = { ...existing, ...clean, updatedAt: Date.now() };
+      await this.state.storage.put(`crmContact:${orgId}:${contactId}`, contact);
+      await appendAuditLog(this.state.storage, orgId, {
+        actorId: me.id, actorName: me.displayName || 'Someone', action: 'crm_contact_updated',
+        details: `Updated contact: ${clean.firstName} ${clean.lastName || ''}`.trim(),
+      });
+      return json({ contact });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/org/crm/deals') {
+      const { pinHash, orgId, ...fields } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+      if (!(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_crm'))) return json({ error: 'forbidden' }, 403);
+      const clean = crmSanitizeDeal(fields);
+      if (!clean.name) return json({ error: 'missing_name' }, 400);
+      const id = crypto.randomUUID();
+      const now = Date.now();
+      const deal = {
+        id, orgId, ...clean, createdAt: now, updatedAt: now, createdBy: me.id,
+        closedAt: CRM_CLOSED_STAGES.includes(clean.stage) ? now : null,
+      };
+      await this.state.storage.put(`crmDeal:${orgId}:${id}`, deal);
+      const ids = (await this.state.storage.get(`crmDealIds:${orgId}`)) || [];
+      await this.state.storage.put(`crmDealIds:${orgId}`, [...ids, id]);
+      await appendAuditLog(this.state.storage, orgId, {
+        actorId: me.id, actorName: me.displayName || 'Someone', action: 'crm_deal_created',
+        details: `Added deal: ${clean.name} (${clean.stage})`,
+      });
+      return json({ deal });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/org/crm/deals') {
+      const pinHash = url.searchParams.get('pinHash');
+      const orgId = url.searchParams.get('orgId');
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+      const ids = (await this.state.storage.get(`crmDealIds:${orgId}`)) || [];
+      const deals = [];
+      for (const id of ids) {
+        const d = await this.state.storage.get(`crmDeal:${orgId}:${id}`);
+        if (d) deals.push(d);
+      }
+      deals.sort((a, b) => b.updatedAt - a.updatedAt);
+      return json({ deals, stages: CRM_STAGES });
+    }
+
+    if (url.pathname.match(/^\/org\/crm\/deals\/[^/]+$/) && (request.method === 'PATCH' || request.method === 'DELETE')) {
+      const dealId = url.pathname.split('/')[4];
+      const { pinHash, orgId, ...fields } = await request.json().catch(() => ({}));
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
+      if (!(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_crm'))) return json({ error: 'forbidden' }, 403);
+      const existing = await this.state.storage.get(`crmDeal:${orgId}:${dealId}`);
+      if (!existing) return json({ error: 'not_found' }, 404);
+
+      if (request.method === 'DELETE') {
+        await this.state.storage.delete(`crmDeal:${orgId}:${dealId}`);
+        const ids = (await this.state.storage.get(`crmDealIds:${orgId}`)) || [];
+        await this.state.storage.put(`crmDealIds:${orgId}`, ids.filter((id) => id !== dealId));
+        await appendAuditLog(this.state.storage, orgId, {
+          actorId: me.id, actorName: me.displayName || 'Someone', action: 'crm_deal_deleted',
+          details: `Deleted deal: ${existing.name}`,
+        });
+        return json({ ok: true });
+      }
+
+      const wasClosed = CRM_CLOSED_STAGES.includes(existing.stage);
+      const clean = crmSanitizeDeal({ ...existing, ...fields });
+      if (!clean.name) return json({ error: 'missing_name' }, 400);
+      const nowClosed = CRM_CLOSED_STAGES.includes(clean.stage);
+      const deal = {
+        ...existing, ...clean, updatedAt: Date.now(),
+        // Stamp the moment it FIRST lands on a closed stage; moving between
+        // won/lost (correcting a mistake) or reopening back to an earlier
+        // stage clears it rather than leaving a stale timestamp behind.
+        closedAt: nowClosed ? (existing.closedAt || Date.now()) : null,
+      };
+      await this.state.storage.put(`crmDeal:${orgId}:${dealId}`, deal);
+      await appendAuditLog(this.state.storage, orgId, {
+        actorId: me.id, actorName: me.displayName || 'Someone', action: 'crm_deal_updated',
+        details: existing.stage !== clean.stage
+          ? `Moved deal "${clean.name}" from ${existing.stage} to ${clean.stage}`
+          : `Updated deal: ${clean.name}`,
+      });
+      return json({ deal });
     }
 
     // ---- Ask HR: grounded Q&A over the asker's own actual HR data ----
@@ -8121,6 +8404,86 @@ export default {
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
         const orgId = url.searchParams.get('orgId') || '';
         return registryStub.fetch(`https://internal/org/hr/directory?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}`);
+      }
+
+      // ---- CRM (Companies / Contacts / Deals): thin authenticated proxy to Registry ----
+      if (request.method === 'POST' && url.pathname === '/api/org/crm/companies') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/org/crm/companies', {
+          method: 'POST',
+          body: JSON.stringify({ ...body, pinHash }),
+        });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/org/crm/companies') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const orgId = url.searchParams.get('orgId') || '';
+        return registryStub.fetch(`https://internal/org/crm/companies?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}`);
+      }
+      const crmCompanyMatch = url.pathname.match(/^\/api\/org\/crm\/companies\/([^/]+)$/);
+      if (crmCompanyMatch && (request.method === 'PATCH' || request.method === 'DELETE')) {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch(`https://internal/org/crm/companies/${encodeURIComponent(crmCompanyMatch[1])}`, {
+          method: request.method,
+          body: JSON.stringify({ ...body, pinHash }),
+        });
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/org/crm/contacts') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/org/crm/contacts', {
+          method: 'POST',
+          body: JSON.stringify({ ...body, pinHash }),
+        });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/org/crm/contacts') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const orgId = url.searchParams.get('orgId') || '';
+        const companyId = url.searchParams.get('companyId') || '';
+        return registryStub.fetch(`https://internal/org/crm/contacts?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}&companyId=${encodeURIComponent(companyId)}`);
+      }
+      const crmContactMatch = url.pathname.match(/^\/api\/org\/crm\/contacts\/([^/]+)$/);
+      if (crmContactMatch && (request.method === 'PATCH' || request.method === 'DELETE')) {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch(`https://internal/org/crm/contacts/${encodeURIComponent(crmContactMatch[1])}`, {
+          method: request.method,
+          body: JSON.stringify({ ...body, pinHash }),
+        });
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/org/crm/deals') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/org/crm/deals', {
+          method: 'POST',
+          body: JSON.stringify({ ...body, pinHash }),
+        });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/org/crm/deals') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const orgId = url.searchParams.get('orgId') || '';
+        return registryStub.fetch(`https://internal/org/crm/deals?pinHash=${encodeURIComponent(pinHash)}&orgId=${encodeURIComponent(orgId)}`);
+      }
+      const crmDealMatch = url.pathname.match(/^\/api\/org\/crm\/deals\/([^/]+)$/);
+      if (crmDealMatch && (request.method === 'PATCH' || request.method === 'DELETE')) {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch(`https://internal/org/crm/deals/${encodeURIComponent(crmDealMatch[1])}`, {
+          method: request.method,
+          body: JSON.stringify({ ...body, pinHash }),
+        });
       }
 
       if (request.method === 'GET' && url.pathname === '/api/org/hr/export/employees') {
