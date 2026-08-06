@@ -7083,12 +7083,21 @@
   // picked here, see openAddToCallOverlay/addToCallConfirmBtn below.
   let addToCallSelected = new Set();
 
+  // Server already knows for certain whether TURN is configured for this
+  // deployment (see /calls/ice-servers' turnError) — previously fetched and
+  // then silently discarded here, so the only signal a user ever got that
+  // TURN was the problem was a generic post-timeout guess ("this usually
+  // means..."). Cached alongside the ice servers themselves so
+  // startAwaitingConnection's timeout message below can say something
+  // definitive instead of speculative when the answer is actually known.
+  let iceTurnErrorCache = null;
   async function getIceServers(){
     if (iceServersCache) return iceServersCache;
     const r = await apiFetch('/calls/ice-servers');
     iceServersCache = (r.ok && r.body.iceServers && r.body.iceServers.length)
       ? r.body.iceServers
       : [{ urls: 'stun:stun.l.google.com:19302' }];
+    if (r.ok) iceTurnErrorCache = r.body.turnError || null;
     return iceServersCache;
   }
 
@@ -7434,7 +7443,12 @@
     if (connectTimeoutTimer) clearTimeout(connectTimeoutTimer);
     connectTimeoutTimer = setTimeout(()=>{
       if (callState !== 'idle' && callState !== 'connected'){
-        alert("Couldn't connect this call. This usually means the two networks involved need a relay (TURN) that isn't set up yet. Ask your admin to configure Cloudflare Realtime TURN in Settings.");
+        const msg = iceTurnErrorCache === 'turn_not_configured'
+          ? "Couldn't connect this call. This deployment doesn't have a TURN relay configured yet, which is required for some networks (corporate firewalls, certain mobile carriers) to connect at all. Ask your admin to set CF_TURN_KEY_ID/CF_TURN_API_TOKEN."
+          : iceTurnErrorCache
+          ? "Couldn't connect this call. The TURN relay this deployment depends on for some networks couldn't be reached just now — this is usually temporary."
+          : "Couldn't connect this call. This usually means the two networks involved need a relay (TURN) that isn't set up yet. Ask your admin to configure Cloudflare Realtime TURN in Settings.";
+        alert(msg);
         endCall('connect-timeout');
       }
     }, CONNECT_TIMEOUT_MS);

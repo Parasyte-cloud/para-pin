@@ -807,6 +807,22 @@ function json(data, status = 200) {
   });
 }
 
+// Structured, greppable logging for the realtime call/meeting stack —
+// `wrangler tail | grep '\[realtime\]'` (or a Logpush filter on the same
+// tag) is the entire observability story for this subsystem otherwise
+// nothing at all was being recorded server-side about offers, answers,
+// participant join/leave, TURN availability, or any of it, meaning a
+// production call failure had zero server-side trail to diagnose it from.
+// One line per event, single JSON object, so every failure is at least
+// reproducible/traceable after the fact even without a dedicated analytics
+// pipeline wired up. Deliberately NOT logging per-ICE-candidate traffic —
+// that's legitimately many-events-per-second-per-call and adds volume
+// without adding diagnostic value; the events that matter for "why didn't
+// this call/meeting work" are the ones below.
+function logRealtime(event, fields) {
+  try { console.log('[realtime]', JSON.stringify({ event, ts: Date.now(), ...fields })); } catch (e) {}
+}
+
 // Rough, best-effort device label from a User-Agent string, purely cosmetic
 // (for the Settings > Devices list below) — never used for any trust
 // decision, so getting it slightly wrong for an exotic browser is harmless.
@@ -5782,6 +5798,39 @@ export class UserChannel {
       const payload = await request.text();
       let data = null;
       try { data = JSON.parse(payload); } catch (e) {}
+
+      // Rate-limited on the recipient's own DO instance (this DO is already
+      // scoped to one user), and only on 'offer'/'meeting-invite' — the two
+      // kinds that actually make this device ring — not on
+      // ice-candidate/answer/end/ice-restart-*, which are legitimate,
+      // necessarily high-frequency traffic inside a call the recipient
+      // already consented to. Without this, any authenticated account could
+      // flood a specific target with fake incoming-call/meeting rings (a
+      // real harassment vector, and one that also burns through the actual
+      // push-provider (APNs/FCM/Web Push) quota this whole deployment
+      // shares). 20 new ring attempts/minute is generous for legitimate
+      // rapid-redial behavior while still capping a flood.
+      if (data && data.signal && (data.signal.kind === 'offer' || data.signal.kind === 'meeting-invite')) {
+        const rl = await checkRateLimit(this.state.storage, 'inbound-ring', { maxAttempts: 20, windowMs: 60000, lockoutMs: 60000 });
+        if (!rl.allowed) {
+          logRealtime('call_signal_rate_limited', { kind: data.signal.kind, callId: data.signal.callId || null, fromUserId: data.signal.fromUserId || null });
+          return json({ error: 'rate_limited', retryAfterMs: rl.retryAfterMs }, 429);
+        }
+      }
+
+      // Lifecycle events worth a durable trail: offer/answer/end/restart and
+      // busy/decline reasons. ice-candidate itself is intentionally excluded
+      // (see logRealtime's own comment) — too high-volume, too low-value.
+      if (data && data.signal && data.signal.kind !== 'ice-candidate') {
+        logRealtime('call_signal', {
+          kind: data.signal.kind,
+          callId: data.signal.callId || null,
+          fromUserId: data.signal.fromUserId || null,
+          reason: data.signal.reason || null,
+          liveSessionsForRecipient: this.sessions.size,
+        });
+      }
+
       for (const ws of this.sessions.keys()) {
         try {
           ws.send(payload);
@@ -6397,6 +6446,34 @@ export class MeetingRoom {
     }
   }
 
+  // This DO doesn't use the hibernatable WebSocket API, so a socket that
+  // never cleanly fires 'close'/'error' — the app was killed rather than
+  // backgrounded, the OS silently dropped the connection, a laptop's lid
+  // shut mid-network-transition — just sits in `sessions` forever looking
+  // "live" to everyone else: a ghost tile nobody can get rid of short of
+  // the whole DO being evicted for unrelated reasons. Every real participant
+  // already pings every 20s (see meetingWsPingInterval on both clients), so
+  // silence past PRESENCE_STALE_MS (2.5x that interval, same constant
+  // UserChannel's presence sweep uses) means genuinely gone, not just a
+  // slow tick. Called on every ping received and on every new join, so as
+  // long as at least one real participant is present, ghosts get swept
+  // within one ping cycle — no DO alarm/timer needed for a case that only
+  // matters while someone's still actually in the room to notice.
+  sweepGhosts(exceptWs) {
+    const now = Date.now();
+    for (const [ws, session] of this.sessions) {
+      if (ws === exceptWs) continue;
+      if (now - (session.lastPingAt || 0) <= PRESENCE_STALE_MS) continue;
+      this.sessions.delete(ws);
+      if (session.userId && this.userSessions.get(session.userId) === ws) this.userSessions.delete(session.userId);
+      try { ws.close(); } catch (e) {}
+      if (session.userId) {
+        logRealtime('meeting_ghost_swept', { userId: session.userId, silentForMs: now - (session.lastPingAt || 0) });
+        this.broadcast(JSON.stringify({ type: 'participant-left', userId: session.userId }), null);
+      }
+    }
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
 
@@ -6408,7 +6485,9 @@ export class MeetingRoom {
       // so it's the one place that can enforce it for real rather than
       // just hiding a button.
       const cap = parseInt(url.searchParams.get('cap') || '0', 10);
+      const meetingIdForLog = url.searchParams.get('meetingId') || null;
       if (cap > 0 && this.sessions.size >= cap) {
+        logRealtime('meeting_join_rejected_full', { meetingId: meetingIdForLog, cap, currentSize: this.sessions.size });
         return json({ error: 'meeting_full', cap }, 403);
       }
 
@@ -6424,7 +6503,8 @@ export class MeetingRoom {
       // Record/AI UI reacts to what actually got verified, not its own
       // guess at connect time.
       const verifiedOrgId = url.searchParams.get('verifiedOrgId') || null;
-      const me = { userId, name, avatarUrl, sfuSessionId: null, tracks: new Map() };
+      const me = { userId, name, avatarUrl, sfuSessionId: null, tracks: new Map(), lastPingAt: Date.now() };
+      this.sweepGhosts(null); // clear out anyone who went silent before this join, so the new joiner's roster snapshot is accurate
 
       // Evict any existing live session for this same userId BEFORE
       // registering the new one, so there's never more than one roster entry
@@ -6432,7 +6512,9 @@ export class MeetingRoom {
       // a beat later (asynchronously) — `evicted` on the old session record
       // is how that later cleanup knows this wasn't a real departure and
       // must not broadcast "participant-left" for someone who's still here.
+      let wasReconnect = false;
       if (userId && this.userSessions.has(userId)) {
+        wasReconnect = true;
         const staleWs = this.userSessions.get(userId);
         const stale = this.sessions.get(staleWs);
         if (stale) stale.evicted = true;
@@ -6441,6 +6523,7 @@ export class MeetingRoom {
       }
       this.sessions.set(server, me);
       if (userId) this.userSessions.set(userId, server);
+      logRealtime('meeting_join', { meetingId: meetingIdForLog, userId, wasReconnect, roomSize: this.sessions.size });
 
       // Bring the new joiner up to speed on who's already here (including
       // their published tracks), then tell everyone else about the new face.
@@ -6453,7 +6536,10 @@ export class MeetingRoom {
         const wasEvicted = me.evicted === true;
         this.sessions.delete(server);
         if (userId && this.userSessions.get(userId) === server) this.userSessions.delete(userId);
-        if (userId && !wasEvicted) this.broadcast(JSON.stringify({ type: 'participant-left', userId }), null);
+        if (userId && !wasEvicted) {
+          logRealtime('meeting_leave', { meetingId: meetingIdForLog, userId, roomSize: this.sessions.size });
+          this.broadcast(JSON.stringify({ type: 'participant-left', userId }), null);
+        }
       };
       server.addEventListener('close', cleanup);
       server.addEventListener('error', cleanup);
@@ -6463,6 +6549,8 @@ export class MeetingRoom {
         try { data = JSON.parse(ev.data); } catch (e) { return; }
 
         if (data.type === 'ping') {
+          me.lastPingAt = Date.now();
+          this.sweepGhosts(server);
           try { server.send(JSON.stringify({ type: 'pong' })); } catch (e) {}
           return;
         }
@@ -7466,6 +7554,7 @@ export default {
         }
         // Surfaced so the client can say "calls will fail on some networks
         // because TURN isn't set up" instead of just timing out mysteriously.
+        logRealtime('ice_servers_requested', { userId: who.userId, turnConfigured: !!(env.CF_TURN_KEY_ID && env.CF_TURN_API_TOKEN), turnError });
         return json({ iceServers, turnError });
       }
 

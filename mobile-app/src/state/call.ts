@@ -30,7 +30,7 @@ import {
   type MediaStreamTrack,
 } from 'react-native-webrtc';
 import { useSessionStore } from './session';
-import { getIceServers, sendCallSignal, logCallEntry, type CallSignal } from './callSignal';
+import { getIceServers, iceTurnErrorCache, sendCallSignal, logCallEntry, type CallSignal } from './callSignal';
 import { playIncomingRingtone, playOutgoingRingback, stopRingAudio } from '../utils/ringtonePlayer';
 
 export type CallState = 'idle' | 'ringing-out' | 'ringing-in' | 'connected';
@@ -262,7 +262,13 @@ export const useCallStore = create<CallStoreState>((set, get) => {
     connectTimeoutTimer = setTimeout(() => {
       const s = get();
       if (s.callState !== 'idle' && s.callState !== 'connected') {
-        set({ connectError: "Couldn't connect this call — the two networks likely need a TURN relay your admin hasn't configured yet." });
+        const message =
+          iceTurnErrorCache === 'turn_not_configured'
+            ? "Couldn't connect this call. This deployment doesn't have a TURN relay configured yet, which some networks (corporate WiFi, certain carriers) require. Ask your admin to set it up."
+            : iceTurnErrorCache
+            ? "Couldn't connect this call. The TURN relay this deployment depends on for some networks couldn't be reached just now — this is usually temporary."
+            : "Couldn't connect this call — the two networks likely need a TURN relay your admin hasn't configured yet.";
+        set({ connectError: message });
         get().endCall('connect-timeout');
       }
     }, CONNECT_TIMEOUT_MS);

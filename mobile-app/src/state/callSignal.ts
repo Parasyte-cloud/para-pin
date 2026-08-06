@@ -13,14 +13,19 @@ export interface RtcIceServer {
 }
 
 let iceServersCache: RtcIceServer[] | null = null;
+// Mirrors index.html's iceTurnErrorCache: the server already knows for
+// certain whether TURN is configured for this deployment — cached here so
+// the connect-timeout message can be definitive instead of a guess.
+export let iceTurnErrorCache: string | null = null;
 
 export async function getIceServers(): Promise<RtcIceServer[]> {
   if (iceServersCache) return iceServersCache;
-  const res = await apiFetch<{ iceServers?: RtcIceServer[] }>('/calls/ice-servers');
+  const res = await apiFetch<{ iceServers?: RtcIceServer[]; turnError?: string | null }>('/calls/ice-servers');
   iceServersCache =
     res.ok && res.body.iceServers && res.body.iceServers.length
       ? res.body.iceServers
       : [{ urls: 'stun:stun.l.google.com:19302' }];
+  if (res.ok) iceTurnErrorCache = res.body.turnError || null;
   return iceServersCache;
 }
 
