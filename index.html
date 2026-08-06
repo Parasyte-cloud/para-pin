@@ -7056,6 +7056,10 @@
   let disconnectGraceTimer = null;
   let pendingRemoteOfferSdp = null;
   let pendingIceCandidates = [];
+  // One ICE-restart attempt per call, not per 'failed' event — a call that
+  // fails, restarts, and then fails again is treated as genuinely gone
+  // rather than retried forever. Reset in finishCall.
+  let iceRestartAttempted = false;
   let callMuted = false;
   let callsOverlayOpen = false;
   let unseenMissedCalls = 0;
@@ -7088,8 +7092,23 @@
     return iceServersCache;
   }
 
-  function sendCallSignal(toUserId, signal){
-    return apiFetch('/calls/signal', { method: 'POST', body: JSON.stringify({ toUserId, signal }) }).catch(()=>{});
+  // A dropped offer/answer/ICE-candidate here isn't recoverable later the
+  // way a chat message is (nothing re-fetches "signals I missed"), so a
+  // single transient failure — a WiFi handoff, a moment of packet loss —
+  // used to just permanently lose that one signal with zero retry. Two
+  // bounded retries on a genuine transport failure (network error, or a 5xx
+  // from a Worker that's mid-restart) covers the brief-blip case; a real
+  // "recipient unreachable" still resolves the same way it always did
+  // (silently, same as before — the ring/connect timeouts already in place
+  // are what surface that to the user, not this function).
+  async function sendCallSignal(toUserId, signal){
+    const attempt = () => apiFetch('/calls/signal', { method: 'POST', body: JSON.stringify({ toUserId, signal }) }).catch(()=>({ ok:false, networkError:true }));
+    let r = await attempt();
+    for (let i = 0; i < 2 && (!r.ok && (r.networkError || r.status === 0 || r.status >= 500)); i++){
+      await new Promise(resolve => setTimeout(resolve, 300 * (i + 1)));
+      r = await attempt();
+    }
+    return r;
   }
 
   function logCallEntry(entry){
@@ -7181,9 +7200,34 @@
         if (disconnectGraceTimer){ clearTimeout(disconnectGraceTimer); disconnectGraceTimer = null; }
         if (callState !== 'connected' && callState !== 'idle') onCallConnected();
       }
-      if ((pc.connectionState === 'failed' || pc.connectionState === 'closed') && callState !== 'idle'){
+      if (pc.connectionState === 'closed' && callState !== 'idle'){
         if (disconnectGraceTimer){ clearTimeout(disconnectGraceTimer); disconnectGraceTimer = null; }
         endCall('hangup');
+      }
+      // 'failed' means ICE genuinely couldn't (re)connect on its own — unlike
+      // 'disconnected' below, browsers never recover from this by
+      // themselves, it needs an application-level ICE restart (a fresh
+      // offer/answer with iceRestart:true) or the call is just dead. Only
+      // the original caller initiates the restart (a deterministic
+      // tie-breaker so both sides don't restart at once and collide); the
+      // callee just waits out the same grace window for either a spontaneous
+      // recovery or the incoming restart offer to land (see handleCallSignal's
+      // 'ice-restart-offer'/'ice-restart-answer'). Falls through to the exact
+      // same endCall('hangup') as before if none of that pans out in time,
+      // so the worst case is unchanged — this only ever improves the outcome.
+      if (pc.connectionState === 'failed' && callState !== 'idle'){
+        if (activeCallDirection === 'outgoing' && !iceRestartAttempted && rtcPeerConn){
+          iceRestartAttempted = true;
+          rtcPeerConn.createOffer({ iceRestart: true })
+            .then(offer => rtcPeerConn.setLocalDescription(offer).then(() => offer))
+            .then(offer => sendCallSignal(activeCallPeerId, { kind: 'ice-restart-offer', callId: activeCallId, sdp: offer.sdp }))
+            .catch(()=>{});
+        }
+        if (disconnectGraceTimer) clearTimeout(disconnectGraceTimer);
+        disconnectGraceTimer = setTimeout(()=>{
+          disconnectGraceTimer = null;
+          if ((pc.connectionState === 'failed' || pc.connectionState === 'disconnected') && callState !== 'idle') endCall('hangup');
+        }, 10000);
       }
       // 'disconnected' is the gap this was missing: browsers don't reliably
       // move from disconnected -> failed on their own (some sit there
@@ -7331,6 +7375,25 @@
       finishCall(signal.reason || 'hangup', false);
       return;
     }
+    if (kind === 'ice-restart-offer'){
+      // Only the callee side ever receives this (see the 'outgoing'-only
+      // gate where it's sent), and only while an active call's connection is
+      // actually the one asking for it.
+      if (rtcPeerConn && signal.sdp){
+        rtcPeerConn.setRemoteDescription({ type: 'offer', sdp: signal.sdp })
+          .then(() => rtcPeerConn.createAnswer())
+          .then(answer => rtcPeerConn.setLocalDescription(answer).then(() => answer))
+          .then(answer => sendCallSignal(activeCallPeerId, { kind: 'ice-restart-answer', callId: activeCallId, sdp: answer.sdp }))
+          .catch(()=>{});
+      }
+      return;
+    }
+    if (kind === 'ice-restart-answer'){
+      if (rtcPeerConn && signal.sdp){
+        rtcPeerConn.setRemoteDescription({ type: 'answer', sdp: signal.sdp }).catch(()=>{});
+      }
+      return;
+    }
   }
 
   async function acceptCall(){
@@ -7460,7 +7523,7 @@
     callState = 'idle';
     activeCallId = null; activeCallPeerId = null; activeCallPeerName = null; activeCallPeerAvatar = null;
     activeCallDirection = null; callStartedAt = null; pendingRemoteOfferSdp = null; pendingIceCandidates = [];
-    callMuted = false; callHasVideo = false; cameraOff = false;
+    callMuted = false; callHasVideo = false; cameraOff = false; iceRestartAttempted = false;
     renderCallUi();
     if (callsOverlayOpen) renderCallsPage();
   }
@@ -8453,9 +8516,15 @@
         return;
       }
       if (meetingWsReconnectTimer) clearTimeout(meetingWsReconnectTimer);
+      // Jittered rather than a flat 2s: every participant's presence socket
+      // to this same room DO can drop together (the DO itself briefly
+      // evicted, a shared network hop blipping), and a fixed delay means
+      // they'd all reconnect in the same instant and re-announce their
+      // tracks in the same instant too.
+      const delay = 1000 + Math.random() * 2000;
       meetingWsReconnectTimer = setTimeout(()=>{
         if (!meetingLeavingIntentionally && meetingId) connectMeetingWs(inviteUserIds, meetingName, true);
-      }, 2000);
+      }, delay);
     };
     meetingWs.addEventListener('close', onDrop);
     meetingWs.addEventListener('error', onDrop);
@@ -10509,7 +10578,14 @@
   function scheduleReconnect(chatId){
     if (reconnectTimer) return;
     reconnectAttempts = Math.min(reconnectAttempts + 1, 5);
-    const delay = Math.min(1000 * reconnectAttempts, 8000);
+    const base = Math.min(1000 * reconnectAttempts, 8000);
+    // Full jitter (0..base, not base +/- a bit): a Worker redeploy or a
+    // regional network blip drops every open socket at once, and a purely
+    // deterministic 1s/2s/3s.../8s schedule means every client reconnects in
+    // lockstep waves, hammering the edge at the exact same instants instead
+    // of spreading out. Randomizing the whole delay (rather than just adding
+    // jitter on top of it) is what actually breaks up the herd.
+    const delay = Math.random() * base;
     reconnectTimer = setTimeout(()=>{
       reconnectTimer = null;
       if (activeChatId === chatId) connectSocket(chatId);
@@ -11358,7 +11434,12 @@
   function scheduleNotifyReconnect(){
     if (notifyReconnectTimer) return;
     notifyReconnectAttempts = Math.min(notifyReconnectAttempts + 1, 5);
-    const delay = Math.min(800 * notifyReconnectAttempts, 4000);
+    const base = Math.min(800 * notifyReconnectAttempts, 4000);
+    // Full jitter, same reasoning as scheduleReconnect above: this socket is
+    // what carries incoming-call signaling for every user, so it's exactly
+    // the one where a synchronized mass-reconnect after an outage would hurt
+    // most, randomize the whole delay instead of just picking a fixed step.
+    const delay = Math.random() * base;
     notifyReconnectTimer = setTimeout(()=>{
       notifyReconnectTimer = null;
       if (myPinHash) connectNotifySocket();

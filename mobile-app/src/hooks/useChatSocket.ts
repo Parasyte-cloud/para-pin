@@ -11,7 +11,8 @@ import { useMessagesStore } from '../state/messages';
 import type { ChatSummary } from '../types';
 
 const PING_INTERVAL_MS = 25000;
-const RECONNECT_DELAY_MS = 2000;
+const STALE_THRESHOLD_MS = 40000;
+const MAX_RECONNECT_DELAY_MS = 8000;
 const TYPING_THROTTLE_MS = 2500;
 
 interface ChatSocketHandlers {
@@ -24,6 +25,8 @@ export function useChatSocket(chat: ChatSummary | null, handlers: ChatSocketHand
   const socketRef = useRef<WebSocket | null>(null);
   const pingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  const lastActivityRef = useRef(0);
   const lastTypingSentRef = useRef(0);
   const mountedRef = useRef(true);
   const handlersRef = useRef(handlers);
@@ -56,20 +59,55 @@ export function useChatSocket(chat: ChatSummary | null, handlers: ChatSocketHand
       }
     }
 
+    function scheduleReconnect() {
+      if (reconnectTimerRef.current) return;
+      reconnectAttemptsRef.current = Math.min(reconnectAttemptsRef.current + 1, 5);
+      const base = Math.min(1000 * reconnectAttemptsRef.current, MAX_RECONNECT_DELAY_MS);
+      // Full jitter + growing backoff, mirrors index.html's connectSocket —
+      // this used to be a flat 2s retry forever with zero growth and zero
+      // jitter, the worst combination for a real outage (every client
+      // hammering the same 2s cadence in lockstep instead of backing off).
+      const delay = Math.random() * base;
+      reconnectTimerRef.current = setTimeout(() => {
+        reconnectTimerRef.current = null;
+        connect();
+      }, delay);
+    }
+
     function connect() {
       if (!mountedRef.current) return;
       let ws: WebSocket;
       try {
         ws = new WebSocket(wsUrl(`/chats/${activeChatId}/ws`));
       } catch {
-        reconnectTimerRef.current = setTimeout(connect, RECONNECT_DELAY_MS);
+        scheduleReconnect();
         return;
       }
       socketRef.current = ws;
+      lastActivityRef.current = Date.now();
 
       ws.addEventListener('open', () => {
+        reconnectAttemptsRef.current = 0;
+        lastActivityRef.current = Date.now();
         if (pingTimerRef.current) clearInterval(pingTimerRef.current);
+        // A mobile connection can go silently dead — carrier NAT timeout on
+        // an idle socket, screen lock, a WiFi/cellular handoff — without
+        // ever firing a 'close' event, leaving readyState stuck at "OPEN"
+        // while nothing arrives again. Previously this just pinged blindly
+        // on an interval with nothing checking whether anything (including
+        // the pong) ever came back, so that exact case was invisible here.
+        // Same fix as useNotifySocket.ts: check staleness first, force a
+        // reconnect if too much silence has passed, otherwise ping as usual.
         pingTimerRef.current = setInterval(() => {
+          if (ws.readyState !== WebSocket.OPEN) return;
+          if (Date.now() - lastActivityRef.current > STALE_THRESHOLD_MS) {
+            try {
+              ws.close();
+            } catch {
+              // close() itself throwing means it's already gone
+            }
+            return;
+          }
           try {
             ws.send(JSON.stringify({ type: 'ping' }));
           } catch {
@@ -80,6 +118,7 @@ export function useChatSocket(chat: ChatSummary | null, handlers: ChatSocketHand
       });
 
       ws.addEventListener('message', (ev) => {
+        lastActivityRef.current = Date.now();
         let data: any;
         try {
           data = JSON.parse(ev.data as string);
@@ -122,7 +161,8 @@ export function useChatSocket(chat: ChatSummary | null, handlers: ChatSocketHand
       ws.addEventListener('close', () => {
         if (pingTimerRef.current) clearInterval(pingTimerRef.current);
         pingTimerRef.current = null;
-        if (mountedRef.current) reconnectTimerRef.current = setTimeout(connect, RECONNECT_DELAY_MS);
+        if (socketRef.current === ws) socketRef.current = null;
+        if (mountedRef.current) scheduleReconnect();
       });
 
       ws.addEventListener('error', () => {

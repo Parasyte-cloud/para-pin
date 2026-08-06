@@ -50,6 +50,9 @@ let ringTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
 let connectTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
 let disconnectGraceTimer: ReturnType<typeof setTimeout> | null = null;
 let callTimerInterval: ReturnType<typeof setInterval> | null = null;
+// One ICE-restart attempt per call, not per 'failed' event — mirrors
+// index.html's iceRestartAttempted. Reset in teardownMedia (finishCall).
+let iceRestartAttempted = false;
 
 interface CallStoreState {
   callState: CallState;
@@ -112,10 +115,11 @@ function clearAllTimers() {
 
 async function createPeerConnection(
   peerId: string,
+  direction: 'incoming' | 'outgoing',
   getCallId: () => string | null,
   onRemoteStream: (stream: MediaStream) => void,
   onConnected: () => void,
-  onFailedOrClosed: () => void,
+  onClosed: () => void,
   onDisconnected: () => void
 ): Promise<RTCPeerConnection> {
   const iceServers = await getIceServers();
@@ -138,14 +142,32 @@ async function createPeerConnection(
       }
       onConnected();
     }
-    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+    if (pc.connectionState === 'closed') {
       if (disconnectGraceTimer) {
         clearTimeout(disconnectGraceTimer);
         disconnectGraceTimer = null;
       }
-      onFailedOrClosed();
+      onClosed();
     }
-    if (pc.connectionState === 'disconnected') {
+    // 'failed' never self-recovers the way 'disconnected' sometimes does —
+    // it needs an application-level ICE restart (a fresh offer/answer with
+    // iceRestart:true) or the call is just dead. Mirrors index.html's
+    // identical fix: only the original caller ('outgoing' direction)
+    // initiates the restart, a deterministic tie-breaker so both sides
+    // don't race each other; the callee just rides out the same grace
+    // window waiting for either a spontaneous recovery or the incoming
+    // restart offer (see handleCallSignal's 'ice-restart-offer'/
+    // 'ice-restart-answer' below). Falls through to the exact same
+    // onDisconnected('hangup') callback either way if nothing pans out —
+    // same worst case as before this fix, only the success case improves.
+    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+      if (pc.connectionState === 'failed' && direction === 'outgoing' && !iceRestartAttempted) {
+        iceRestartAttempted = true;
+        (pc.createOffer({ iceRestart: true } as any) as Promise<any>)
+          .then((offer: any) => pc.setLocalDescription(offer).then(() => offer))
+          .then((offer: any) => sendCallSignal(peerId, { kind: 'ice-restart-offer', callId: getCallId(), sdp: offer.sdp }))
+          .catch(() => {});
+      }
       if (disconnectGraceTimer) clearTimeout(disconnectGraceTimer);
       disconnectGraceTimer = setTimeout(() => {
         disconnectGraceTimer = null;
@@ -172,6 +194,7 @@ export const useCallStore = create<CallStoreState>((set, get) => {
     }
     pendingRemoteOfferSdp = null;
     pendingIceCandidates = [];
+    iceRestartAttempted = false;
   }
 
   function finishCall(reason: string | undefined, alreadyLogged: boolean) {
@@ -299,6 +322,7 @@ export const useCallStore = create<CallStoreState>((set, get) => {
       playOutgoingRingback().catch(() => {});
       const pc = await createPeerConnection(
         peerId,
+        'outgoing',
         () => get().callId,
         (remoteStream) => set({ remoteStream }),
         onCallConnected,
@@ -334,6 +358,7 @@ export const useCallStore = create<CallStoreState>((set, get) => {
       set({ localStream: stream });
       const pc = await createPeerConnection(
         s.peerId,
+        'incoming',
         () => get().callId,
         (remoteStream) => set({ remoteStream }),
         onCallConnected,
@@ -523,6 +548,25 @@ export const useCallStore = create<CallStoreState>((set, get) => {
       }
       if (signal.kind === 'end') {
         finishCall(signal.reason || 'hangup', false);
+        return;
+      }
+      if (signal.kind === 'ice-restart-offer') {
+        // Only the callee side ever receives this — see the 'outgoing'-only
+        // gate in createPeerConnection where it's sent.
+        if (rtcPeerConn && signal.sdp) {
+          rtcPeerConn
+            .setRemoteDescription({ type: 'offer', sdp: signal.sdp })
+            .then(() => rtcPeerConn!.createAnswer())
+            .then((answer: any) => rtcPeerConn!.setLocalDescription(answer).then(() => answer))
+            .then((answer: any) => sendCallSignal(s.peerId!, { kind: 'ice-restart-answer', callId: s.callId, sdp: answer.sdp }))
+            .catch(() => {});
+        }
+        return;
+      }
+      if (signal.kind === 'ice-restart-answer') {
+        if (rtcPeerConn && signal.sdp) {
+          rtcPeerConn.setRemoteDescription({ type: 'answer', sdp: signal.sdp }).catch(() => {});
+        }
         return;
       }
       void myUserId; // reserved for future "who initiated" checks, unused today

@@ -6365,6 +6365,15 @@ export class MeetingRoom {
     this.state = state;
     this.env = env;
     this.sessions = new Map(); // ws -> { userId, name, avatarUrl, sfuSessionId, tracks: Map(trackName -> kind) }
+    // userId -> the ws currently considered "the" live session for that
+    // person. Exists purely to detect a duplicate: a flaky-network reconnect
+    // racing its own still-closing old socket, a reconnect storm after a
+    // Worker/DO restart, or a second tab/device joining under the same
+    // identity. Without this, two live entries end up in `sessions` for one
+    // userId (a duplicate roster tile for everyone else), and whichever one
+    // closes first fires a false "participant-left" for someone who's
+    // actually still in the room on the other connection.
+    this.userSessions = new Map();
   }
 
   roster() {
@@ -6416,7 +6425,22 @@ export class MeetingRoom {
       // guess at connect time.
       const verifiedOrgId = url.searchParams.get('verifiedOrgId') || null;
       const me = { userId, name, avatarUrl, sfuSessionId: null, tracks: new Map() };
+
+      // Evict any existing live session for this same userId BEFORE
+      // registering the new one, so there's never more than one roster entry
+      // per person. The stale socket's own close/error listener still fires
+      // a beat later (asynchronously) — `evicted` on the old session record
+      // is how that later cleanup knows this wasn't a real departure and
+      // must not broadcast "participant-left" for someone who's still here.
+      if (userId && this.userSessions.has(userId)) {
+        const staleWs = this.userSessions.get(userId);
+        const stale = this.sessions.get(staleWs);
+        if (stale) stale.evicted = true;
+        this.sessions.delete(staleWs);
+        try { staleWs.close(); } catch (e) {}
+      }
       this.sessions.set(server, me);
+      if (userId) this.userSessions.set(userId, server);
 
       // Bring the new joiner up to speed on who's already here (including
       // their published tracks), then tell everyone else about the new face.
@@ -6426,8 +6450,10 @@ export class MeetingRoom {
       this.broadcast(JSON.stringify({ type: 'participant-joined', userId, name, avatarUrl }), server);
 
       const cleanup = () => {
+        const wasEvicted = me.evicted === true;
         this.sessions.delete(server);
-        if (userId) this.broadcast(JSON.stringify({ type: 'participant-left', userId }), null);
+        if (userId && this.userSessions.get(userId) === server) this.userSessions.delete(userId);
+        if (userId && !wasEvicted) this.broadcast(JSON.stringify({ type: 'participant-left', userId }), null);
       };
       server.addEventListener('close', cleanup);
       server.addEventListener('error', cleanup);

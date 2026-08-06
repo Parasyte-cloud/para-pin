@@ -25,7 +25,7 @@ export async function getIceServers(): Promise<RtcIceServer[]> {
 }
 
 export interface CallSignal {
-  kind: 'offer' | 'answer' | 'ice-candidate' | 'end';
+  kind: 'offer' | 'answer' | 'ice-candidate' | 'end' | 'ice-restart-offer' | 'ice-restart-answer';
   callId: string | null;
   sdp?: string;
   video?: boolean;
@@ -43,8 +43,23 @@ export interface CallSignal {
   orgId?: string | null;
 }
 
-export function sendCallSignal(toUserId: string, signal: CallSignal) {
-  return apiFetch('/calls/signal', { method: 'POST', body: JSON.stringify({ toUserId, signal }) }).catch(() => {});
+// Mirrors index.html's sendCallSignal exactly (index.html:7091-7106): a
+// dropped offer/answer/ICE-candidate here has no later resync path the way
+// a chat message does, so a single transient failure (a WiFi/cellular
+// handoff, a moment of packet loss) used to permanently lose that one
+// signal with zero retry. Two bounded retries on a genuine transport
+// failure covers the brief-blip case; a real "recipient unreachable" still
+// resolves the same way it always did via the existing ring/connect
+// timeouts, not this function.
+export async function sendCallSignal(toUserId: string, signal: CallSignal) {
+  const attempt = () =>
+    apiFetch('/calls/signal', { method: 'POST', body: JSON.stringify({ toUserId, signal }) }).catch(() => ({ ok: false as const, status: 0, body: null, networkError: true }));
+  let r = await attempt();
+  for (let i = 0; i < 2 && !r.ok && (r.networkError || r.status === 0 || r.status >= 500); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 300 * (i + 1)));
+    r = await attempt();
+  }
+  return r;
 }
 
 export interface CallLogEntry {

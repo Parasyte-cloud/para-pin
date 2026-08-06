@@ -75,6 +75,13 @@ let midToTrack: Record<string, { userId: string; kind: string }> = {};
 let pulledTracks = new Set<string>();
 let wsPingInterval: ReturnType<typeof setInterval> | null = null;
 let negotiationQueue: Promise<void> = Promise.resolve();
+// Presence-socket reconnect bookkeeping — mirrors index.html's
+// connectMeetingWs (meetingConnectAttempts/meetingWsReconnectTimer). This
+// was previously entirely absent on mobile (flagged inline as an explicit,
+// known gap): a dropped presence socket just left this device's presence
+// stale in the room until it explicitly left, with no self-healing at all.
+let meetingConnectAttempts = 0;
+let meetingWsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
 function enqueue(fn: () => Promise<void>) {
   negotiationQueue = negotiationQueue.then(fn).catch(() => {});
@@ -123,6 +130,9 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
   function teardown() {
     if (wsPingInterval) clearInterval(wsPingInterval);
     wsPingInterval = null;
+    if (meetingWsReconnectTimer) clearTimeout(meetingWsReconnectTimer);
+    meetingWsReconnectTimer = null;
+    meetingConnectAttempts = 0;
     if (meetingWs) {
       try {
         meetingWs.close();
@@ -308,8 +318,9 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
     const { meetingId, orgId } = get();
     const params: Record<string, string> = { meetingId: meetingId! };
     if (orgId) params.orgId = orgId;
-    meetingWs = new WebSocket(wsUrl('/meeting/room/ws', params));
-    meetingWs.addEventListener('message', (ev) => {
+    const ws = new WebSocket(wsUrl('/meeting/room/ws', params));
+    meetingWs = ws;
+    ws.addEventListener('message', (ev) => {
       let data: any;
       try {
         data = JSON.parse(ev.data as string);
@@ -319,7 +330,12 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
       if (data.type === 'pong') return;
       handleWsMessage(data);
     });
-    meetingWs.addEventListener('open', async () => {
+    ws.addEventListener('open', async () => {
+      // A real connect (first join or a reconnect) happened, don't let a
+      // handful of ordinary transient drops spread across a long meeting
+      // (each one reconnecting fine) add up toward the give-up threshold
+      // below even though every single one actually succeeded.
+      meetingConnectAttempts = 0;
       if (wsPingInterval) clearInterval(wsPingInterval);
       wsPingInterval = setInterval(() => wsSend({ type: 'ping' }), 20000);
 
@@ -373,16 +389,34 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
         }).catch(() => {});
       }
     });
-    meetingWs.addEventListener('close', () => {
+    ws.addEventListener('close', () => {
       if (wsPingInterval) clearInterval(wsPingInterval);
       wsPingInterval = null;
-      // Unlike 1:1 calls, a dropped presence socket doesn't end the
-      // meeting outright — the RTCPeerConnection/SFU session are
-      // independent (same reasoning as web) — but with no reconnect loop
-      // here (out of scope for this pass, same as web doesn't retry
-      // indefinitely either past a few attempts), a drop just leaves this
-      // device's presence stale until it explicitly leaves. Flagged
-      // rather than silently pretending to reconnect.
+      // `meetingWs !== ws` covers two cases at once: teardown() already ran
+      // (it nulls meetingWs before closing, an intentional leave) or a
+      // newer connectWs() already superseded this one — either way this
+      // stale close event must not also schedule its own reconnect on top.
+      if (meetingWs !== ws) return;
+      meetingWs = null;
+      // The RTCPeerConnection/SFU session are independent of this presence
+      // socket (same reasoning as web), so a drop doesn't end the meeting
+      // outright. Previously there was genuinely no reconnect loop at all
+      // here — a drop just left this device's presence stale in the room
+      // until it explicitly left. Mirrors index.html's connectMeetingWs:
+      // bounded retries with a jittered delay, not indefinite.
+      if (!get().meetingId) return;
+      meetingConnectAttempts++;
+      if (meetingConnectAttempts > 4) {
+        set({ errorMessage: "Lost the connection to this meeting. It may be full, or the network dropped." });
+        get().leaveMeeting();
+        return;
+      }
+      if (meetingWsReconnectTimer) clearTimeout(meetingWsReconnectTimer);
+      const delay = 1000 + Math.random() * 2000;
+      meetingWsReconnectTimer = setTimeout(() => {
+        meetingWsReconnectTimer = null;
+        if (get().meetingId) connectWs(inviteUserIds, true);
+      }, delay);
     });
   }
 

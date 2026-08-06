@@ -10,6 +10,7 @@
 // currently visible for incoming calls to work at all.
 
 import { useEffect, useRef } from 'react';
+import { AppState, type AppStateStatus } from 'react-native';
 import { wsUrl } from '../api/client';
 import { useSessionStore } from '../state/session';
 import { useCallStore } from '../state/call';
@@ -53,7 +54,13 @@ export function useNotifySocket() {
     function scheduleReconnect() {
       if (reconnectTimerRef.current) return;
       reconnectAttemptsRef.current = Math.min(reconnectAttemptsRef.current + 1, 5);
-      const delay = Math.min(800 * reconnectAttemptsRef.current, MAX_RECONNECT_DELAY_MS);
+      const base = Math.min(800 * reconnectAttemptsRef.current, MAX_RECONNECT_DELAY_MS);
+      // Full jitter (mirrors index.html's scheduleNotifyReconnect): this
+      // socket carries incoming-call signaling for every device, a mass
+      // reconnect after an outage/redeploy hitting every phone at the same
+      // deterministic step would be the worst possible place for a
+      // synchronized thundering herd.
+      const delay = Math.random() * base;
       reconnectTimerRef.current = setTimeout(() => {
         reconnectTimerRef.current = null;
         connect();
@@ -135,8 +142,31 @@ export function useNotifySocket() {
     }
 
     connect();
+
+    // iOS/Android both suspend a backgrounded app's JS timers, so a lock
+    // screen or a few minutes in another app means the heartbeat interval
+    // itself was frozen too — there's no "silently dead but still OPEN"
+    // detection running at all while backgrounded, only whatever the socket
+    // itself does (which varies by OS/carrier, and isn't reliable). Mirrors
+    // index.html's visibilitychange handler: the instant the app is
+    // foregrounded again, force a real reconnect right away instead of
+    // waiting for the heartbeat to eventually notice a stale connection,
+    // that gap is exactly what "the call/notify didn't come through until I
+    // reopened the app" looks like from the outside.
+    const appStateSub = AppState.addEventListener('change', (next: AppStateStatus) => {
+      if (next !== 'active' || !mountedRef.current) return;
+      if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) return;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      reconnectAttemptsRef.current = 0;
+      connect();
+    });
+
     return () => {
       mountedRef.current = false;
+      appStateSub.remove();
       cleanup();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
