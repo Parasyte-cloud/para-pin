@@ -12,6 +12,9 @@ import { StatusBar } from 'expo-status-bar';
 import { useSessionStore } from '../src/state/session';
 import { useTheme } from '../src/hooks/useTheme';
 import { useNotifySocket } from '../src/hooks/useNotifySocket';
+import { useDeviceStatusSelfCheck } from '../src/hooks/useDeviceStatusSelfCheck';
+import { useInactivityAutoLock } from '../src/hooks/useInactivityAutoLock';
+import { useBiometricEnrollmentWatcher } from '../src/hooks/useBiometricEnrollmentWatcher';
 import { ensurePushRegistered } from '../src/state/push';
 import CallOverlay from '../src/components/CallOverlay';
 import MeetingOverlay from '../src/components/MeetingOverlay';
@@ -65,6 +68,9 @@ export default function RootLayout() {
   // once, for the whole authenticated session, not per-screen (see
   // useNotifySocket.ts). It no-ops internally while unauthenticated/locked.
   useNotifySocket();
+  useDeviceStatusSelfCheck();
+  useInactivityAutoLock();
+  useBiometricEnrollmentWatcher();
 
   useEffect(() => {
     hydrate().finally(() => {

@@ -823,18 +823,119 @@ function logRealtime(event, fields) {
   try { console.log('[realtime]', JSON.stringify({ event, ts: Date.now(), ...fields })); } catch (e) {}
 }
 
-// Rough, best-effort device label from a User-Agent string, purely cosmetic
-// (for the Settings > Devices list below) — never used for any trust
-// decision, so getting it slightly wrong for an exotic browser is harmless.
-function guessDeviceLabel(ua) {
+// ================= Device Trust =================
+// Everything below backs the expanded device-trust model in
+// user.deviceMeta[deviceId] (see Registry's /session handler) — display
+// info parsed from the User-Agent (best-effort only, never a trust
+// decision), plus a lightweight, deliberately-transparent risk heuristic.
+// None of this claims to be what a dedicated identity vendor (Entra ID,
+// Okta) runs — no ML, no purchased threat-intel feed, no authoritative VPN
+// database — it's a real, honest, from-first-principles version of the same
+// idea, clearly labeled as heuristic wherever it is one.
+
+// Best-effort platform/OS-version/browser guess from a User-Agent string.
+// Manufacturer and exact device model are deliberately NOT attempted here —
+// modern browsers intentionally strip that level of detail from their UA
+// string for privacy reasons (Chrome's User-Agent Reduction in particular),
+// so guessing would just be wrong. Native mobile clients know their own
+// manufacturer/model for real (via expo-device) and send it explicitly in
+// the /session body instead — see the manufacturer/model handling below.
+function parseDeviceInfo(ua) {
   ua = ua || '';
-  if (/iPhone/.test(ua)) return 'iPhone';
-  if (/iPad/.test(ua)) return 'iPad';
-  if (/Android/.test(ua)) return 'Android device';
-  if (/Macintosh/.test(ua)) return 'Mac';
-  if (/Windows/.test(ua)) return 'Windows PC';
-  if (/Linux/.test(ua)) return 'Linux device';
-  return 'Device';
+  let platform = 'other', label = 'Device', osVersion = null, browser = null;
+  let m;
+  if ((m = ua.match(/iPad.*CPU OS (\d+)_(\d+)/)) || /iPad/.test(ua)) {
+    platform = 'ios'; label = 'iPad'; if (m) osVersion = `${m[1]}.${m[2]}`;
+  } else if ((m = ua.match(/iPhone OS (\d+)_(\d+)/)) || /iPhone/.test(ua)) {
+    platform = 'ios'; label = 'iPhone'; if (m) osVersion = `${m[1]}.${m[2]}`;
+  } else if ((m = ua.match(/Android (\d+(?:\.\d+)?)/)) || /Android/.test(ua)) {
+    platform = 'android'; label = 'Android device'; if (m) osVersion = m[1];
+  } else if ((m = ua.match(/Mac OS X (\d+)[_.](\d+)/)) || /Macintosh/.test(ua)) {
+    platform = 'macos'; label = 'Mac'; if (m) osVersion = `${m[1]}.${m[2]}`;
+  } else if (/Windows NT 10\.0/.test(ua)) {
+    platform = 'windows'; label = 'Windows PC'; osVersion = '10/11';
+  } else if (/Windows/.test(ua)) {
+    platform = 'windows'; label = 'Windows PC';
+  } else if (/Linux/.test(ua)) {
+    platform = 'linux'; label = 'Linux device';
+  }
+  // Order matters: Edge/Opera/Chrome-on-iOS UAs all also contain "Safari"
+  // and/or "Chrome" substrings, so the more specific token has to win first.
+  if (/EdgA?\//.test(ua)) browser = 'Edge';
+  else if (/OPR\//.test(ua)) browser = 'Opera';
+  else if (/CriOS\//.test(ua)) browser = 'Chrome';
+  else if (/FxiOS\//.test(ua) || /Firefox\//.test(ua)) browser = 'Firefox';
+  else if (/Chrome\//.test(ua)) browser = 'Chrome';
+  else if (/Safari\//.test(ua) && /Version\//.test(ua)) browser = 'Safari';
+  return { label, platform, osVersion, browser };
+}
+
+function toRad(deg) { return (deg * Math.PI) / 180; }
+
+// Great-circle distance in km — the standard haversine formula, no external
+// service needed since Cloudflare already hands every request its
+// best-guess lat/lon for free via request.cf.
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// Flags a login as "impossible travel" only when BOTH the distance is large
+// enough that a short local hop can't explain it AND the implied speed
+// exceeds what commercial air travel could plausibly achieve (with real
+// margin for great-circle-vs-actual-routing, layovers, and Cloudflare's
+// geolocation itself only being city-level accurate). Two logins from the
+// same city minutes apart are common and harmless (a phone and a laptop on
+// the same WiFi); this is specifically for "signed in from Lagos, then 40
+// minutes later from Toronto."
+function checkImpossibleTravel(lastLat, lastLon, lastTs, curLat, curLon, curTs) {
+  if (lastLat == null || lastLon == null || !lastTs || curLat == null || curLon == null) return null;
+  const distanceKm = haversineKm(lastLat, lastLon, curLat, curLon);
+  const hours = Math.max((curTs - lastTs) / 3600000, 1 / 60);
+  const impliedKmh = distanceKm / hours;
+  return { distanceKm: Math.round(distanceKm), impliedKmh: Math.round(impliedKmh), impossible: distanceKm > 300 && impliedKmh > 1000 };
+}
+
+// Heuristic, not authoritative: real VPN/proxy detection needs a paid,
+// continuously-updated IP-reputation feed (IPQualityScore, IPinfo, etc.) —
+// this deployment doesn't have one wired up. What Cloudflare hands over for
+// free is `request.cf.asOrganization`, the network operator that owns the
+// connecting IP's ASN. Matching that against known cloud/hosting providers
+// and consumer VPN brands is a real, if imprecise, first-pass signal (it's
+// genuinely how some lightweight fraud-detection systems start) — it will
+// miss VPN providers not on this list and can't distinguish "an engineer's
+// AWS-hosted jump box" from "someone renting a VPS to hide their IP." Kept
+// short and clearly labeled rather than pretending to be a real database.
+const VPN_HOSTING_ASN_KEYWORDS = [
+  'amazon', 'aws', 'google cloud', 'microsoft azure', 'digitalocean', 'linode',
+  'ovh', 'hetzner', 'vultr', 'nordvpn', 'expressvpn', 'surfshark',
+  'private internet access', 'protonvpn', 'mullvad', 'cyberghost', 'tunnelbear',
+  'ipvanish', 'hide.me', 'windscribe', 'perfect privacy', 'astrill',
+];
+function looksLikeVpnOrHosting(asOrganization) {
+  if (!asOrganization) return false;
+  const s = asOrganization.toLowerCase();
+  return VPN_HOSTING_ASN_KEYWORDS.some((k) => s.includes(k));
+}
+
+// A single weighted score (0-100) plus the human-readable reasons behind
+// it. Deliberately simple and fully transparent — every point is traceable
+// to a specific, named signal (see riskFlags), not a black-box model. This
+// is a starting point meant to be tuned against real data, not a claim of
+// being calibrated against real attack patterns yet.
+function computeDeviceRiskScore({ isNewDevice, impossibleTravel, newCountry, possibleVpnOrHosting, mfaVerified, isEmulator }) {
+  let score = 0;
+  const flags = [];
+  if (isNewDevice) { score += 20; flags.push('new_device'); }
+  if (impossibleTravel) { score += 40; flags.push('impossible_travel'); }
+  else if (newCountry) { score += 15; flags.push('new_country'); }
+  if (possibleVpnOrHosting) { score += 15; flags.push('possible_vpn_or_hosting'); }
+  if (isEmulator) { score += 20; flags.push('emulator'); }
+  if (!mfaVerified) { score += 10; flags.push('no_mfa'); }
+  return { score: Math.min(score, 100), flags };
 }
 
 // A personal (non-workspace) group call is a lighter, free-tier feature:
@@ -887,6 +988,110 @@ function arrayBufferToBase64(buf) {
 function sanitizeAvatarUrl(value) {
   if (typeof value !== 'string' || !value) return null;
   return /^\/api\/media\/[A-Za-z0-9_-]{1,100}$/.test(value) ? value : null;
+}
+
+// ================= Profile photo privacy =================
+// A NEW, separate storage tier from the generic public-media bucket path
+// above. `/api/media/<uuid>` is (and stays) a bare, unauthenticated,
+// permanently-cached public URL — fine for chat attachments people already
+// chose to share into a specific chat, wrong for a profile photo someone
+// might restrict to "Contacts" or "Nobody". Avatar keys minted through
+// /api/avatar/upload get an `avatar_` prefix specifically so the existing
+// public /api/media/:id handler can refuse to serve them (see that
+// handler's added prefix check) — every access to a private-tier avatar
+// key has to go through the signed, visibility-checked /api/avatar-blob
+// path below instead. See PROFILE_PHOTO_PRIVACY_ARCHITECTURE.md for the
+// honest boundary: this protects the NEW full-resolution viewer and
+// profile-info surfaces; the small inline thumbnails used in chat
+// rows/member lists throughout the rest of the app are intentionally left
+// on the pre-existing public `avatarUrl` mechanism this round, not
+// retroactively locked down — closing that fully would mean migrating
+// every avatar render site off CSS background-image public URLs, a
+// broader UI refactor outside this round's scope.
+const AVATAR_VISIBILITY_VALUES = ['everyone', 'contacts', 'workspace', 'nobody', 'custom'];
+const AVATAR_SIGNED_URL_TTL_MS = 60 * 60 * 1000; // 1 hour — long enough to not require re-signing on every render of an already-open viewer, short enough that a leaked/logged URL goes stale on its own
+const AVATAR_HISTORY_MAX = 20;
+
+function isPrivateAvatarKey(key) {
+  return typeof key === 'string' && key.startsWith('avatar_');
+}
+
+// Lazily generated once and persisted in the Registry DO's own storage —
+// same pattern as generateWebhookSecret()'s per-webhook secrets, just one
+// app-wide value here since avatar tokens aren't per-org. Never sent to
+// any client; only ever used server-side to sign/verify.
+async function getAvatarSigningSecret(storage) {
+  let secret = await storage.get('avatarSigningSecret');
+  if (!secret) {
+    secret = await generateWebhookSecret(); // 24 random bytes, hex — plenty of entropy for HMAC keying material too
+    await storage.put('avatarSigningSecret', secret);
+  }
+  return secret;
+}
+
+async function signAvatarPayload(storage, mediaKey, viewerId, exp) {
+  const secret = await getAvatarSigningSecret(storage);
+  return hmacSha256Hex(secret, `${mediaKey}:${viewerId}:${exp}`);
+}
+
+// Mints a short-lived, viewer-bound capability URL — NOT a bare pointer at
+// the object, the signature is over the specific (mediaKey, viewerId, exp)
+// triple, so it can't be replayed by a different account even if
+// intercepted, and it stops working outright once exp passes regardless of
+// who has it. This is the "signed requests" + "temporary URLs" mechanism.
+async function mintAvatarUrl(storage, mediaKey, viewerId) {
+  const exp = Date.now() + AVATAR_SIGNED_URL_TTL_MS;
+  const sig = await signAvatarPayload(storage, mediaKey, viewerId, exp);
+  return { url: `/api/avatar-blob/${encodeURIComponent(mediaKey)}?viewer=${encodeURIComponent(viewerId)}&exp=${exp}&sig=${sig}`, exp };
+}
+
+// "Contacts" = has an existing DM with this person — the only relationship
+// concept this app already has that maps onto what "contacts" means
+// elsewhere; there's no separate address-book feature to define it against.
+async function areContacts(storage, userIdA, userIdB) {
+  const chatIds = (await storage.get(`userChats:${userIdA}`)) || [];
+  for (const cid of chatIds) {
+    const c = await storage.get(`chat:${cid}`);
+    if (c && c.type === 'dm' && Array.isArray(c.memberIds) && c.memberIds.includes(userIdB)) return true;
+  }
+  return false;
+}
+
+async function sharesAnyOrg(storage, userIdA, userIdB) {
+  const orgsA = (await storage.get(`userOrgs:${userIdA}`)) || [];
+  if (!orgsA.length) return false;
+  const orgsB = new Set((await storage.get(`userOrgs:${userIdB}`)) || []);
+  return orgsA.some((oid) => orgsB.has(oid));
+}
+
+// The one real authorization decision this whole feature is built around.
+// Fails CLOSED on anything unrecognized (an unset/corrupt visibility value
+// denies rather than defaults to public) — the opposite failure mode of
+// most of this app's other defensive defaults, deliberately, since this is
+// specifically the function a "Nobody" setting depends on actually working.
+async function canViewAvatar(storage, viewerId, ownerId, ownerUser) {
+  if (viewerId === ownerId) return true;
+  const visibility = AVATAR_VISIBILITY_VALUES.includes(ownerUser.avatarVisibility) ? ownerUser.avatarVisibility : 'everyone';
+  switch (visibility) {
+    case 'everyone': return true;
+    case 'nobody': return false;
+    case 'contacts': return areContacts(storage, viewerId, ownerId);
+    case 'workspace': return sharesAnyOrg(storage, viewerId, ownerId);
+    case 'custom': return Array.isArray(ownerUser.avatarCustomListUserIds) && ownerUser.avatarCustomListUserIds.includes(viewerId);
+    default: return false;
+  }
+}
+
+// Capped, append-only per-owner log — this IS the access log / audit trail
+// requirement: every grant AND every denial gets a row, so an owner (or an
+// org admin, if org policy opts into it — see showViewerIdentityToOwner)
+// can see who successfully viewed their photo and who was blocked trying.
+async function appendAvatarAccessLog(storage, ownerId, entry) {
+  const key = `avatarAccessLog:${ownerId}`;
+  const log = (await storage.get(key)) || [];
+  log.push({ id: crypto.randomUUID(), ts: Date.now(), ...entry });
+  if (log.length > 500) log.splice(0, log.length - 500);
+  await storage.put(key, log);
 }
 
 // ================= Rate limiting (PIN brute-force / enumeration defense) =================
@@ -1671,13 +1876,26 @@ async function sendMagicLinkEmail(env, { to, token, origin }) {
 // email is the reliable "this reaches them automatically, no manual step"
 // delivery method. The full written manual (with the same content plus
 // everything else in the app) can still be handed out separately as a file.
-async function sendAdminWelcomeEmail(env, { to, name, orgName }) {
+async function sendAdminWelcomeEmail(env, { to, name, orgName, emailSignInAutoEnabled, autoEnabledDomain }) {
   if (!env.RESEND_API_KEY) return { sent: false, error: 'resend_not_configured' };
   if (!env.RESEND_FROM_EMAIL) return { sent: false, error: 'resend_from_not_configured' };
+  // The credential you actually sign in with is still whatever PIN you were
+  // already using in the browser/device you paid from — this email
+  // intentionally never states or re-sends that PIN (it isn't stored
+  // anywhere in a form that could be read back out, only its hash is). What
+  // this section is really for: the ONE thing that previously left a paid
+  // admin with zero way back in if they ever lost that device — now there's
+  // a second path tied to this address instead.
+  const accessSection = emailSignInAutoEnabled
+    ? `<h3>Your recovery sign-in</h3>
+      <p>Since <strong>${escapeHtmlEmail(autoEnabledDomain)}</strong> looked like your company's own domain (not a personal inbox), we turned on email sign-in for this workspace using it. If you're ever on a device that doesn't already have your PIN, tap "Sign in with email instead" on the lock screen and use this address (${escapeHtmlEmail(to)}) — anyone else at @${escapeHtmlEmail(autoEnabledDomain)} can do the same to join. Turn this off any time from Settings &rarr; Workspace if that's not what you want.</p>`
+    : `<h3>If you ever get locked out</h3>
+      <p>Right now the only way in is the PIN on the device/browser you just paid from — losing that device means losing access. Turn on email sign-in from Settings &rarr; Workspace (set your company's email domain) so anyone at that domain, including you on a new device, can always get back in via "Sign in with email instead" on the lock screen.</p>`;
   const html = `
     <div style="font-family:sans-serif; max-width:520px; margin:0 auto; color:#12161b;">
       <h2>Welcome to Admin, ${escapeHtmlEmail(name || 'there')}</h2>
       <p>Your payment for <strong>${escapeHtmlEmail(orgName || 'your workspace')}</strong> went through, it's live now.</p>
+      ${accessSection}
       <h3>Quick start</h3>
       <ul>
         <li><strong>Invite people:</strong> Settings &rarr; Workspace &rarr; Invite, by PIN or by email.</li>
@@ -1687,6 +1905,9 @@ async function sendAdminWelcomeEmail(env, { to, name, orgName }) {
       </ul>
       <p>The PArA PIN team</p>
     </div>`;
+  const accessText = emailSignInAutoEnabled
+    ? `Since ${autoEnabledDomain} looked like your company's domain, we turned on email sign-in for this workspace using it — if you're ever on a new device, use "Sign in with email instead" on the lock screen with ${to}. Turn this off from Settings > Workspace if you don't want it.`
+    : `Right now the only way in is the PIN on the device you just paid from. Turn on email sign-in from Settings > Workspace so you (and your team) can always get back in via "Sign in with email instead" even on a new device.`;
   try {
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
@@ -1699,7 +1920,7 @@ async function sendAdminWelcomeEmail(env, { to, name, orgName }) {
         to: [to],
         subject: `You're an Admin on PArA PIN`,
         html,
-        text: `Welcome to Admin, ${name || 'there'}. Your payment for ${orgName || 'your workspace'} went through, it's live now. Invite people and set permissions from Settings > Workspace. Meeting Room lives next to your workspace name in the sidebar. This is a recurring subscription, if a payment fails the workspace locks until you bring it current.`,
+        text: `Welcome to Admin, ${name || 'there'}. Your payment for ${orgName || 'your workspace'} went through, it's live now. ${accessText} Invite people and set permissions from Settings > Workspace. Meeting Room lives next to your workspace name in the sidebar. This is a recurring subscription, if a payment fails the workspace locks until you bring it current.`,
       }),
     });
     if (!res.ok) {
@@ -1829,7 +2050,10 @@ export class Registry {
     const url = new URL(request.url);
 
     if (request.method === 'POST' && url.pathname === '/session') {
-      const { pinHash, displayName, deviceId, ip, ua, country } = await request.json();
+      const {
+        pinHash, displayName, deviceId, ip, ua, country, city, lat, lon, asOrganization,
+        clientPlatform, clientOsVersion, manufacturer, model, isEmulator, appVersion,
+      } = await request.json();
       if (!pinHash) return json({ error: 'missing_pin_hash' }, 400);
 
       // Every login attempt counts against this IP's budget, whether it
@@ -1929,6 +2153,27 @@ export class Registry {
           await this.state.storage.put(`userIdToPinHash:${user.id}`, pinHash);
         } else {
           return json({ error: 'device_approval_required' }, 403);
+        }
+      }
+
+      // Device state enforcement — being IN deviceIds only means "was
+      // trusted at some point," it's deviceMeta[id].status that says
+      // whether that's still true right now. A device explicitly revoked,
+      // reported lost, or marked compromised (see /devices/revoke,
+      // /devices/mark-lost, /devices/mark-compromised below) stays in
+      // deviceIds (so its history/label/last-known info isn't just
+      // deleted) but must never be allowed to complete a new session again.
+      // 'temporary' devices self-expire past expiresAt without needing an
+      // admin to remember to revoke them by hand.
+      if (deviceId && user.deviceMeta && user.deviceMeta[deviceId]) {
+        const dm = user.deviceMeta[deviceId];
+        if (dm.status === 'revoked' || dm.status === 'lost' || dm.status === 'compromised') {
+          return json({ error: 'device_' + dm.status }, 403);
+        }
+        if (dm.status === 'temporary' && dm.expiresAt && Date.now() > dm.expiresAt) {
+          dm.status = 'revoked';
+          await this.state.storage.put(`user:${pinHash}`, user);
+          return json({ error: 'device_temporary_expired' }, 403);
         }
       }
 
@@ -2034,17 +2279,56 @@ export class Registry {
       const orgs = [{ id: null, name: 'Personal' }];
       for (const oid of myOrgIds) {
         const org = await this.state.storage.get(`org:${oid}`);
-        if (org) orgs.push({ id: org.id, name: org.name, logoUrl: org.logoUrl || null, allowEmailAuth: !!org.allowEmailAuth, emailDomain: org.emailDomain || null, country: org.country || null, customDomains: getOrgCustomDomains(org), isAdmin: await isOrgAdmin(this.state.storage, org.id, user.id) });
+        if (org) orgs.push({ id: org.id, name: org.name, logoUrl: org.logoUrl || null, allowEmailAuth: !!org.allowEmailAuth, emailDomain: org.emailDomain || null, country: org.country || null, customDomains: getOrgCustomDomains(org), isAdmin: await isOrgAdmin(this.state.storage, org.id, user.id), securityPolicy: org.securityPolicy || null, avatarPolicy: org.avatarPolicy || null });
       }
 
-      // Device metadata (a friendly guessed label + last-seen timestamp) for
-      // the Settings > Devices list, kept separate from deviceIds itself —
-      // deviceIds is the actual trust decision made above, this is purely
-      // informational and safe to just overwrite on every successful call.
+      // Device metadata — the full device-trust record (platform, OS,
+      // browser, manufacturer/model when a native client provides them,
+      // IP/location, session count, risk score, trust state). Kept
+      // separate from deviceIds itself — deviceIds is the actual trust
+      // decision made above, this is the rich informational record behind
+      // the Settings > Devices / device-trust UI.
       if (deviceId) {
         user.deviceMeta = user.deviceMeta || {};
-        if (!user.deviceMeta[deviceId]) user.deviceMeta[deviceId] = { label: guessDeviceLabel(ua), addedAt: Date.now() };
-        user.deviceMeta[deviceId].lastSeenAt = Date.now();
+        const isNewDevice = !user.deviceMeta[deviceId];
+        const prev = user.deviceMeta[deviceId] || {};
+        const uaInfo = parseDeviceInfo(ua);
+        const platform = clientPlatform || uaInfo.platform;
+        const label = manufacturer && model ? `${manufacturer} ${model}` : uaInfo.label;
+
+        const impossibleTravel = checkImpossibleTravel(prev.lastLat, prev.lastLon, prev.lastSeenAt, lat, lon, Date.now());
+        const isNewCountry = !!(country && deviceWasAlreadyTrusted && user.lastKnownCountry && user.lastKnownCountry !== country);
+        const possibleVpnOrHosting = looksLikeVpnOrHosting(asOrganization);
+        const mfaVerified = !!(deviceId && (user.mfaVerifiedDeviceIds || []).includes(deviceId));
+        const { score: riskScore, flags: riskFlags } = computeDeviceRiskScore({
+          isNewDevice, impossibleTravel: !!(impossibleTravel && impossibleTravel.impossible),
+          newCountry: isNewCountry, possibleVpnOrHosting, mfaVerified, isEmulator: !!isEmulator,
+        });
+
+        user.deviceMeta[deviceId] = {
+          ...prev,
+          label,
+          platform,
+          browser: uaInfo.browser,
+          osVersion: clientOsVersion || uaInfo.osVersion || null,
+          manufacturer: manufacturer || prev.manufacturer || null,
+          model: model || prev.model || null,
+          isEmulator: typeof isEmulator === 'boolean' ? isEmulator : (prev.isEmulator ?? null),
+          appVersion: appVersion || prev.appVersion || null,
+          ip: ip || prev.ip || null,
+          country: country || prev.country || null,
+          city: city || prev.city || null,
+          addedAt: prev.addedAt || Date.now(),
+          lastSeenAt: Date.now(),
+          lastLat: lat != null ? lat : (prev.lastLat ?? null),
+          lastLon: lon != null ? lon : (prev.lastLon ?? null),
+          sessionCount: (prev.sessionCount || 0) + 1,
+          status: prev.status || 'trusted',
+          expiresAt: prev.expiresAt || null,
+          oneTimeUse: prev.oneTimeUse || false,
+          riskScore,
+          riskFlags,
+        };
 
         // New-location alert: a previously-trusted device signing in from a
         // country this account hasn't seen before. Deliberately narrow —
@@ -2053,15 +2337,41 @@ export class Registry {
         // device-approval push above or is simply the account's very first
         // login ever) and only once per new country (it becomes the new
         // baseline immediately, so a person who actually travels doesn't
-        // get re-alerted every single day they stay there).
-        if (country && deviceWasAlreadyTrusted && user.lastKnownCountry && user.lastKnownCountry !== country && this.env.USER_CHANNEL) {
-          const payload = JSON.stringify({ title: 'PArA PIN', body: `Your account was just signed in to from a new location (${country}). Wasn't you? Check Settings > Security > Devices.`, chatId: null });
+        // get re-alerted every single day they stay there). Impossible
+        // travel gets its own, more urgent "suspicious login" push on top
+        // of this one — a new country alone is routine (real travel);
+        // implausible speed between two logins is a materially different,
+        // more actionable signal.
+        if (isNewCountry && this.env.USER_CHANNEL) {
+          const payload = JSON.stringify({ title: 'PArA PIN', body: `Your account was just signed in to from a new location (${country}). Wasn't you? Check Settings > Security > Devices.`, chatId: null, type: 'unknown_login' });
+          try {
+            const stub = this.env.USER_CHANNEL.get(this.env.USER_CHANNEL.idFromName(user.id));
+            await stub.fetch('https://internal/push-direct', { method: 'POST', body: payload });
+          } catch (e) {}
+        }
+        if (impossibleTravel && impossibleTravel.impossible && this.env.USER_CHANNEL) {
+          logRealtime('device_impossible_travel', { userId: user.id, deviceId, distanceKm: impossibleTravel.distanceKm, impliedKmh: impossibleTravel.impliedKmh });
+          const payload = JSON.stringify({
+            title: 'PArA PIN — suspicious login',
+            body: `A sign-in on your account happened ${impossibleTravel.distanceKm}km away from your last one in a time that isn't physically possible to travel. If this wasn't you, remove the device in Settings > Security > Devices and change your PIN.`,
+            chatId: null, type: 'suspicious_login',
+          });
           try {
             const stub = this.env.USER_CHANNEL.get(this.env.USER_CHANNEL.idFromName(user.id));
             await stub.fetch('https://internal/push-direct', { method: 'POST', body: payload });
           } catch (e) {}
         }
         if (country) user.lastKnownCountry = country;
+
+        // A one-time-approved device is consumed by this exact login — it
+        // already did the one thing it was approved to do, so it reverts to
+        // revoked immediately rather than quietly becoming a permanently
+        // trusted device the next time someone forgets it was meant to be
+        // temporary.
+        if (user.deviceMeta[deviceId].oneTimeUse) {
+          user.deviceMeta[deviceId].status = 'revoked';
+          user.deviceMeta[deviceId].oneTimeUse = false;
+        }
 
         await this.state.storage.put(`user:${pinHash}`, user);
         await this.state.storage.put(`userById:${user.id}`, userByIdSnapshot(user, admins));
@@ -2097,18 +2407,72 @@ export class Registry {
     // brand-new-account auto-trust path above), so there's nothing
     // meaningful "remote logout" could mean for your own current session;
     // regular sign-out already covers that case.
+    // Trust level is a display grouping over the underlying status field,
+    // not a separate piece of stored state — 'trusted' is the only state a
+    // device reaches via /device-link/approve today, there's no separate
+    // pre-trust "registered but not yet trusted" tier (that would need a
+    // second approval stage, out of scope for this pass; see the
+    // architecture report). 'oneTimeUse' devices show as 'temporary' too,
+    // since both are bounded-lifetime grants from the same UI's perspective.
+    function trustLevelOf(dm) {
+      if (!dm || !dm.status || dm.status === 'trusted') return dm && dm.oneTimeUse ? 'temporary' : 'trusted';
+      return dm.status; // 'temporary' | 'revoked' | 'lost' | 'compromised'
+    }
+
     if (request.method === 'GET' && url.pathname === '/devices') {
       const pinHash = url.searchParams.get('pinHash');
       const user = await this.state.storage.get(`user:${pinHash}`);
       if (!user) return json({ error: 'not_registered' }, 401);
       const meta = user.deviceMeta || {};
-      const devices = (user.deviceIds || []).map((id) => ({
-        id,
-        label: (meta[id] && meta[id].label) || 'Device',
-        addedAt: (meta[id] && meta[id].addedAt) || null,
-        lastSeenAt: (meta[id] && meta[id].lastSeenAt) || null,
-      })).sort((a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0));
-      return json({ devices });
+      const myOrgIds = (await this.state.storage.get(`userOrgs:${user.id}`)) || [];
+      // Every device this account uses shares the same workspace access —
+      // access is scoped to the ACCOUNT (pinHash), not the device, there is
+      // no per-device workspace-scoping concept in this system. Shown
+      // per-device anyway since that's the requested display shape; it's
+      // identical across all rows for one account, by design not by bug.
+      const workspaceAccess = ['Personal', ...myOrgIds.map((id) => id)];
+      const devices = (user.deviceIds || []).map((id) => {
+        const dm = meta[id] || {};
+        return {
+          id,
+          label: dm.label || 'Device',
+          platform: dm.platform || 'other',
+          browser: dm.browser || null,
+          osVersion: dm.osVersion || null,
+          manufacturer: dm.manufacturer || null,
+          model: dm.model || null,
+          isEmulator: dm.isEmulator ?? null,
+          appVersion: dm.appVersion || null,
+          ip: dm.ip || null,
+          country: dm.country || null,
+          city: dm.city || null,
+          addedAt: dm.addedAt || null,
+          lastSeenAt: dm.lastSeenAt || null,
+          sessionCount: dm.sessionCount || 0,
+          riskScore: dm.riskScore ?? 0,
+          riskFlags: dm.riskFlags || [],
+          status: dm.status || 'trusted',
+          trustLevel: trustLevelOf(dm),
+          expiresAt: dm.expiresAt || null,
+          oneTimeUse: !!dm.oneTimeUse,
+          workspaceAccess,
+        };
+      }).sort((a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0));
+
+      // "Unknown devices" — requested but not yet decided. Expired entries
+      // are filtered out here rather than lazily on next /device-link/status
+      // poll, so the list an approver sees never shows a code that would
+      // already fail if entered.
+      const pending = (user.pendingDeviceLinks && typeof user.pendingDeviceLinks === 'object') ? user.pendingDeviceLinks : {};
+      const unknownDevices = Object.entries(pending)
+        .filter(([, p]) => Date.now() - p.requestedAt <= 10 * 60 * 1000)
+        .map(([id, p]) => ({
+          id, label: p.label || 'Unknown device', platform: p.platform || 'other',
+          ip: p.ip || null, country: p.country || null, city: p.city || null,
+          requestedAt: p.requestedAt,
+        }));
+
+      return json({ devices, unknownDevices });
     }
 
     if (request.method === 'POST' && url.pathname === '/devices/remove') {
@@ -2123,6 +2487,104 @@ export class Registry {
       await this.state.storage.put(`user:${pinHash}`, user);
       await this.state.storage.put(`userById:${user.id}`, userByIdSnapshot(user));
       return json({ ok: true });
+    }
+
+    // Self-service status changes on a device OTHER than the one making the
+    // call (e.g. reporting a lost phone from your laptop). Unlike
+    // /devices/remove (which deletes the record outright), these keep the
+    // device's history/label/location on file but permanently block it from
+    // completing a future /session — see the status check near the top of
+    // the /session handler. All three share one handler since the only
+    // difference between them is which status gets set and which
+    // notification copy goes out.
+    if (request.method === 'POST' && (url.pathname === '/devices/mark-lost' || url.pathname === '/devices/mark-compromised' || url.pathname === '/devices/revoke')) {
+      const { pinHash, id } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      if (!id) return json({ error: 'missing_id' }, 400);
+      if (!Array.isArray(user.deviceIds) || !user.deviceIds.includes(id)) return json({ error: 'not_found' }, 404);
+      const newStatus = url.pathname.endsWith('mark-lost') ? 'lost' : url.pathname.endsWith('mark-compromised') ? 'compromised' : 'revoked';
+      user.deviceMeta = user.deviceMeta || {};
+      user.deviceMeta[id] = { ...(user.deviceMeta[id] || { label: 'Device', addedAt: Date.now(), sessionCount: 0, riskScore: 0, riskFlags: [] }), status: newStatus, expiresAt: null, oneTimeUse: false };
+      await this.state.storage.put(`user:${pinHash}`, user);
+      await this.state.storage.put(`userById:${user.id}`, userByIdSnapshot(user));
+      logRealtime('device_status_changed', { userId: user.id, deviceId: id, status: newStatus });
+
+      if (this.env.USER_CHANNEL) {
+        const label = (user.deviceMeta[id] && user.deviceMeta[id].label) || 'A device';
+        const pushType = newStatus === 'compromised' ? 'compromised_device' : newStatus === 'lost' ? 'device_lost' : 'device_revoked';
+        const title = newStatus === 'compromised' ? 'PArA PIN — device compromised' : 'PArA PIN';
+        const copy = newStatus === 'compromised'
+          ? `${label} was marked compromised and can no longer sign in. If this device is still physically in your possession, change your PIN as well.`
+          : newStatus === 'lost'
+          ? `${label} was marked lost and can no longer sign in. You can restore it from Settings > Security > Devices if you find it.`
+          : `${label} was removed and can no longer sign in.`;
+        const payload = JSON.stringify({ title, body: copy, chatId: null, type: pushType });
+        try {
+          const stub = this.env.USER_CHANNEL.get(this.env.USER_CHANNEL.idFromName(user.id));
+          await stub.fetch('https://internal/push-direct', { method: 'POST', body: payload });
+        } catch (e) {}
+      }
+      return json({ ok: true });
+    }
+
+    // Self-reported local security events — biometric/passcode state lives
+    // entirely on the client (Face ID toggle, device lock screen), the
+    // server has no independent way to detect either, so these two
+    // notification types can only ever be "the client tells us it
+    // happened," same trust model as e.g. a browser reporting its own
+    // permission grants. Deliberately not treated as high-severity threat
+    // signals on their own since a legitimate user turning off Face ID on
+    // their own phone is by far the common case.
+    if (request.method === 'POST' && url.pathname === '/devices/local-security-event') {
+      const { pinHash, deviceId, event } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      if (!['biometric_disabled', 'passcode_removed'].includes(event)) return json({ error: 'unknown_event' }, 400);
+      const label = (user.deviceMeta && user.deviceMeta[deviceId] && user.deviceMeta[deviceId].label) || 'A device';
+      logRealtime('device_local_security_event', { userId: user.id, deviceId, event });
+      if (this.env.USER_CHANNEL) {
+        const copy = event === 'biometric_disabled'
+          ? `Biometric lock was turned off on ${label}. Wasn't you? Check Settings > Security > Devices.`
+          : `The screen lock/passcode was removed on ${label}. Wasn't you? Check Settings > Security > Devices.`;
+        const payload = JSON.stringify({ title: 'PArA PIN', body: copy, chatId: null, type: event });
+        try {
+          const stub = this.env.USER_CHANNEL.get(this.env.USER_CHANNEL.idFromName(user.id));
+          await stub.fetch('https://internal/push-direct', { method: 'POST', body: payload });
+        } catch (e) {}
+      }
+      return json({ ok: true });
+    }
+
+    // Lightweight polling endpoint a client calls periodically (e.g. every
+    // 60s while the app is foregrounded) to detect its OWN revocation and
+    // self-log-out. This exists because pinHash is a static, shared-across-
+    // devices bearer credential with no per-device session token — revoking
+    // a device today can only block a FUTURE /session call, it can't
+    // forcibly kill an already-open tab/app's in-flight API access the way
+    // a real per-device rotating session token would. Polling this endpoint
+    // is the mitigation: it closes that gap down to "at most one polling
+    // interval of residual access" instead of "until the person happens to
+    // restart the app," without requiring the bigger auth redesign a true
+    // server-push forced-logout would need.
+    if (request.method === 'GET' && url.pathname === '/devices/status') {
+      const pinHash = url.searchParams.get('pinHash');
+      const deviceId = url.searchParams.get('deviceId');
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ status: 'signed_out' });
+      if (!deviceId || !Array.isArray(user.deviceIds) || !user.deviceIds.includes(deviceId)) {
+        return json({ status: 'signed_out' });
+      }
+      const dm = (user.deviceMeta && user.deviceMeta[deviceId]) || null;
+      if (dm && (dm.status === 'revoked' || dm.status === 'lost' || dm.status === 'compromised')) {
+        return json({ status: dm.status });
+      }
+      if (dm && dm.status === 'temporary' && dm.expiresAt && Date.now() > dm.expiresAt) {
+        dm.status = 'revoked';
+        await this.state.storage.put(`user:${pinHash}`, user);
+        return json({ status: 'revoked' });
+      }
+      return json({ status: 'active' });
     }
 
     // ---- MFA (TOTP authenticator app) ----
@@ -2404,15 +2866,187 @@ export class Registry {
     }
 
     if (request.method === 'POST' && url.pathname === '/profile') {
-      const { pinHash, displayName, avatarUrl, department } = await request.json();
+      const { pinHash, displayName, avatarUrl, avatarMediaKey, department } = await request.json();
       const user = await this.state.storage.get(`user:${pinHash}`);
       if (!user) return json({ error: 'not_registered' }, 401);
       if (typeof displayName === 'string' && displayName.trim()) user.displayName = displayName.trim().slice(0, 40);
       if (typeof avatarUrl === 'string' || avatarUrl === null) user.avatarUrl = sanitizeAvatarUrl(avatarUrl);
+      // avatarMediaKey is the PRIVATE (avatar_-prefixed) counterpart from
+      // /api/avatar/upload's dual write — only ever resolved through the
+      // signed /api/avatar-blob path, never handed out as a bare URL. A
+      // changing key gets the OLD one pushed into avatarHistory first, so
+      // "profile history" reflects every photo that was ever current, not
+      // just the latest.
+      if (typeof avatarMediaKey === 'string' && isPrivateAvatarKey(avatarMediaKey)) {
+        if (user.avatarMediaKey && user.avatarMediaKey !== avatarMediaKey) {
+          user.avatarHistory = Array.isArray(user.avatarHistory) ? user.avatarHistory : [];
+          user.avatarHistory.push({ mediaKey: user.avatarMediaKey, uploadedAt: user.avatarMediaKeyUploadedAt || Date.now() });
+          if (user.avatarHistory.length > AVATAR_HISTORY_MAX) user.avatarHistory.splice(0, user.avatarHistory.length - AVATAR_HISTORY_MAX);
+        }
+        user.avatarMediaKey = avatarMediaKey;
+        user.avatarMediaKeyUploadedAt = Date.now();
+      } else if (avatarMediaKey === null) {
+        user.avatarMediaKey = null;
+        user.avatarMediaKeyUploadedAt = null;
+      }
       if (typeof department === 'string') user.department = department.trim().slice(0, 60) || null;
       await this.state.storage.put(`user:${user.pinHash}`, user);
       await this.state.storage.put(`userById:${user.id}`, userByIdSnapshot(user));
       return json({ ok: true, displayName: user.displayName, avatarUrl: user.avatarUrl || null, department: user.department || null });
+    }
+
+    // ---- Profile photo privacy ----
+    if (request.method === 'GET' && url.pathname === '/profile/avatar-privacy') {
+      const pinHash = url.searchParams.get('pinHash');
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      return json({
+        visibility: AVATAR_VISIBILITY_VALUES.includes(user.avatarVisibility) ? user.avatarVisibility : 'everyone',
+        customListUserIds: user.avatarCustomListUserIds || [],
+      });
+    }
+    if (request.method === 'POST' && url.pathname === '/profile/avatar-privacy') {
+      const { pinHash, visibility, customListUserIds } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      if (visibility !== undefined) {
+        if (!AVATAR_VISIBILITY_VALUES.includes(visibility)) return json({ error: 'invalid_visibility' }, 400);
+        user.avatarVisibility = visibility;
+      }
+      if (Array.isArray(customListUserIds)) {
+        // Capped generously (this is a UI list a person builds by hand, not
+        // a bulk-import path) — just guards against a malformed/huge payload.
+        user.avatarCustomListUserIds = customListUserIds.filter((id) => typeof id === 'string').slice(0, 500);
+      }
+      await this.state.storage.put(`user:${pinHash}`, user);
+      return json({ ok: true, visibility: user.avatarVisibility || 'everyone', customListUserIds: user.avatarCustomListUserIds || [] });
+    }
+
+    // Per-workspace photo override — "Organization profile" vs "Personal
+    // profile": a different photo shown specifically within one org's
+    // context (its chats, member list, org-scoped views), falling back to
+    // the personal photo everywhere else. avatarUrl: null clears the
+    // override back to the personal photo for that org.
+    if (request.method === 'POST' && url.pathname === '/profile/org-avatar') {
+      const { pinHash, orgId, avatarUrl, avatarMediaKey } = await request.json();
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await isOrgMember(this.state.storage, orgId, user.id))) return json({ error: 'not_a_member' }, 403);
+      user.orgAvatarOverrides = user.orgAvatarOverrides || {};
+      if (avatarUrl === null && avatarMediaKey === null) {
+        delete user.orgAvatarOverrides[orgId];
+      } else {
+        const safeUrl = sanitizeAvatarUrl(avatarUrl);
+        if (!safeUrl || !isPrivateAvatarKey(avatarMediaKey)) return json({ error: 'invalid_avatar' }, 400);
+        const prev = user.orgAvatarOverrides[orgId];
+        if (prev && prev.mediaKey && prev.mediaKey !== avatarMediaKey) {
+          user.avatarHistory = Array.isArray(user.avatarHistory) ? user.avatarHistory : [];
+          user.avatarHistory.push({ mediaKey: prev.mediaKey, uploadedAt: prev.uploadedAt || Date.now(), orgId });
+          if (user.avatarHistory.length > AVATAR_HISTORY_MAX) user.avatarHistory.splice(0, user.avatarHistory.length - AVATAR_HISTORY_MAX);
+        }
+        user.orgAvatarOverrides[orgId] = { url: safeUrl, mediaKey: avatarMediaKey, uploadedAt: Date.now() };
+      }
+      await this.state.storage.put(`user:${pinHash}`, user);
+      await this.state.storage.put(`userById:${user.id}`, userByIdSnapshot(user));
+      return json({ ok: true, orgAvatarOverrides: user.orgAvatarOverrides });
+    }
+
+    // Owner-only. Each entry is resolved to a fresh signed URL right here
+    // rather than returning bare mediaKeys — the caller never needs to know
+    // the underlying key format, and this keeps "every avatar access goes
+    // through the signed path" true even for the owner looking at their own
+    // history, not just other viewers.
+    if (request.method === 'GET' && url.pathname === '/profile/avatar-history') {
+      const pinHash = url.searchParams.get('pinHash');
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      const history = Array.isArray(user.avatarHistory) ? user.avatarHistory : [];
+      const entries = await Promise.all(
+        history.slice().reverse().map(async (h) => ({
+          ...(await mintAvatarUrl(this.state.storage, h.mediaKey, user.id)),
+          uploadedAt: h.uploadedAt,
+          orgId: h.orgId || null,
+        }))
+      );
+      return json({ history: entries });
+    }
+
+    // The core read path other clients hit to actually open someone's
+    // profile photo — this is where canViewAvatar is enforced and where
+    // every grant/denial gets logged. orgId (optional) selects that
+    // workspace's photo override if one is set; falls back to the personal
+    // photo either way.
+    if (request.method === 'GET' && url.pathname === '/profile/avatar-url') {
+      const pinHash = url.searchParams.get('pinHash');
+      const targetUserId = url.searchParams.get('userId');
+      const orgId = url.searchParams.get('orgId') || null;
+      const viewer = await this.state.storage.get(`user:${pinHash}`);
+      if (!viewer) return json({ error: 'not_registered' }, 401);
+      if (!targetUserId) return json({ error: 'missing_user_id' }, 400);
+      const ownerPinHash = await this.state.storage.get(`userIdToPinHash:${targetUserId}`);
+      const owner = ownerPinHash ? await this.state.storage.get(`user:${ownerPinHash}`) : null;
+      if (!owner) return json({ error: 'not_found' }, 404);
+
+      const allowed = await canViewAvatar(this.state.storage, viewer.id, owner.id, owner);
+      await appendAvatarAccessLog(this.state.storage, owner.id, {
+        viewerId: viewer.id, viewerName: viewer.displayName || 'Someone', granted: allowed, orgId,
+      });
+      logRealtime('avatar_access', { viewerId: viewer.id, ownerId: owner.id, granted: allowed });
+      if (!allowed) return json({ error: 'not_authorized' }, 403);
+
+      const override = orgId && owner.orgAvatarOverrides && owner.orgAvatarOverrides[orgId];
+      const mediaKey = override ? override.mediaKey : owner.avatarMediaKey;
+      if (!mediaKey) return json({ error: 'no_photo' }, 404);
+      const minted = await mintAvatarUrl(this.state.storage, mediaKey, viewer.id);
+      return json({ ok: true, ...minted, isOverride: !!override });
+    }
+
+    // Called by the outer worker's GET /api/avatar-blob/:key before it
+    // streams the actual bytes — verifies the HMAC signature and expiry
+    // rather than re-deriving authorization from scratch, the signed URL
+    // itself IS the capability at this point (see mintAvatarUrl). Doesn't
+    // re-check canViewAvatar here on purpose: that decision was already
+    // made and logged at mint time, this is purely "is this specific token
+    // genuine and not expired," matching how any bearer-capability URL
+    // (S3 presigned URLs, etc.) is meant to work.
+    if (request.method === 'GET' && url.pathname === '/internal/avatar-verify-token') {
+      const mediaKey = url.searchParams.get('mediaKey');
+      const viewerId = url.searchParams.get('viewer');
+      const exp = parseInt(url.searchParams.get('exp') || '0', 10);
+      const sig = url.searchParams.get('sig');
+      if (!mediaKey || !viewerId || !exp || !sig) return json({ ok: false });
+      if (Date.now() > exp) return json({ ok: false, reason: 'expired' });
+      const expected = await signAvatarPayload(this.state.storage, mediaKey, viewerId, exp);
+      // Timing-safe-ish: hex digests are fixed-length, a plain === on a
+      // 64-char hex HMAC output is the same check crypto.subtle callers use
+      // elsewhere in this file (see verifyPaystackSignature) — not
+      // constant-time in the strictest sense, but consistent with this
+      // codebase's existing signature-verification pattern.
+      if (expected !== sig) return json({ ok: false, reason: 'bad_signature' });
+      return json({ ok: true });
+    }
+
+    // Owner-only view of who has (and hasn't) been granted access to their
+    // photo. viewerName is only ever shown here if the org's avatarPolicy
+    // has showViewerIdentityToOwner enabled for at least one shared org —
+    // otherwise entries are returned anonymized (still useful for "how many
+    // people looked at this," not useful for tracking a specific person).
+    // See avatarPolicy's own comment for why that's opt-in, not default-on.
+    if (request.method === 'GET' && url.pathname === '/profile/avatar-access-log') {
+      const pinHash = url.searchParams.get('pinHash');
+      const user = await this.state.storage.get(`user:${pinHash}`);
+      if (!user) return json({ error: 'not_registered' }, 401);
+      const log = ((await this.state.storage.get(`avatarAccessLog:${user.id}`)) || []).slice().reverse();
+      let showIdentity = false;
+      const myOrgIds = (await this.state.storage.get(`userOrgs:${user.id}`)) || [];
+      for (const oid of myOrgIds) {
+        const org = await this.state.storage.get(`org:${oid}`);
+        if (org && org.avatarPolicy && org.avatarPolicy.showViewerIdentityToOwner) { showIdentity = true; break; }
+      }
+      const entries = log.slice(0, 200).map((e) => showIdentity
+        ? { ts: e.ts, granted: e.granted, viewerName: e.viewerName, orgId: e.orgId || null }
+        : { ts: e.ts, granted: e.granted, orgId: e.orgId || null });
+      return json({ entries, viewerIdentityShown: showIdentity });
     }
 
     // Uploads THIS device's E2EE public key (ECDH P-256, raw bytes,
@@ -2944,12 +3578,58 @@ export class Registry {
       if (!orgId) return json({ error: 'unknown_reference' }, 404);
       const org = await this.state.storage.get(`org:${orgId}`);
       if (!org) return json({ error: 'not_found' }, 404);
+      const wasFirstActivation = org.billingStatus !== 'active';
       org.billingStatus = 'active';
       org.paystackCustomerCode = customerCode || org.paystackCustomerCode || null;
       if (subscriptionCode) org.paystackSubscriptionCode = subscriptionCode;
       org.payerEmail = payerEmail || org.payerEmail || null;
       org.billingActivatedAt = Date.now();
+
+      // Auto-enable email sign-in for the payer's domain on first activation
+      // only — the whole point being that a freshly-paid admin always has a
+      // working way back in even if they lose the device/browser they were
+      // on when they paid, without waiting on them to discover the toggle in
+      // Settings themselves (see sendAdminWelcomeEmail, which now tells them
+      // this happened). Deliberately NOT done on every activation (renewals
+      // hit this same endpoint) so it can never silently override an admin
+      // who later turned this off on purpose.
+      //
+      // Skips known public webmail domains — claiming "gmail.com" as an
+      // org's email-sign-in domain would let anyone with a Gmail address
+      // self-provision into this workspace, which is very likely not what a
+      // small business owner paying from their personal address wants. Only
+      // auto-enable for what's actually their own company's domain.
+      let emailSignInAutoEnabled = false;
+      let autoEnabledDomain = null;
+      if (wasFirstActivation && payerEmail && !org.emailDomain) {
+        const domain = String(payerEmail).trim().toLowerCase().split('@')[1] || null;
+        const PUBLIC_WEBMAIL_DOMAINS = new Set([
+          'gmail.com', 'googlemail.com', 'yahoo.com', 'ymail.com', 'outlook.com', 'hotmail.com',
+          'live.com', 'msn.com', 'icloud.com', 'me.com', 'mac.com', 'aol.com', 'protonmail.com',
+          'proton.me', 'mail.com', 'gmx.com', 'yandex.com', 'zoho.com', 'qq.com', '163.com',
+        ]);
+        if (domain && /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(domain) && !PUBLIC_WEBMAIL_DOMAINS.has(domain)) {
+          const claimedBy = await this.state.storage.get(`orgDomainIndex:${domain}`);
+          if (!claimedBy) {
+            await this.state.storage.put(`orgDomainIndex:${domain}`, org.id);
+            org.emailDomain = domain;
+            org.allowEmailAuth = true;
+            emailSignInAutoEnabled = true;
+            autoEnabledDomain = domain;
+          }
+          // Already claimed by another org (or genuinely just a collision):
+          // skip silently rather than failing the whole activation over it.
+          // The admin can still set this manually from Settings, same path
+          // as before this change existed.
+        }
+      }
       await this.state.storage.put(`org:${orgId}`, org);
+      if (emailSignInAutoEnabled) {
+        await appendAuditLog(this.state.storage, orgId, {
+          actorId: null, actorName: 'System', action: 'email_signin_auto_enabled',
+          details: `Email sign-in auto-enabled for @${autoEnabledDomain} (from payer's address on first activation)`,
+        });
+      }
       // Indexed both ways so a later subscription.disable / invoice event
       // (which only ever carries Paystack's own codes, never our orgId) can
       // still find its way back to this workspace.
@@ -2969,7 +3649,7 @@ export class Registry {
         const adminUser = adminPinHash ? await this.state.storage.get(`user:${adminPinHash}`) : null;
         adminDisplayName = adminUser ? adminUser.displayName : null;
       }
-      return json({ ok: true, org, adminUserId, adminDisplayName });
+      return json({ ok: true, org, adminUserId, adminDisplayName, emailSignInAutoEnabled, autoEnabledDomain });
     }
 
     // Called from subscription.disable / invoice.payment_failed. Looks the
@@ -3136,6 +3816,133 @@ export class Registry {
     // logoUrl goes through the same sanitizer as profile/group avatars (must
     // be exactly this app's own /api/media/<uuid> shape), since it gets
     // interpolated client-side into a CSS url("...") the same way those do.
+    // Org-mandated app-lock timeout — a workspace admin sets the loosest
+    // acceptable auto-lock interval for anyone with access to that
+    // workspace's data; the client enforces the STRICTEST value across
+    // every org a user belongs to (see /session's orgs array, which now
+    // carries each org's securityPolicy so the client can compute that
+    // without an extra round trip). A missing/null securityPolicy means
+    // this org has no mandated floor — the user's own local preference
+    // applies uncapped for that org's membership specifically. This is a
+    // client-enforced UX policy, not a server-side authorization boundary —
+    // same caveat as any app-level lock screen: it raises the bar for
+    // "someone picked up an unlocked phone," it isn't a substitute for the
+    // real server-side permission checks (isOrgMember/hasOrgPermission)
+    // that gate actual data access regardless of whether the app happens
+    // to be locked right now.
+    if (request.method === 'GET' && url.pathname === '/org/security-policy') {
+      const orgId = url.searchParams.get('orgId');
+      const org = orgId ? await this.state.storage.get(`org:${orgId}`) : null;
+      if (!org) return json({ error: 'not_found' }, 404);
+      return json({ securityPolicy: org.securityPolicy || null });
+    }
+    if (request.method === 'POST' && url.pathname === '/org/security-policy') {
+      const { pinHash, orgId, minTimeoutSec, requireStepUpForSensitive } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_workspace'))) {
+        return json({ error: 'forbidden' }, 403);
+      }
+      const org = await this.state.storage.get(`org:${orgId}`);
+      if (!org) return json({ error: 'not_found' }, 404);
+      const ALLOWED_TIMEOUTS = [0, 30, 60, 300, null];
+      if (minTimeoutSec !== undefined && !ALLOWED_TIMEOUTS.includes(minTimeoutSec)) {
+        return json({ error: 'invalid_timeout' }, 400);
+      }
+      org.securityPolicy = {
+        minTimeoutSec: minTimeoutSec !== undefined ? minTimeoutSec : (org.securityPolicy?.minTimeoutSec ?? null),
+        requireStepUpForSensitive: requireStepUpForSensitive !== undefined ? !!requireStepUpForSensitive : !!org.securityPolicy?.requireStepUpForSensitive,
+      };
+      await this.state.storage.put(`org:${orgId}`, org);
+      await appendAuditLog(this.state.storage, orgId, {
+        actorId: me.id, actorName: me.displayName || 'Someone', action: 'security_policy_changed',
+        detail: `Timeout: ${org.securityPolicy.minTimeoutSec === null ? 'no minimum' : org.securityPolicy.minTimeoutSec === 0 ? 'immediately' : org.securityPolicy.minTimeoutSec + 's'}, step-up: ${org.securityPolicy.requireStepUpForSensitive ? 'on' : 'off'}`,
+      });
+      return json({ ok: true, securityPolicy: org.securityPolicy });
+    }
+
+    // Profile-photo policy: preventScreenshotAndroid is the one part of
+    // this whole feature that's an actual OS-enforced technical control
+    // (FLAG_SECURE, Android-only — see the mobile viewer's own comment for
+    // why iOS has no equivalent and nothing here claims otherwise).
+    // showViewerIdentityToOwner is a genuine privacy trade-off, not a
+    // technical limitation: showing WHO looked at your photo is itself a
+    // surveillance dynamic toward the viewer (most messaging apps — Signal,
+    // WhatsApp, Telegram — deliberately don't build "seen your profile photo"
+    // features for exactly this reason), so it defaults OFF and is org-
+    // scoped opt-in rather than a personal per-user toggle, an org that
+    // wants viewer-identity visibility for security/compliance reasons can
+    // turn it on knowingly, but it isn't the default for anyone.
+    if (request.method === 'GET' && url.pathname === '/org/avatar-policy') {
+      const orgId = url.searchParams.get('orgId');
+      const org = orgId ? await this.state.storage.get(`org:${orgId}`) : null;
+      if (!org) return json({ error: 'not_found' }, 404);
+      return json({ avatarPolicy: org.avatarPolicy || null });
+    }
+    if (request.method === 'POST' && url.pathname === '/org/avatar-policy') {
+      const { pinHash, orgId, preventScreenshotAndroid, showViewerIdentityToOwner } = await request.json();
+      const me = await this.state.storage.get(`user:${pinHash}`);
+      if (!me) return json({ error: 'not_registered' }, 401);
+      if (!orgId || !(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_workspace'))) {
+        return json({ error: 'forbidden' }, 403);
+      }
+      const org = await this.state.storage.get(`org:${orgId}`);
+      if (!org) return json({ error: 'not_found' }, 404);
+      org.avatarPolicy = {
+        preventScreenshotAndroid: preventScreenshotAndroid !== undefined ? !!preventScreenshotAndroid : !!org.avatarPolicy?.preventScreenshotAndroid,
+        showViewerIdentityToOwner: showViewerIdentityToOwner !== undefined ? !!showViewerIdentityToOwner : !!org.avatarPolicy?.showViewerIdentityToOwner,
+      };
+      await this.state.storage.put(`org:${orgId}`, org);
+      await appendAuditLog(this.state.storage, orgId, {
+        actorId: me.id, actorName: me.displayName || 'Someone', action: 'avatar_policy_changed',
+        detail: `Screenshot protection (Android): ${org.avatarPolicy.preventScreenshotAndroid ? 'on' : 'off'}, viewer identity shown to owner: ${org.avatarPolicy.showViewerIdentityToOwner ? 'on' : 'off'}`,
+      });
+      return json({ ok: true, avatarPolicy: org.avatarPolicy });
+    }
+
+    // iOS has no API to PREVENT a screenshot (see the mobile viewer
+    // comment) — this is the DETECT-and-report half instead.
+    // expo-screen-capture's addScreenshotListener fires when the OS
+    // reports a screenshot was taken while the app was foregrounded; it
+    // cannot tell the app WHICH screen was on-screen, only that it
+    // happened. The client only calls this while the profile-photo viewer
+    // is actually open, which is the app's own best available correlation
+    // — logged as "likely" for that reason, not asserted as certain.
+    if (request.method === 'POST' && url.pathname === '/profile/screenshot-report') {
+      const { pinHash, targetUserId, context } = await request.json();
+      const viewer = await this.state.storage.get(`user:${pinHash}`);
+      if (!viewer) return json({ error: 'not_registered' }, 401);
+      if (!targetUserId) return json({ error: 'missing_target' }, 400);
+      const ownerPinHash = await this.state.storage.get(`userIdToPinHash:${targetUserId}`);
+      const owner = ownerPinHash ? await this.state.storage.get(`user:${ownerPinHash}`) : null;
+      if (!owner) return json({ error: 'not_found' }, 404);
+
+      logRealtime('avatar_screenshot_detected', { viewerId: viewer.id, ownerId: owner.id, context: context || null });
+      await appendAvatarAccessLog(this.state.storage, owner.id, {
+        viewerId: viewer.id, viewerName: viewer.displayName || 'Someone', granted: true, screenshot: true, context: context || null,
+      });
+
+      // Owner notification is deliberately anonymized (not naming the
+      // viewer) — the full detail is in the access log above for the
+      // owner (or an org admin, if showViewerIdentityToOwner is on) to
+      // look up, but a push notification naming a specific person "took a
+      // screenshot of you" from an inherently-uncertain signal (see the
+      // comment above — this is "likely," not certain) risks accusing the
+      // wrong person of something they may not have done.
+      if (owner.id !== viewer.id && this.env.USER_CHANNEL) {
+        const payload = JSON.stringify({
+          title: 'PArA — screenshot detected',
+          body: 'Someone viewing your profile photo may have taken a screenshot. iOS does not allow apps to block screenshots — this is a detection-only notice.',
+          chatId: null, type: 'avatar_screenshot',
+        });
+        try {
+          const stub = this.env.USER_CHANNEL.get(this.env.USER_CHANNEL.idFromName(owner.id));
+          await stub.fetch('https://internal/push-direct', { method: 'POST', body: payload });
+        } catch (e) {}
+      }
+      return json({ ok: true });
+    }
+
     if (request.method === 'POST' && url.pathname === '/org/update') {
       const { pinHash, orgId, name, logoUrl, allowEmailAuth, emailDomain, country } = await request.json();
       const me = await this.state.storage.get(`user:${pinHash}`);
@@ -5365,9 +6172,26 @@ export class Registry {
       // and just not approving the lost one for anything new.
       user.deviceIds = [];
       user.pendingDeviceLink = null;
+      user.pendingDeviceLinks = {};
       user.devicePublicKeys = {};
       await this.state.storage.put(`user:${pinHash}`, user);
       await this.state.storage.put(`userById:${user.id}`, userByIdSnapshot(user));
+      logRealtime('device_admin_reset', { userId: user.id, adminId: requesterId });
+      // This is the one place in the device-trust system where "administrator
+      // action" is literally true — requesterId was just checked against the
+      // real admins list above, unlike the self-service mark-lost/compromised
+      // handlers which any account holder can call on their own devices.
+      if (this.env.USER_CHANNEL) {
+        const payload = JSON.stringify({
+          title: 'PArA PIN — administrator action',
+          body: 'An administrator reset all trusted devices on your account. The next device you sign in on will become newly trusted.',
+          chatId: null, type: 'administrator_action',
+        });
+        try {
+          const stub = this.env.USER_CHANNEL.get(this.env.USER_CHANNEL.idFromName(user.id));
+          await stub.fetch('https://internal/push-direct', { method: 'POST', body: payload });
+        } catch (e) {}
+      }
       return json({ ok: true });
     }
 
@@ -5531,8 +6355,21 @@ export class Registry {
     // this account. The new device displays the SAME code on its own screen
     // and asks the person to read it aloud / show it to whoever has a
     // trusted device, who then types it in over there to approve.
+    // "Unknown devices" (in device-trust terms) live in pendingDeviceLinks,
+    // a map of deviceId -> {code, requestedAt, ip, ua, country, city,
+    // platform}, not a single slot — a singular pendingDeviceLink meant a
+    // second concurrent request (two different unattended devices trying to
+    // link around the same time) silently overwrote the first, permanently
+    // orphaning it with a code that would never match anything again. Reads
+    // defensively against the old singular shape (never written now, but
+    // may still exist on an account from before this migration) so an old
+    // record doesn't resurface as a phantom pending request.
+    function pendingLinksOf(user) {
+      return (user.pendingDeviceLinks && typeof user.pendingDeviceLinks === 'object') ? user.pendingDeviceLinks : {};
+    }
+
     if (request.method === 'POST' && url.pathname === '/device-link/request') {
-      const { pinHash, deviceId } = await request.json();
+      const { pinHash, deviceId, ip: reqIp, ua: reqUa, country: reqCountry, city: reqCity, platform: reqPlatform } = await request.json();
       if (!pinHash || !deviceId) return json({ error: 'missing_fields' }, 400);
       const user = await this.state.storage.get(`user:${pinHash}`);
       if (!user) return json({ error: 'not_found' }, 404);
@@ -5541,11 +6378,17 @@ export class Registry {
       if (user.deviceIds.length === 0) return json({ error: 'no_trusted_devices' }, 400);
 
       const code = String(Math.floor(100000 + Math.random() * 900000));
-      user.pendingDeviceLink = { code, deviceId, requestedAt: Date.now() };
+      user.pendingDeviceLinks = pendingLinksOf(user);
+      user.pendingDeviceLinks[deviceId] = {
+        code, requestedAt: Date.now(),
+        ip: reqIp || null, country: reqCountry || null, city: reqCity || null,
+        platform: reqPlatform || parseDeviceInfo(reqUa || '').platform,
+        label: parseDeviceInfo(reqUa || '').label,
+      };
       await this.state.storage.put(`user:${pinHash}`, user);
 
       if (this.env.USER_CHANNEL) {
-        const payload = JSON.stringify({ title: 'PArA PIN', body: 'A new device wants to sign in. Open the app to approve it.', chatId: null, deviceLink: true });
+        const payload = JSON.stringify({ title: 'PArA PIN', body: 'A new device wants to sign in. Open the app to approve it.', chatId: null, deviceLink: true, type: 'new_device' });
         try {
           const stub = this.env.USER_CHANNEL.get(this.env.USER_CHANNEL.idFromName(user.id));
           await stub.fetch('https://internal/push-direct', { method: 'POST', body: payload });
@@ -5560,7 +6403,8 @@ export class Registry {
       return json({ ok: true, code, expiresInSec: 600 });
     }
 
-    if (request.method === 'POST' && url.pathname === '/device-link/approve') {
+    if (request.method === 'POST' && (url.pathname === '/device-link/approve' || url.pathname === '/device-link/reject')) {
+      const isReject = url.pathname === '/device-link/reject';
       // Called from an ALREADY-trusted device, pinHash here is that
       // device's own (current, working) credential, not the new device's.
       //
@@ -5577,8 +6421,19 @@ export class Registry {
       // included in the push payload, so requiring it here (and checking
       // it's already trusted) actually ties this call to a specific,
       // previously-approved browser instead of just "whoever knows the PIN".
-      const { pinHash, code, deviceId } = await request.json();
-      if (!pinHash || !code || !deviceId) return json({ error: 'missing_fields' }, 400);
+      // `mode` ('permanent' | 'temporary' | 'one-time') and `durationHours`
+      // (for 'temporary') only matter for approve; ignored on reject.
+      //
+      // `targetDeviceId` is a REJECT-only shortcut: rejecting never grants
+      // anything, it only ever removes a pending request, so unlike approve
+      // it doesn't need the physical-proximity proof the code provides —
+      // this lets the "Unknown devices" list show a one-click Reject
+      // without the trusted device having to see or type the code at all.
+      // Approve still always requires `code`.
+      const { pinHash, code, deviceId, mode, durationHours, targetDeviceId } = await request.json();
+      if (!pinHash || !deviceId || (!isReject && !code) || (isReject && !code && !targetDeviceId)) {
+        return json({ error: 'missing_fields' }, 400);
+      }
       const user = await this.state.storage.get(`user:${pinHash}`);
       if (!user) return json({ error: 'not_found' }, 404);
       if (!Array.isArray(user.deviceIds) || !user.deviceIds.includes(deviceId)) {
@@ -5586,25 +6441,74 @@ export class Registry {
       }
       // Defense in depth on top of the trusted-device check above: the code
       // is only 6 digits (~900k values), no reason to allow unlimited guesses.
+      // Applies to the codeless reject path too — otherwise it'd be a way
+      // to enumerate/spam-clear pending requests without this limit.
       const dlrl = await checkRateLimit(this.state.storage, `devicelink:${user.id}`, {
         maxAttempts: 10, windowMs: 10 * 60 * 1000, lockoutMs: 30 * 60 * 1000,
       });
       if (!dlrl.allowed) return json({ error: 'rate_limited', retryAfterMs: dlrl.retryAfterMs }, 429);
-      const pending = user.pendingDeviceLink;
-      if (!pending) return json({ error: 'no_pending_request' }, 400);
+
+      user.pendingDeviceLinks = pendingLinksOf(user);
+      let pendingEntry;
+      if (isReject && targetDeviceId && !code) {
+        const p = user.pendingDeviceLinks[targetDeviceId];
+        pendingEntry = p ? [targetDeviceId, p] : undefined;
+      } else {
+        // Find the pending request whose code matches — the approving device
+        // only ever knows the code (it was read off the requesting device's
+        // screen), not which deviceId it belongs to.
+        pendingEntry = Object.entries(user.pendingDeviceLinks).find(([, p]) => String(code).trim() === p.code);
+      }
+      if (!pendingEntry) return json({ error: 'wrong_code' }, 400);
+      const [pendingDeviceId, pending] = pendingEntry;
       if (Date.now() - pending.requestedAt > 10 * 60 * 1000) {
-        user.pendingDeviceLink = null;
+        delete user.pendingDeviceLinks[pendingDeviceId];
         await this.state.storage.put(`user:${pinHash}`, user);
         return json({ error: 'expired' }, 400);
       }
-      if (String(code).trim() !== pending.code) return json({ error: 'wrong_code' }, 400);
+
+      delete user.pendingDeviceLinks[pendingDeviceId];
+
+      if (isReject) {
+        await this.state.storage.put(`user:${pinHash}`, user);
+        logRealtime('device_rejected', { userId: user.id, deviceId: pendingDeviceId });
+        if (this.env.USER_CHANNEL) {
+          const payload = JSON.stringify({ title: 'PArA PIN', body: 'A device sign-in request was rejected. If that request wasn’t yours, no action is needed — it never got access.', chatId: null, type: 'device_rejected' });
+          try {
+            const stub = this.env.USER_CHANNEL.get(this.env.USER_CHANNEL.idFromName(user.id));
+            await stub.fetch('https://internal/push-direct', { method: 'POST', body: payload });
+          } catch (e) {}
+        }
+        return json({ ok: true, rejectedDeviceId: pendingDeviceId });
+      }
 
       if (!Array.isArray(user.deviceIds)) user.deviceIds = [];
-      if (!user.deviceIds.includes(pending.deviceId)) user.deviceIds.push(pending.deviceId);
-      const approvedDeviceId = pending.deviceId;
-      user.pendingDeviceLink = null;
+      if (!user.deviceIds.includes(pendingDeviceId)) user.deviceIds.push(pendingDeviceId);
+      user.deviceMeta = user.deviceMeta || {};
+      const dm = user.deviceMeta[pendingDeviceId] || { label: pending.label || 'Device', addedAt: Date.now(), sessionCount: 0, riskScore: 0, riskFlags: [] };
+      dm.ip = pending.ip || dm.ip || null;
+      dm.country = pending.country || dm.country || null;
+      dm.city = pending.city || dm.city || null;
+      dm.platform = pending.platform || dm.platform || 'other';
+      if (mode === 'temporary') {
+        const hours = Math.min(Math.max(Number(durationHours) || 24, 1), 24 * 30);
+        dm.status = 'temporary';
+        dm.expiresAt = Date.now() + hours * 3600 * 1000;
+        dm.oneTimeUse = false;
+      } else if (mode === 'one-time') {
+        dm.status = 'trusted';
+        dm.expiresAt = null;
+        dm.oneTimeUse = true;
+      } else {
+        dm.status = 'trusted';
+        dm.expiresAt = null;
+        dm.oneTimeUse = false;
+      }
+      user.deviceMeta[pendingDeviceId] = dm;
+      const approvedDeviceId = pendingDeviceId;
       await this.state.storage.put(`user:${pinHash}`, user);
       await this.state.storage.put(`userById:${user.id}`, userByIdSnapshot(user));
+      logRealtime('device_approved', { userId: user.id, deviceId: approvedDeviceId, mode: mode || 'permanent' });
 
       // Threat-protection alert: whoever's holding the approving device
       // (the one that just typed the code in) gets a push confirming a new
@@ -5613,7 +6517,8 @@ export class Registry {
       // the approval, because that's the step that actually grants access.
       // If the person approving didn't expect this, this is their signal.
       if (this.env.USER_CHANNEL) {
-        const payload = JSON.stringify({ title: 'PArA PIN', body: "A new device was just added to your account. Wasn't you? Remove it in Settings > Security > Devices.", chatId: null });
+        const modeNote = mode === 'temporary' ? ' (temporary access)' : mode === 'one-time' ? ' (one-time access)' : '';
+        const payload = JSON.stringify({ title: 'PArA PIN', body: `A new device was just added to your account${modeNote}. Wasn't you? Remove it in Settings > Security > Devices.`, chatId: null, type: 'device_approved' });
         try {
           const stub = this.env.USER_CHANNEL.get(this.env.USER_CHANNEL.idFromName(user.id));
           await stub.fetch('https://internal/push-direct', { method: 'POST', body: payload });
@@ -5639,10 +6544,9 @@ export class Registry {
       if (Array.isArray(user.deviceIds) && user.deviceIds.includes(deviceId)) {
         return json({ status: 'approved' });
       }
-      if (!user.pendingDeviceLink || user.pendingDeviceLink.deviceId !== deviceId) {
-        return json({ status: 'none' });
-      }
-      if (Date.now() - user.pendingDeviceLink.requestedAt > 10 * 60 * 1000) {
+      const pending = pendingLinksOf(user)[deviceId];
+      if (!pending) return json({ status: 'none' });
+      if (Date.now() - pending.requestedAt > 10 * 60 * 1000) {
         return json({ status: 'expired' });
       }
       return json({ status: 'pending' });
@@ -6413,7 +7317,7 @@ export class MeetingRoom {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.sessions = new Map(); // ws -> { userId, name, avatarUrl, sfuSessionId, tracks: Map(trackName -> kind) }
+    this.sessions = new Map(); // ws -> { userId, name, avatarUrl, sfuSessionId, tracks: Map(trackName -> kind), joinedAt }
     // userId -> the ws currently considered "the" live session for that
     // person. Exists purely to detect a duplicate: a flaky-network reconnect
     // racing its own still-closing old socket, a reconnect storm after a
@@ -6423,6 +7327,48 @@ export class MeetingRoom {
     // closes first fires a false "participant-left" for someone who's
     // actually still in the room on the other connection.
     this.userSessions = new Map();
+    // --- Host controls / waiting room (added for the calling-UI redesign) ---
+    // Host is simply whoever this DO instance first saw join — no separate
+    // permission check needed beyond that, since starting/joining the
+    // meeting at all is already gated by the outer worker (workspace
+    // membership + optional cap). If the host leaves, the longest-present
+    // remaining participant (by joinedAt) is promoted, deterministic and
+    // requires no extra state beyond what's already tracked per-session.
+    this.hostUserId = null;
+    this.waitingRoomEnabled = false;
+    // ws -> { userId, name, avatarUrl } for people who knocked while
+    // waiting-room mode is on and haven't been admitted/denied yet. Kept
+    // entirely separate from `sessions` — a waiting participant has NOT
+    // joined the SFU room, isn't in the roster, and can't be pulled/seen by
+    // anyone until admitted.
+    this.waitingRoom = new Map();
+    // One-time bypass for someone the host just admitted — they're about to
+    // make a brand-new connection attempt (their old waiting-only socket
+    // gets closed client-side once it sees 'admitted'), and without this
+    // that new attempt would just land back in `waitingRoom` again since
+    // they still aren't in `userSessions` yet. Consumed (deleted) the
+    // moment it's used, so it can't be replayed to skip a LATER knock after
+    // they've left and the host still has waiting-room mode on.
+    this.admittedUserIds = new Set();
+  }
+
+  isHost(userId) {
+    return !!userId && userId === this.hostUserId;
+  }
+
+  // Called whenever the current host's session goes away (leave, kick would
+  // never target the host — see remove-participant below). Promotes the
+  // remaining participant who's been here longest and tells the room.
+  maybeReassignHost(departedUserId) {
+    if (this.hostUserId !== departedUserId) return;
+    let next = null;
+    for (const session of this.sessions.values()) {
+      if (!next || session.joinedAt < next.joinedAt) next = session;
+    }
+    this.hostUserId = next ? next.userId : null;
+    if (this.hostUserId) {
+      this.broadcast(JSON.stringify({ type: 'host-changed', hostUserId: this.hostUserId }), null);
+    }
   }
 
   roster() {
@@ -6470,6 +7416,7 @@ export class MeetingRoom {
       if (session.userId) {
         logRealtime('meeting_ghost_swept', { userId: session.userId, silentForMs: now - (session.lastPingAt || 0) });
         this.broadcast(JSON.stringify({ type: 'participant-left', userId: session.userId }), null);
+        this.maybeReassignHost(session.userId);
       }
     }
   }
@@ -6503,8 +7450,44 @@ export class MeetingRoom {
       // Record/AI UI reacts to what actually got verified, not its own
       // guess at connect time.
       const verifiedOrgId = url.searchParams.get('verifiedOrgId') || null;
-      const me = { userId, name, avatarUrl, sfuSessionId: null, tracks: new Map(), lastPingAt: Date.now() };
+      const me = { userId, name, avatarUrl, sfuSessionId: null, tracks: new Map(), lastPingAt: Date.now(), joinedAt: Date.now() };
       this.sweepGhosts(null); // clear out anyone who went silent before this join, so the new joiner's roster snapshot is accurate
+
+      const roomWasEmpty = this.sessions.size === 0;
+      if (roomWasEmpty) {
+        this.hostUserId = userId;
+        this.waitingRoomEnabled = false;
+        this.waitingRoom = new Map();
+      }
+
+      // Waiting-room gate: server-decided, not client-opted — a client has
+      // no way to know waitingRoomEnabled before it even connects, so this
+      // has to be enforced here regardless of what the connect request
+      // looks like. Only applies to non-host joiners while the host has it
+      // turned on; the FIRST joiner into an empty room is always let
+      // straight in (they're about to become host, above). Someone already
+      // admitted whose connection just blipped (`userSessions` already has
+      // a live entry for them) reconnects straight back in too — a dropped
+      // wifi signal shouldn't send an already-admitted participant back to
+      // the waiting room.
+      const isReconnectingParticipant = !!(userId && this.userSessions.has(userId));
+      const hasAdmitPass = !!(userId && this.admittedUserIds.has(userId));
+      if (hasAdmitPass) this.admittedUserIds.delete(userId);
+      if (!roomWasEmpty && this.waitingRoomEnabled && !this.isHost(userId) && !isReconnectingParticipant && !hasAdmitPass) {
+        this.waitingRoom.set(server, { userId, name, avatarUrl });
+        try { server.send(JSON.stringify({ type: 'waiting' })); } catch (e) {}
+        this.broadcast(JSON.stringify({ type: 'knock', userId, name, avatarUrl }), null);
+        server.addEventListener('close', () => this.waitingRoom.delete(server));
+        server.addEventListener('error', () => this.waitingRoom.delete(server));
+        server.addEventListener('message', (ev) => {
+          // A waiting participant can still ping (keeps their socket alive
+          // and the row visible in the host's knock list) but nothing else.
+          let data;
+          try { data = JSON.parse(ev.data); } catch (e) { return; }
+          if (data.type === 'ping') { try { server.send(JSON.stringify({ type: 'pong' })); } catch (e) {} }
+        });
+        return new Response(null, { status: 101, webSocket: client });
+      }
 
       // Evict any existing live session for this same userId BEFORE
       // registering the new one, so there's never more than one roster entry
@@ -6526,9 +7509,18 @@ export class MeetingRoom {
       logRealtime('meeting_join', { meetingId: meetingIdForLog, userId, wasReconnect, roomSize: this.sessions.size });
 
       // Bring the new joiner up to speed on who's already here (including
-      // their published tracks), then tell everyone else about the new face.
+      // their published tracks) and who's currently waiting to be admitted
+      // (only meaningful to them once they realize they're host), then tell
+      // everyone else about the new face.
       try {
-        server.send(JSON.stringify({ type: 'roster', participants: this.roster().filter((p) => p.userId !== userId), verifiedOrgId }));
+        server.send(JSON.stringify({
+          type: 'roster',
+          participants: this.roster().filter((p) => p.userId !== userId),
+          verifiedOrgId,
+          hostUserId: this.hostUserId,
+          waitingRoomEnabled: this.waitingRoomEnabled,
+          waiting: this.isHost(userId) ? [...this.waitingRoom.values()] : [],
+        }));
       } catch (e) {}
       this.broadcast(JSON.stringify({ type: 'participant-joined', userId, name, avatarUrl }), server);
 
@@ -6539,6 +7531,7 @@ export class MeetingRoom {
         if (userId && !wasEvicted) {
           logRealtime('meeting_leave', { meetingId: meetingIdForLog, userId, roomSize: this.sessions.size });
           this.broadcast(JSON.stringify({ type: 'participant-left', userId }), null);
+          this.maybeReassignHost(userId);
         }
       };
       server.addEventListener('close', cleanup);
@@ -6559,6 +7552,65 @@ export class MeetingRoom {
         // who joins after can go pull tracks from it.
         if (data.type === 'set-session' && data.sfuSessionId) {
           me.sfuSessionId = data.sfuSessionId;
+          return;
+        }
+
+        // ---- Host controls (server-enforced: only this.hostUserId's own
+        // session can trigger any of these three, checked here, not just
+        // hidden client-side) ----
+        if (data.type === 'set-waiting-room') {
+          if (!this.isHost(userId)) return;
+          this.waitingRoomEnabled = !!data.enabled;
+          this.broadcast(JSON.stringify({ type: 'waiting-room-changed', enabled: this.waitingRoomEnabled }), null);
+          return;
+        }
+        if (data.type === 'admit' && data.targetUserId) {
+          if (!this.isHost(userId)) return;
+          const entry = [...this.waitingRoom.entries()].find(([, w]) => w.userId === data.targetUserId);
+          if (!entry) return;
+          const [waitingWs] = entry;
+          this.waitingRoom.delete(waitingWs);
+          this.admittedUserIds.add(data.targetUserId);
+          try { waitingWs.send(JSON.stringify({ type: 'admitted' })); } catch (e) {}
+          // The client opens a brand-new connection on receiving 'admitted'
+          // (see meeting.ts) — simplest correct way to fold them into the
+          // exact same join path every other participant already took, no
+          // duplicated logic here. admittedUserIds (above) is what lets
+          // that next attempt actually get through the gate.
+          return;
+        }
+        if (data.type === 'deny' && data.targetUserId) {
+          if (!this.isHost(userId)) return;
+          const entry = [...this.waitingRoom.entries()].find(([, w]) => w.userId === data.targetUserId);
+          if (!entry) return;
+          const [waitingWs] = entry;
+          this.waitingRoom.delete(waitingWs);
+          try { waitingWs.send(JSON.stringify({ type: 'denied' })); waitingWs.close(); } catch (e) {}
+          return;
+        }
+        if (data.type === 'mute-all') {
+          if (!this.isHost(userId)) return;
+          // Presence-level REQUEST, not an enforced mute — every other
+          // client's own UI honors it by self-muting (see meeting.ts). No
+          // server-side mechanism forces anyone's microphone off; a host
+          // can't reach into someone else's device, same as every other
+          // "app-level" control documented elsewhere in this codebase.
+          this.broadcast(JSON.stringify({ type: 'mute-all', byUserId: userId }), server);
+          return;
+        }
+        if (data.type === 'remove-participant' && data.targetUserId) {
+          if (!this.isHost(userId) || data.targetUserId === userId) return;
+          const targetWs = this.userSessions.get(data.targetUserId);
+          if (!targetWs) return;
+          try { targetWs.send(JSON.stringify({ type: 'removed', byUserId: userId })); targetWs.close(); } catch (e) {}
+          return;
+        }
+        if (data.type === 'reaction' && typeof data.emoji === 'string') {
+          // Pure ephemeral presence relay, same trust/storage level as
+          // recording-started/stopped below — no rate limit here beyond
+          // whatever general abuse protection applies to this endpoint;
+          // worst case is a spammy but harmless flood of emoji.
+          this.broadcast(JSON.stringify({ type: 'reaction', userId, name, emoji: data.emoji.slice(0, 8) }), null);
           return;
         }
 
@@ -6839,6 +7891,11 @@ export default {
 
       const mediaMatch = url.pathname.match(/^\/api\/media\/([^/]+)$/);
       if (mediaMatch && request.method === 'GET') {
+        // `avatar_`-prefixed keys are the PRIVATE tier (see
+        // isPrivateAvatarKey's comment) — refusing them here is what makes
+        // the signed /api/avatar-blob path the only way in, rather than
+        // that path being one option alongside a still-public fallback.
+        if (mediaMatch[1].startsWith('avatar_')) return new Response('not found', { status: 404 });
         if (!env.MEDIA) return new Response('not found', { status: 404 });
         const obj = await env.MEDIA.get(mediaMatch[1]);
         if (!obj) return new Response('not found', { status: 404 });
@@ -6856,6 +7913,121 @@ export default {
           'content-disposition': `${inlineOk ? 'inline' : 'attachment'}; filename="${fileName.replace(/["\r\n]/g, '_')}"`,
         };
         return new Response(obj.body, { headers });
+      }
+
+      // Profile photo upload — deliberately separate from /api/upload
+      // above: image-only (no PDFs/audio/generic files, this is a profile
+      // photo), and writes the SAME bytes to R2 under TWO keys: a bare
+      // UUID (the existing public thumbnail path — chat rows, member
+      // lists, nav all keep rendering exactly as before, unchanged this
+      // round) and an `avatar_`-prefixed key (the new private tier, only
+      // ever reachable through the signed /api/avatar-blob path once
+      // visibility settings are saved via /api/profile). The 2x storage
+      // cost is trivial for an avatar-sized image and buys internal
+      // consistency instead of two different code paths reasoning about
+      // "the same photo" differently.
+      if (request.method === 'POST' && url.pathname === '/api/avatar/upload') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        if (!env.MEDIA) return json({ error: 'media_not_configured' }, 501);
+
+        const contentType = request.headers.get('content-type') || 'application/octet-stream';
+        if (!contentType.toLowerCase().startsWith('image/')) return json({ error: 'must_be_image' }, 400);
+        // SVG can carry embedded <script>, explicitly excluded even though
+        // it's an image/* type — same reasoning as /api/upload's BLOCKED_TYPES.
+        if (contentType.toLowerCase().startsWith('image/svg')) return json({ error: 'unsupported_type' }, 400);
+
+        const buf = await request.arrayBuffer();
+        const MAX_BYTES = 20 * 1024 * 1024;
+        if (buf.byteLength === 0) return json({ error: 'empty' }, 400);
+        if (buf.byteLength > MAX_BYTES) return json({ error: 'too_large', maxBytes: MAX_BYTES }, 413);
+
+        const publicKey = crypto.randomUUID();
+        const privateKey = `avatar_${crypto.randomUUID()}`;
+        await Promise.all([
+          env.MEDIA.put(publicKey, buf, { httpMetadata: { contentType }, customMetadata: { fileName: 'avatar' } }),
+          env.MEDIA.put(privateKey, buf, { httpMetadata: { contentType }, customMetadata: { fileName: 'avatar', ownerId: who.userId } }),
+        ]);
+        return json({ url: `/api/media/${publicKey}`, mediaKey: privateKey, size: buf.byteLength, mime: contentType });
+      }
+
+      // Signed, temporary, single-purpose read for the private avatar
+      // tier — verifies the (mediaKey, viewer, exp, sig) capability against
+      // the Registry DO (which holds the signing secret) before ever
+      // touching R2. `cache-control: private` is deliberate: this must
+      // never be cached by Cloudflare's shared CDN cache or any
+      // intermediate proxy, only the requesting browser's own private
+      // cache, and even that only until the token's own expiry.
+      const avatarBlobMatch = url.pathname.match(/^\/api\/avatar-blob\/([^/]+)$/);
+      if (avatarBlobMatch && request.method === 'GET') {
+        const mediaKey = decodeURIComponent(avatarBlobMatch[1]);
+        const viewer = url.searchParams.get('viewer') || '';
+        const exp = url.searchParams.get('exp') || '';
+        const sig = url.searchParams.get('sig') || '';
+        if (!env.MEDIA) return new Response('not found', { status: 404 });
+        const verifyRes = await registryStub.fetch(
+          `https://internal/avatar-verify-token?mediaKey=${encodeURIComponent(mediaKey)}&viewer=${encodeURIComponent(viewer)}&exp=${encodeURIComponent(exp)}&sig=${encodeURIComponent(sig)}`
+        );
+        const verify = await verifyRes.json();
+        if (!verify.ok) return new Response('forbidden', { status: 403 });
+        const obj = await env.MEDIA.get(mediaKey);
+        if (!obj) return new Response('not found', { status: 404 });
+        const contentType = obj.httpMetadata?.contentType || 'application/octet-stream';
+        const remainingSec = Math.max(0, Math.floor((parseInt(exp, 10) - Date.now()) / 1000));
+        return new Response(obj.body, {
+          headers: {
+            'content-type': contentType,
+            'cache-control': `private, max-age=${remainingSec}, no-store`,
+            'x-content-type-options': 'nosniff',
+            'content-disposition': 'inline',
+          },
+        });
+      }
+
+      // ---- Profile photo privacy proxy routes ----
+      if (request.method === 'GET' && url.pathname === '/api/profile/avatar-privacy') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        return registryStub.fetch(`https://internal/profile/avatar-privacy?pinHash=${encodeURIComponent(pinHash)}`);
+      }
+      if (request.method === 'POST' && url.pathname === '/api/profile/avatar-privacy') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/profile/avatar-privacy', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, visibility: body.visibility, customListUserIds: body.customListUserIds }),
+        });
+      }
+      if (request.method === 'POST' && url.pathname === '/api/profile/org-avatar') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        if (!body.orgId) return json({ error: 'missing_org_id' }, 400);
+        return registryStub.fetch('https://internal/profile/org-avatar', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, orgId: body.orgId, avatarUrl: body.avatarUrl, avatarMediaKey: body.avatarMediaKey }),
+        });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/profile/avatar-history') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        return registryStub.fetch(`https://internal/profile/avatar-history?pinHash=${encodeURIComponent(pinHash)}`);
+      }
+      if (request.method === 'GET' && url.pathname === '/api/profile/avatar-url') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const userId = url.searchParams.get('userId') || '';
+        const orgId = url.searchParams.get('orgId') || '';
+        return registryStub.fetch(`https://internal/profile/avatar-url?pinHash=${encodeURIComponent(pinHash)}&userId=${encodeURIComponent(userId)}&orgId=${encodeURIComponent(orgId)}`);
+      }
+      if (request.method === 'GET' && url.pathname === '/api/profile/avatar-access-log') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        return registryStub.fetch(`https://internal/profile/avatar-access-log?pinHash=${encodeURIComponent(pinHash)}`);
       }
 
       // AI meeting assistant: takes a previously-uploaded audio recording
@@ -6983,10 +8155,29 @@ export default {
         const body = await request.json().catch(() => ({}));
         const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
         const ua = request.headers.get('User-Agent') || null;
-        const country = (request.cf && request.cf.country) || null;
+        const cf = request.cf || {};
+        // city/lat/lon/asOrganization all come free with every Cloudflare
+        // request (no external geo-IP/ASN service needed) — see
+        // checkImpossibleTravel/looksLikeVpnOrHosting above for what they
+        // feed into. manufacturer/model/isEmulator/platform/osVersion are
+        // only ever meaningfully known by a native client (mobile app via
+        // expo-device); a browser can't determine them and won't send them,
+        // Registry falls back to UA-parsing in that case.
         const res = await registryStub.fetch('https://internal/session', {
           method: 'POST',
-          body: JSON.stringify({ pinHash, displayName: body.displayName || null, deviceId: body.deviceId || null, ip, ua, country }),
+          body: JSON.stringify({
+            pinHash, displayName: body.displayName || null, deviceId: body.deviceId || null,
+            ip, ua, country: cf.country || null, city: cf.city || null,
+            lat: typeof cf.latitude === 'string' ? parseFloat(cf.latitude) : (cf.latitude ?? null),
+            lon: typeof cf.longitude === 'string' ? parseFloat(cf.longitude) : (cf.longitude ?? null),
+            asOrganization: cf.asOrganization || null,
+            clientPlatform: body.platform || null,
+            clientOsVersion: body.osVersion || null,
+            manufacturer: body.manufacturer || null,
+            model: body.model || null,
+            isEmulator: typeof body.isEmulator === 'boolean' ? body.isEmulator : null,
+            appVersion: body.appVersion || null,
+          }),
         });
         return res;
       }
@@ -7002,6 +8193,40 @@ export default {
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
         const body = await request.json().catch(() => ({}));
         return registryStub.fetch('https://internal/devices/remove', { method: 'POST', body: JSON.stringify({ pinHash, id: body.id }) });
+      }
+
+      // Status-only changes (keep the device's record, block future
+      // sign-in) — distinct from /api/devices/remove above, which deletes
+      // the record outright.
+      if (request.method === 'POST' && (url.pathname === '/api/devices/mark-lost' || url.pathname === '/api/devices/mark-compromised' || url.pathname === '/api/devices/revoke')) {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        const internalPath = url.pathname.replace('/api/', '/');
+        return registryStub.fetch(`https://internal${internalPath}`, { method: 'POST', body: JSON.stringify({ pinHash, id: body.id }) });
+      }
+
+      // Polled periodically by the client itself to detect its own
+      // revocation — see the handler comment in Registry for why this
+      // exists (pinHash has no per-device revocable session token).
+      if (request.method === 'GET' && url.pathname === '/api/devices/status') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const deviceId = url.searchParams.get('deviceId') || '';
+        return registryStub.fetch(`https://internal/devices/status?pinHash=${encodeURIComponent(pinHash)}&deviceId=${encodeURIComponent(deviceId)}`);
+      }
+
+      // Client self-reports a local-only security event (Face ID/passcode
+      // toggled off) — see the Registry handler comment for why this can
+      // only ever be client-reported, not server-detected.
+      if (request.method === 'POST' && url.pathname === '/api/devices/local-security-event') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/devices/local-security-event', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, deviceId: body.deviceId || null, event: body.event }),
+        });
       }
 
       if (request.method === 'POST' && url.pathname === '/api/mfa/setup') {
@@ -7109,19 +8334,32 @@ export default {
 
       // The requesting (not-yet-trusted) device's own pinHash, it already
       // knows the correct PIN, that's not in question; what it doesn't have
-      // yet is a trusted device to vouch for it.
+      // yet is a trusted device to vouch for it. ip/ua/country/city are
+      // captured here (same request.cf source as /api/session) so the
+      // "Unknown devices" list an approver sees carries real display info
+      // rather than being a bare code with no context.
       if (request.method === 'POST' && url.pathname === '/api/device-link/request') {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
         const body = await request.json().catch(() => ({}));
         if (!body.deviceId) return json({ error: 'missing_fields' }, 400);
+        const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+        const ua = request.headers.get('User-Agent') || null;
+        const cf = request.cf || {};
         return registryStub.fetch('https://internal/device-link/request', {
           method: 'POST',
-          body: JSON.stringify({ pinHash, deviceId: body.deviceId }),
+          body: JSON.stringify({
+            pinHash, deviceId: body.deviceId, ip, ua,
+            country: cf.country || null, city: cf.city || null,
+            platform: body.platform || null,
+          }),
         });
       }
 
-      // Called FROM an already-trusted, already-signed-in device.
+      // Called FROM an already-trusted, already-signed-in device. mode
+      // ('permanent' default | 'temporary' | 'one-time') and durationHours
+      // (only used for 'temporary') pass straight through — validated and
+      // clamped server-side in the Registry DO.
       if (request.method === 'POST' && url.pathname === '/api/device-link/approve') {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
@@ -7129,7 +8367,26 @@ export default {
         if (!body.code || !body.deviceId) return json({ error: 'missing_fields' }, 400);
         return registryStub.fetch('https://internal/device-link/approve', {
           method: 'POST',
-          body: JSON.stringify({ pinHash, code: body.code, deviceId: body.deviceId }),
+          body: JSON.stringify({
+            pinHash, code: body.code, deviceId: body.deviceId,
+            mode: body.mode || 'permanent', durationHours: body.durationHours || null,
+          }),
+        });
+      }
+
+      // Same auth model as approve (already-trusted device) — declines the
+      // pending request instead of granting trust. Accepts EITHER a code
+      // (same flow as approve) OR a bare targetDeviceId (one-click reject
+      // from the Unknown devices list — safe without proximity proof since
+      // reject only ever removes access, never grants it).
+      if (request.method === 'POST' && url.pathname === '/api/device-link/reject') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        if (!body.deviceId || (!body.code && !body.targetDeviceId)) return json({ error: 'missing_fields' }, 400);
+        return registryStub.fetch('https://internal/device-link/reject', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, code: body.code || null, deviceId: body.deviceId, targetDeviceId: body.targetDeviceId || null }),
         });
       }
 
@@ -8085,6 +9342,8 @@ export default {
                     to,
                     name: activateBody.adminDisplayName,
                     orgName: activateBody.org.name,
+                    emailSignInAutoEnabled: activateBody.emailSignInAutoEnabled,
+                    autoEnabledDomain: activateBody.autoEnabledDomain,
                   });
                 }
               }
@@ -8183,6 +9442,67 @@ export default {
         return registryStub.fetch('https://internal/org/update', {
           method: 'POST',
           body: JSON.stringify({ pinHash, orgId: body.orgId, name: body.name, logoUrl: body.logoUrl, allowEmailAuth: body.allowEmailAuth, emailDomain: body.emailDomain, country: body.country }),
+        });
+      }
+
+      // App-lock timeout policy — read is any org member (so a non-admin
+      // member's client can compute its own effective enforced timeout),
+      // write is manage_workspace-gated same as /api/org/update.
+      if (request.method === 'GET' && url.pathname === '/api/org/security-policy') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const orgId = url.searchParams.get('orgId') || '';
+        return registryStub.fetch(`https://internal/org/security-policy?orgId=${encodeURIComponent(orgId)}`);
+      }
+      if (request.method === 'POST' && url.pathname === '/api/org/security-policy') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        if (!body.orgId) return json({ error: 'missing_org_id' }, 400);
+        return registryStub.fetch('https://internal/org/security-policy', {
+          method: 'POST',
+          body: JSON.stringify({
+            pinHash, orgId: body.orgId,
+            minTimeoutSec: body.minTimeoutSec,
+            requireStepUpForSensitive: body.requireStepUpForSensitive,
+          }),
+        });
+      }
+
+      // Profile-photo screenshot/view-history org policy — same read/write
+      // gating shape as /api/org/security-policy above.
+      if (request.method === 'GET' && url.pathname === '/api/org/avatar-policy') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const orgId = url.searchParams.get('orgId') || '';
+        return registryStub.fetch(`https://internal/org/avatar-policy?orgId=${encodeURIComponent(orgId)}`);
+      }
+      if (request.method === 'POST' && url.pathname === '/api/org/avatar-policy') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        if (!body.orgId) return json({ error: 'missing_org_id' }, 400);
+        return registryStub.fetch('https://internal/org/avatar-policy', {
+          method: 'POST',
+          body: JSON.stringify({
+            pinHash, orgId: body.orgId,
+            preventScreenshotAndroid: body.preventScreenshotAndroid,
+            showViewerIdentityToOwner: body.showViewerIdentityToOwner,
+          }),
+        });
+      }
+
+      // iOS screenshot-of-profile-photo detection report — see
+      // /profile/screenshot-report in the Registry DO for what this is and
+      // is not (detection, not prevention).
+      if (request.method === 'POST' && url.pathname === '/api/profile/screenshot-report') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const body = await request.json().catch(() => ({}));
+        if (!body.targetUserId) return json({ error: 'missing_target' }, 400);
+        return registryStub.fetch('https://internal/profile/screenshot-report', {
+          method: 'POST',
+          body: JSON.stringify({ pinHash, targetUserId: body.targetUserId, context: body.context }),
         });
       }
 

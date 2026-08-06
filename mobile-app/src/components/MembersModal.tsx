@@ -23,6 +23,7 @@ import { useCallStore } from '../state/call';
 import { useTheme } from '../hooks/useTheme';
 import { apiFetch } from '../api/client';
 import { initials, colorFromString } from '../utils/avatar';
+import AvatarViewer from './AvatarViewer';
 
 interface OrgMember {
   id: string;
@@ -44,6 +45,7 @@ export default function MembersModal({ visible, onClose }: { visible: boolean; o
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [viewerMember, setViewerMember] = useState<OrgMember | null>(null);
 
   const activeOrgName = orgs.find((o) => o.id === activeOrgId)?.name || 'Workspace';
 
@@ -111,13 +113,15 @@ export default function MembersModal({ visible, onClose }: { visible: boolean; o
         // lines, a soft rounded-rect row instead, was a flat bordered-list
         // row before this pass.
         <View style={styles.row}>
-          {item.avatarUrl ? (
-            <Image source={{ uri: item.avatarUrl }} style={styles.avatar} />
-          ) : (
-            <View style={[styles.avatar, styles.avatarFallback, { backgroundColor: colorFromString(item.id, theme.ice, theme.fire) }]}>
-              <Text style={styles.avatarText}>{initials(name)}</Text>
-            </View>
-          )}
+          <Pressable onPress={() => setViewerMember(item)} hitSlop={4}>
+            {item.avatarUrl ? (
+              <Image source={{ uri: item.avatarUrl }} style={styles.avatar} />
+            ) : (
+              <View style={[styles.avatar, styles.avatarFallback, { backgroundColor: colorFromString(item.id, theme.ice, theme.fire) }]}>
+                <Text style={styles.avatarText}>{initials(name)}</Text>
+              </View>
+            )}
+          </Pressable>
           <View style={{ flex: 1, minWidth: 0 }}>
             <Text style={[styles.name, { color: theme.textHi }]} numberOfLines={1}>
               {name}
@@ -154,6 +158,8 @@ export default function MembersModal({ visible, onClose }: { visible: boolean; o
     [theme, myUserId, busyId, messageMember, callMember, inCall]
   );
 
+  const viewerName = viewerMember ? (viewerMember.displayName || 'PArA PIN user') + (viewerMember.id === myUserId ? ' (you)' : '') : '';
+
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
       <Pressable style={styles.backdrop} onPress={onClose}>
@@ -182,6 +188,14 @@ export default function MembersModal({ visible, onClose }: { visible: boolean; o
           </View>
         </Pressable>
       </Pressable>
+      <AvatarViewer
+        visible={!!viewerMember}
+        onClose={() => setViewerMember(null)}
+        userId={viewerMember?.id ?? null}
+        name={viewerName}
+        thumbUrl={viewerMember?.avatarUrl}
+        orgId={activeOrgId}
+      />
     </Modal>
   );
 }

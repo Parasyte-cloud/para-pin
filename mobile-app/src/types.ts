@@ -3,6 +3,21 @@
 // index.html's equivalent client-side usage rather than any formal schema
 // (the backend doesn't publish one).
 
+export interface OrgSecurityPolicy {
+  minTimeoutSec: number | null;
+  requireStepUpForSensitive?: boolean;
+}
+
+// preventScreenshotAndroid: the one part of this that's a real OS-enforced
+// control (FLAG_SECURE) — see useAvatarScreenCapture.ts for why there's no
+// iOS equivalent field here at all, rather than one that would always be
+// false/ignored. showViewerIdentityToOwner: privacy-preserving default is
+// off, see worker.js's /org/avatar-policy comment for the reasoning.
+export interface OrgAvatarPolicy {
+  preventScreenshotAndroid?: boolean;
+  showViewerIdentityToOwner?: boolean;
+}
+
 export interface OrgSummary {
   id: string | null;
   name: string;
@@ -12,6 +27,8 @@ export interface OrgSummary {
   country?: string | null;
   customDomains?: string[];
   isAdmin?: boolean;
+  securityPolicy?: OrgSecurityPolicy | null;
+  avatarPolicy?: OrgAvatarPolicy | null;
 }
 
 export interface ChatSummary {

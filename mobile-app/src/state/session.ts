@@ -10,13 +10,40 @@
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import * as LocalAuthentication from 'expo-local-authentication';
+import * as Device from 'expo-device';
+import Constants from 'expo-constants';
+import { Platform } from 'react-native';
 import { create } from 'zustand';
 import { apiFetch } from '../api/client';
 import type { ApiErrorBody, ChatMessage, ChatSummary, OrgSummary } from '../types';
 
+// manufacturer/model/isEmulator are only ever knowable on native — a
+// browser can't report them at all (see worker.js's parseDeviceInfo
+// fallback for the web path), this is the one genuine advantage a native
+// client has for device-trust display/risk-scoring over a browser tab.
+// Device.isDevice is expo-device's own real/simulator check, no additional
+// heuristic needed (unlike VPN/hosting detection, which has no equivalent
+// authoritative source and stays a keyword heuristic server-side).
+function getNativeDeviceInfo() {
+  return {
+    platform: Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'other',
+    osVersion: Device.osVersion ?? null,
+    manufacturer: Device.manufacturer ?? null,
+    model: Device.modelName ?? null,
+    isEmulator: Device.isDevice === false,
+    appVersion: Constants.expoConfig?.version ?? null,
+  };
+}
+
 const DEVICE_ID_KEY = 'parapin_device_id';
 const PIN_HASH_KEY = 'parapin_pin_hash';
 const BIOMETRIC_ENABLED_KEY = 'parapin_biometric_enabled';
+const LOCK_TIMEOUT_KEY = 'parapin_lock_timeout_sec';
+
+// Mirrors index.html's LOCK_TIMEOUT_TIERS/DEFAULT_LOCK_TIMEOUT_SEC exactly —
+// see that file's "Inactivity auto-lock" comment for the full reasoning.
+export const LOCK_TIMEOUT_TIERS = [0, 30, 60, 300] as const;
+export const DEFAULT_LOCK_TIMEOUT_SEC = 300;
 
 async function getOrCreateDeviceId(): Promise<string> {
   const existing = await SecureStore.getItemAsync(DEVICE_ID_KEY);
@@ -95,6 +122,12 @@ interface SessionState {
   // app/(tabs)/_layout.tsx already redirects on.
   lockNow: () => void;
   logout: () => Promise<void>;
+  // This person's own preferred auto-lock timeout (seconds since
+  // backgrounded before the app requires re-authentication). The ACTUAL
+  // enforced value may be stricter — see getEffectiveLockTimeoutSec, which
+  // also factors in every org's securityPolicy.minTimeoutSec.
+  lockTimeoutSec: number;
+  setLockTimeoutSec: (sec: number) => Promise<void>;
   // Mirrors index.html's profileSaveBtn handler (index.html:8530-8566).
   // `avatarUrl` here is the ALREADY-UPLOADED result — this action never
   // touches the file picker or /api/upload itself (see
@@ -102,10 +135,28 @@ interface SessionState {
   // the final {displayName, avatarUrl} pair. Passing `avatarUrl: undefined`
   // keeps the existing photo; there's no "remove photo" affordance here,
   // same as web.
+  // avatarMediaKey is the companion private-tier key from
+  // uploadPrivateAvatarPhoto (undefined = leave whatever's already saved
+  // untouched, matching worker.js's /profile handler semantics exactly).
   updateProfile: (
     displayName: string,
-    avatarUrl?: string
+    avatarUrl?: string,
+    avatarMediaKey?: string
   ) => Promise<{ ok: true } | { ok: false; error: string }>;
+}
+
+// The org sets a CEILING (loosest acceptable), not a fixed value — same
+// model as index.html's effectiveLockTimeoutSec(). A workspace with no
+// policy set (securityPolicy null/minTimeoutSec null) doesn't constrain
+// this at all; the strictest applicable value wins.
+export function getEffectiveLockTimeoutSec(): number {
+  const { lockTimeoutSec, orgs } = useSessionStore.getState();
+  let effective = lockTimeoutSec;
+  for (const org of orgs) {
+    const min = org.securityPolicy?.minTimeoutSec;
+    if (min !== null && min !== undefined && min < effective) effective = min;
+  }
+  return effective;
 }
 
 export const useSessionStore = create<SessionState>((set, get) => ({
@@ -126,16 +177,24 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   pinnedChatIds: [],
   activeOrgId: null,
   setActiveOrgId: (orgId) => set({ activeOrgId: orgId }),
+  lockTimeoutSec: DEFAULT_LOCK_TIMEOUT_SEC,
+  setLockTimeoutSec: async (sec) => {
+    await SecureStore.setItemAsync(LOCK_TIMEOUT_KEY, String(sec));
+    set({ lockTimeoutSec: sec });
+  },
 
   hydrate: async () => {
-    const [deviceId, pinHash, biometricPref, biometricSupported] = await Promise.all([
+    const [deviceId, pinHash, biometricPref, biometricSupported, lockTimeoutPref] = await Promise.all([
       getOrCreateDeviceId(),
       SecureStore.getItemAsync(PIN_HASH_KEY),
       SecureStore.getItemAsync(BIOMETRIC_ENABLED_KEY),
       checkBiometricSupport(),
+      SecureStore.getItemAsync(LOCK_TIMEOUT_KEY),
     ]);
     const biometricEnabled = biometricPref === 'true' && biometricSupported;
-    set({ deviceId, pinHash, biometricEnabled, biometricSupported });
+    const parsedTimeout = parseInt(lockTimeoutPref || '', 10);
+    const lockTimeoutSec = (LOCK_TIMEOUT_TIERS as readonly number[]).includes(parsedTimeout) ? parsedTimeout : DEFAULT_LOCK_TIMEOUT_SEC;
+    set({ deviceId, pinHash, biometricEnabled, biometricSupported, lockTimeoutSec });
 
     if (pinHash) {
       if (biometricEnabled) {
@@ -156,7 +215,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set({ isLoading: true });
     const res = await apiFetch('/session', {
       method: 'POST',
-      body: JSON.stringify({ pinHash, deviceId }),
+      body: JSON.stringify({ pinHash, deviceId, ...getNativeDeviceInfo() }),
     });
     set({ isLoading: false });
     if (!res.ok) {
@@ -202,7 +261,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // (index.html:3235-3240) setting myPinHash before its own /session
       // call so its header-injection has something to pick up.
       headers: { 'X-Para-Pin-Hash': pinHash },
-      body: JSON.stringify({ pinHash, deviceId, displayName: opts?.displayName }),
+      body: JSON.stringify({ pinHash, deviceId, displayName: opts?.displayName, ...getNativeDeviceInfo() }),
     });
     set({ isLoading: false });
     if (!res.ok) {
@@ -248,7 +307,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // relying on skipAuth's now-removed body-only behavior, which the
       // server never actually reads for auth.
       headers: { 'X-Para-Pin-Hash': attemptedHash },
-      body: JSON.stringify({ pinHash: attemptedHash, deviceId: deviceId ?? (await getOrCreateDeviceId()) }),
+      body: JSON.stringify({ pinHash: attemptedHash, deviceId: deviceId ?? (await getOrCreateDeviceId()), ...getNativeDeviceInfo() }),
     });
     set({ isLoading: false });
     if (!res.ok) return { ok: false, error: res.body, status: res.status };
@@ -267,6 +326,22 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     return { ok: true };
   },
 
+  // Face ID/Touch ID/fingerprint verification is entirely on-device (Secure
+  // Enclave on iOS, Android Keystore-backed biometric APIs on Android) —
+  // it never touches the network. Previously this function ALSO required
+  // refreshSession() (a network round trip) to succeed before unlocking,
+  // meaning a successful Face ID scan with no signal — on a plane, in a
+  // basement, anywhere offline — still left the person locked out of chats
+  // that were already fully cached on-device. The local biometric result
+  // is now trusted on its own for the unlock decision; refreshSession()
+  // still runs right after, in the background, to pull fresh data AND to
+  // catch a real revocation (device removed/lost/compromised, PIN
+  // disabled) — same async-detection model as useDeviceStatusSelfCheck's
+  // periodic poll, not a new weaker guarantee: this app already can't do
+  // instant server-forced logout (see DEVICE_TRUST_ARCHITECTURE.md), and
+  // this doesn't change that boundary, it just stops making offline access
+  // to already-local data depend on a network call that has nothing to do
+  // with whether the fingerprint matched.
   unlockWithBiometric: async () => {
     const supported = get().biometricSupported;
     if (!supported) return false;
@@ -276,9 +351,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       disableDeviceFallback: false,
     });
     if (!result.success) return false;
-    const ok = await get().refreshSession();
-    if (ok) set({ isLocked: false });
-    return ok;
+    set({ isLocked: false });
+    get().refreshSession(); // fire-and-forget — see comment above
+    return true;
   },
 
   setBiometricEnabled: async (enabled) => {
@@ -296,12 +371,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   lockNow: () => set({ isLocked: true }),
 
-  updateProfile: async (displayName, avatarUrl) => {
+  updateProfile: async (displayName, avatarUrl, avatarMediaKey) => {
     const name = displayName.trim();
     if (!name) return { ok: false, error: 'Enter a display name.' };
     const res = await apiFetch<{ displayName?: string; avatarUrl?: string | null }>('/profile', {
       method: 'POST',
-      body: JSON.stringify({ displayName: name, avatarUrl }),
+      body: JSON.stringify({ displayName: name, avatarUrl, ...(avatarMediaKey !== undefined ? { avatarMediaKey } : {}) }),
     });
     if (!res.ok) return { ok: false, error: "Couldn't save your profile. Try again." };
     set({

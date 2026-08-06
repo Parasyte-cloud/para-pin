@@ -1,0 +1,15 @@
+{
+  "expo": {
+    "extra": {
+      "eas": {
+        "projectId": "bdfaecfa-2569-462b-90b2-d5899692a6fd"
+      }
+    },
+    "ios": {
+      "bundleIdentifier": "com.parasytecloud.parapin",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    }
+  }
+}

@@ -1533,6 +1533,7 @@
 
   <div class="pin-dots" id="pinDots"></div>
   <div id="lockMsg">Set a 7-digit PIN to secure this device</div>
+  <div id="lockPasskeyBtn" style="display:none; text-align:center; margin:10px 0; color:var(--text-hi); font-weight:600; font-size:13.5px; cursor:pointer;">🔐 Unlock with Face ID / Touch ID</div>
 
   <div class="keypad" id="keypad"></div>
   <div id="lockReset">Reset local PIN</div>
@@ -2036,6 +2037,35 @@
         <div class="hint" style="margin-top:4px;">Point each domain at PArA (add it as a Custom Domain on the Worker in your Cloudflare dashboard first), and the sign-in screen there shows this workspace's name and logo before anyone signs in. The domain-hosting step itself has to be done in Cloudflare, not here. You can add more than one.</div>
         <div id="workspaceCustomDomainsList" style="display:flex; flex-direction:column; gap:6px; margin-top:8px;"></div>
         <div style="border-top:1px solid var(--border); padding-top:12px; margin-top:12px;">
+          <div class="hint" style="margin-bottom:6px;">App-lock timeout — the longest anyone with access to this workspace's data may go without re-authenticating (Face ID/Touch ID/fingerprint/PIN). Applies on top of each person's own device setting; whichever is stricter wins. This is a client-enforced UX control, not a substitute for server-side permissions — it doesn't change who can access what, only how often the app re-locks.</div>
+          <select id="securityPolicyTimeoutSelect" style="margin-bottom:8px;">
+            <option value="">No workspace minimum (use each person's own device setting)</option>
+            <option value="0">Require immediately (lock the instant the app is backgrounded)</option>
+            <option value="30">Require after 30 seconds</option>
+            <option value="60">Require after 1 minute</option>
+            <option value="300">Require after 5 minutes</option>
+          </select>
+          <label class="settings-row" style="margin-bottom:8px;">
+            <span>Require biometric/PIN re-confirmation for sensitive actions (approving a device, changing billing)</span>
+            <input type="checkbox" id="securityPolicyStepUpToggle">
+          </label>
+          <div class="btn primary" id="securityPolicySaveBtn">Save security policy</div>
+          <div class="hint" id="securityPolicySaveStatus" style="display:none; margin-top:8px;"></div>
+        </div>
+        <div style="border-top:1px solid var(--border); padding-top:12px; margin-top:12px;">
+          <div class="hint" style="margin-bottom:6px;">Profile photo protection. Android can technically block screenshots of the full-screen photo viewer (FLAG_SECURE); iOS has no equivalent API — no app can prevent a screenshot there, so this only ever protects Android devices. On iOS the app can detect that a screenshot happened while the viewer was open and report it, but not stop it.</div>
+          <label class="settings-row" style="margin-bottom:8px;">
+            <span>Block screenshots of the profile photo viewer on Android</span>
+            <input type="checkbox" id="avatarPolicyScreenshotToggle">
+          </label>
+          <label class="settings-row" style="margin-bottom:8px;">
+            <span>Show viewer's name to the photo owner in their access log (off by default — most messaging apps deliberately don't reveal who viewed a profile photo, since that creates its own surveillance dynamic against the viewer)</span>
+            <input type="checkbox" id="avatarPolicyIdentityToggle">
+          </label>
+          <div class="btn primary" id="avatarPolicySaveBtn">Save photo policy</div>
+          <div class="hint" id="avatarPolicySaveStatus" style="display:none; margin-top:8px;"></div>
+        </div>
+        <div style="border-top:1px solid var(--border); padding-top:12px; margin-top:12px;">
           <div class="hint" style="margin-bottom:6px;">Single sign-on (OpenID Connect): works with Google Workspace, Microsoft Entra ID, Okta, or any OIDC-compliant identity provider. Shows a "Sign in with SSO" button on this workspace's custom login domain above.</div>
           <input type="text" id="ssoIssuerInput" placeholder="Issuer URL, e.g. https://accounts.google.com" style="margin-bottom:8px;">
           <input type="text" id="ssoClientIdInput" placeholder="Client ID" style="margin-bottom:8px;">
@@ -2356,10 +2386,30 @@
 </div>
 
 <!-- ============ IMAGE LIGHTBOX ============ -->
+<!-- Shared by chat image attachments and the profile-photo full-screen
+     viewer. Zoom/rotate/pan state lives entirely in JS (lightboxZoom.*, see
+     wireLightboxGestures) and is reset every time the lightbox opens.
+     #lightboxViewport is the fixed-size gesture surface (wheel/drag/pinch
+     listeners live here so panning outside the image's own box still
+     works); #lightboxImg gets the actual transform. -->
 <div class="overlay" id="lightboxOverlay" style="background:rgba(0,0,0,0.9);">
-  <div style="position:relative;">
-    <img id="lightboxImg" style="max-width:92vw;max-height:88vh;border-radius:10px;display:block;" src="" alt="">
-    <div class="icon-btn" id="lightboxDownloadBtn" title="Download"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 21h16"/></svg></div>
+  <div id="lightboxViewport" style="position:relative; width:100vw; height:100vh; display:flex; align-items:center; justify-content:center; overflow:hidden; touch-action:none;">
+    <img id="lightboxImg" style="max-width:92vw;max-height:88vh;border-radius:10px;display:block;user-select:none;-webkit-user-drag:none;" src="" alt="" draggable="false">
+    <div id="lightboxLoading" class="hint" style="position:absolute; color:#fff; opacity:0.7; display:none;">Loading full-resolution photo…</div>
+    <div style="position:absolute; top:9px; right:9px; display:flex; gap:8px;">
+      <div class="icon-btn" id="lightboxRotateBtn" title="Rotate" style="position:static; width:32px; height:32px; background:rgba(18,18,22,0.55); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,0.16); color:#fff; box-shadow:0 3px 12px rgba(0,0,0,0.35); display:flex; align-items:center; justify-content:center;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3.5-7.1"/><path d="M21 3v6h-6"/></svg></div>
+      <div class="icon-btn" id="lightboxDownloadBtn" title="Download" style="position:static;"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 21h16"/></svg></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ PROFILE PHOTO HISTORY ============ -->
+<div class="overlay" id="avatarHistoryOverlay">
+  <div class="modal lg">
+    <h3>Profile photo history</h3>
+    <div class="hint">Every photo that was ever your current one, most recent first. Only you can see this. Tap a photo to view it full-size.</div>
+    <div id="avatarHistoryList" style="display:flex; flex-direction:column; gap:8px; margin-top:12px; max-height:50vh; overflow-y:auto;"></div>
+    <div class="modal-actions"><div class="btn" onclick="closeModal('avatarHistoryOverlay')">Close</div></div>
   </div>
 </div>
 
@@ -2468,9 +2518,19 @@
     <h3>Approve a new device</h3>
     <div class="hint">Enter the code shown on the new device.</div>
     <input type="tel" inputmode="numeric" id="approveDeviceCodeInput" placeholder="6-digit code" maxlength="6" style="margin-top:14px; text-align:center; letter-spacing:6px;">
+    <div style="margin-top:14px; text-align:left;">
+      <div class="hint" style="margin-bottom:6px;">Access level</div>
+      <select id="approveDeviceModeInput" style="width:100%;">
+        <option value="permanent">Permanent — trusted like your other devices</option>
+        <option value="temporary">Temporary — expires automatically</option>
+        <option value="one-time">One-time — signs out again after this one session</option>
+      </select>
+      <input type="number" id="approveDeviceDurationInput" min="1" max="720" value="24" placeholder="Hours" style="margin-top:8px; display:none;">
+    </div>
     <div class="hint" id="approveDeviceMsg" style="display:none;"></div>
     <div class="modal-actions">
       <div class="btn" onclick="closeModal('approveDeviceOverlay')">Cancel</div>
+      <div class="btn" id="rejectDeviceSubmitBtn" style="color:#ff6a6a;">Reject</div>
       <div class="btn primary" id="approveDeviceSubmitBtn">Approve</div>
     </div>
   </div>
@@ -2698,6 +2758,25 @@
           <span class="roster-status pending">not available</span>
         </div>
         <div class="hint">This would need a native app with direct Bluetooth/WiFi-Direct radio access, a web app fundamentally can't relay messages phone-to-phone without internet, so this isn't something we can turn on here.</div>
+        <div style="border-top:1px solid var(--border); padding-top:12px; margin-top:12px;">
+          <div class="hint" style="margin-bottom:6px;">Who can view your full-size profile photo. This controls the full-screen viewer specifically — small thumbnails in chat rows and member lists you're already sharing into a chat aren't covered by this setting.</div>
+          <select id="avatarVisibilitySelect" style="margin-bottom:8px;">
+            <option value="everyone">Everyone</option>
+            <option value="contacts">Contacts (people you've DMed)</option>
+            <option value="workspace">Workspace / organization members only</option>
+            <option value="nobody">Nobody</option>
+            <option value="custom">Custom list</option>
+          </select>
+          <div id="avatarCustomListSection" style="display:none; margin-bottom:8px;">
+            <div class="hint" style="margin-bottom:6px;">Only these people can view your full-size photo:</div>
+            <div class="contact-pick" id="avatarCustomListPick" style="max-height:200px;"></div>
+          </div>
+          <div class="btn primary" id="avatarPrivacySaveBtn">Save photo privacy</div>
+          <div class="hint" id="avatarPrivacySaveStatus" style="display:none; margin-top:8px;"></div>
+          <div class="settings-row settings-row-action" id="avatarHistoryOpenBtn" style="margin-top:10px;">
+            <span>Profile photo history</span><span>🕓</span>
+          </div>
+        </div>
       </section>
       <section class="admin-console-section">
         <h3>PArA Premium</h3>
@@ -2732,7 +2811,15 @@
       </section>
       <section class="admin-console-section">
         <h3>Security</h3>
-        <div class="settings-row">
+        <div class="hint" style="margin-bottom:6px;">Auto-lock</div>
+        <select id="settingsLockTimeoutSelect" style="margin-bottom:4px;">
+          <option value="0">Immediately when I leave the tab</option>
+          <option value="30">After 30 seconds of inactivity</option>
+          <option value="60">After 1 minute of inactivity</option>
+          <option value="300">After 5 minutes of inactivity</option>
+        </select>
+        <div class="hint" id="settingsLockTimeoutOrgNote" style="display:none; margin-bottom:12px;"></div>
+        <div class="settings-row" style="margin-top:12px;">
           <span>Two-factor authentication</span>
           <span id="settingsMfaStatus">Off</span>
         </div>
@@ -2744,9 +2831,14 @@
           <div class="settings-row settings-row-action" id="settingsAddPasskeyBtn"><span>Add a passkey</span><span>🔑</span></div>
           <div class="hint" id="settingsPasskeyError" style="display:none; color:#ff6a6a;"></div>
         </div>
+        <div style="margin-top:16px;" id="settingsUnknownDevicesWrap">
+          <div class="hint" style="margin-bottom:6px;">Unknown devices — waiting for approval</div>
+          <div id="settingsUnknownDeviceList" style="display:flex; flex-direction:column; gap:6px;"></div>
+        </div>
         <div style="margin-top:16px;">
           <div class="hint" style="margin-bottom:6px;">Devices signed in to this account</div>
           <div id="settingsDeviceList" style="display:flex; flex-direction:column; gap:6px;"></div>
+          <div class="settings-row settings-row-action" id="settingsApproveDeviceBtn" style="margin-top:8px;"><span>Approve a new device</span><span>🔑</span></div>
         </div>
       </section>
       <section class="admin-console-section">
@@ -3026,6 +3118,187 @@
     a.click();
     a.remove();
   }
+
+  // ---------- lightbox zoom / rotate / pan ----------
+  // Shared gesture engine for the one lightbox element, used by chat image
+  // attachments and (below) the profile-photo full-screen viewer. State is
+  // plain module-level vars rather than something fancier — there's only
+  // ever one lightbox open at a time.
+  const lightboxImgEl = document.getElementById('lightboxImg');
+  const lightboxViewportEl = document.getElementById('lightboxViewport');
+  let lbScale = 1, lbRotation = 0, lbTx = 0, lbTy = 0;
+  const LB_MIN_SCALE = 1, LB_MAX_SCALE = 5;
+
+  function applyLightboxTransform(){
+    lightboxImgEl.style.transform = `translate(${lbTx}px, ${lbTy}px) scale(${lbScale}) rotate(${lbRotation}deg)`;
+    lightboxImgEl.style.cursor = lbScale > 1 ? 'grab' : 'zoom-in';
+  }
+  function resetLightboxTransform(){
+    lbScale = 1; lbRotation = 0; lbTx = 0; lbTy = 0;
+    applyLightboxTransform();
+  }
+  function clampLbScale(s){ return Math.min(LB_MAX_SCALE, Math.max(LB_MIN_SCALE, s)); }
+
+  // Opens the lightbox on `url` with a clean zoom/rotate/pan state. Every
+  // call site should route through this rather than touching lightboxImg's
+  // src directly, so nobody forgets the reset and inherits a stale zoom
+  // level from whatever was viewed last.
+  function openLightbox(url, filename){
+    resetLightboxTransform();
+    document.getElementById('lightboxLoading').style.display = 'none';
+    lightboxImgEl.src = url;
+    document.getElementById('lightboxDownloadBtn').dataset.url = url;
+    document.getElementById('lightboxDownloadBtn').dataset.filename = filename || 'photo.jpg';
+    openModal('lightboxOverlay');
+  }
+
+  // Opens the lightbox for ANOTHER person's profile photo (contact info
+  // sheet, HR directory profile). Shows the already-cached public thumbnail
+  // immediately for instant feedback, then tries to upgrade to a signed,
+  // full-resolution copy from the new private avatar tier — which also
+  // runs canViewAvatar server-side and logs the access. If the owner has
+  // restricted visibility and there's no thumbnail to fall back to (or the
+  // upgrade fails for someone with no thumbnail cached either), this closes
+  // itself with an explanation rather than leaving a blank frame open. If a
+  // thumbnail IS showing, a denied upgrade just silently keeps the
+  // thumbnail — the person can already see it elsewhere in the app (chat
+  // rows, member lists still use the pre-existing public thumbnail path;
+  // see PROFILE_PHOTO_PRIVACY_ARCHITECTURE.md for why that boundary exists
+  // this round), so hiding it here would be theater, not real protection.
+  function openUserAvatarViewer(userId, displayName, thumbUrl, orgId){
+    const loadingEl = document.getElementById('lightboxLoading');
+    if (thumbUrl){
+      openLightbox(thumbUrl, (displayName || 'profile') + '-photo.jpg');
+    } else {
+      resetLightboxTransform();
+      lightboxImgEl.src = '';
+      document.getElementById('lightboxDownloadBtn').dataset.url = '';
+      openModal('lightboxOverlay');
+    }
+    loadingEl.style.display = 'block';
+    if (!userId){ loadingEl.style.display = 'none'; return; }
+    apiFetch(`/profile/avatar-url?userId=${encodeURIComponent(userId)}${orgId ? '&orgId=' + encodeURIComponent(orgId) : ''}`).then(r=>{
+      if (!document.getElementById('lightboxOverlay').classList.contains('show')) return; // closed already
+      if (r.ok && r.body && r.body.url){
+        lightboxImgEl.src = r.body.url;
+        document.getElementById('lightboxDownloadBtn').dataset.url = r.body.url;
+      } else if (!thumbUrl){
+        closeModal('lightboxOverlay');
+        showSessionBanner(r.body && r.body.error === 'not_authorized' ? "This person's profile photo isn't visible to you." : "No profile photo to show.");
+      }
+      loadingEl.style.display = 'none';
+    }).catch(()=>{ loadingEl.style.display = 'none'; });
+  }
+
+  document.getElementById('contactInfoAvatar').addEventListener('click', function(){
+    if (!this.dataset.userId) return;
+    openUserAvatarViewer(this.dataset.userId, this.dataset.name, this.dataset.thumb || null, null);
+  });
+  document.getElementById('hrProfileAvatar').addEventListener('click', function(){
+    if (!this.dataset.userId) return;
+    openUserAvatarViewer(this.dataset.userId, this.dataset.name, this.dataset.thumb || null, this.dataset.orgId || null);
+  });
+
+  document.getElementById('lightboxRotateBtn').addEventListener('click', (e)=>{
+    e.stopPropagation();
+    lbRotation = (lbRotation + 90) % 360;
+    applyLightboxTransform();
+  });
+
+  // Mouse wheel zoom, centered roughly where the cursor is by nudging the
+  // translate offset proportionally to the scale delta.
+  lightboxViewportEl.addEventListener('wheel', (e)=>{
+    if (!document.getElementById('lightboxOverlay').classList.contains('show')) return;
+    e.preventDefault();
+    const prevScale = lbScale;
+    lbScale = clampLbScale(lbScale - e.deltaY * 0.0018);
+    const ratio = lbScale / prevScale;
+    lbTx *= ratio; lbTy *= ratio;
+    if (lbScale === LB_MIN_SCALE){ lbTx = 0; lbTy = 0; }
+    applyLightboxTransform();
+  }, { passive: false });
+
+  // Double-click / double-tap toggles between fit and a fixed 2.5x zoom,
+  // the common "tap to zoom" pattern from Photos/iMessage.
+  let lbLastTapTs = 0;
+  function lbToggleZoom(){
+    if (lbScale > 1){ lbScale = 1; lbTx = 0; lbTy = 0; }
+    else { lbScale = 2.5; }
+    applyLightboxTransform();
+  }
+  lightboxImgEl.addEventListener('dblclick', (e)=>{ e.stopPropagation(); lbToggleZoom(); });
+
+  // Single-pointer drag-to-pan (mouse or one finger) and two-finger pinch
+  // zoom, unified through Pointer Events rather than separate mouse/touch
+  // handlers — every evergreen browser Cowork/PArA targets supports
+  // Pointer Events, and it avoids the classic double-firing bug where a
+  // touch also synthesizes a mouse event.
+  const lbPointers = new Map();
+  let lbDragging = false, lbDragStartX = 0, lbDragStartY = 0, lbDragStartTx = 0, lbDragStartTy = 0;
+  let lbPinchStartDist = 0, lbPinchStartScale = 1;
+  let lbTapStartX = 0, lbTapStartY = 0, lbTapMoved = false;
+
+  function lbPointerDist(){
+    const pts = [...lbPointers.values()];
+    return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+  }
+
+  lightboxViewportEl.addEventListener('pointerdown', (e)=>{
+    lbPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    lightboxViewportEl.setPointerCapture(e.pointerId);
+    if (lbPointers.size === 1){
+      lbDragging = true;
+      lbTapMoved = false;
+      lbTapStartX = e.clientX; lbTapStartY = e.clientY;
+      lbDragStartX = e.clientX; lbDragStartY = e.clientY;
+      lbDragStartTx = lbTx; lbDragStartTy = lbTy;
+      lightboxImgEl.style.cursor = lbScale > 1 ? 'grabbing' : 'zoom-in';
+    } else if (lbPointers.size === 2){
+      lbDragging = false;
+      lbPinchStartDist = lbPointerDist();
+      lbPinchStartScale = lbScale;
+    }
+  });
+  lightboxViewportEl.addEventListener('pointermove', (e)=>{
+    if (!lbPointers.has(e.pointerId)) return;
+    lbPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (lbPointers.size === 2){
+      const dist = lbPointerDist();
+      if (lbPinchStartDist > 0){
+        lbScale = clampLbScale(lbPinchStartScale * (dist / lbPinchStartDist));
+        applyLightboxTransform();
+      }
+      return;
+    }
+    if (lbDragging && lbPointers.size === 1){
+      const dx = e.clientX - lbDragStartX, dy = e.clientY - lbDragStartY;
+      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) lbTapMoved = true;
+      // Panning only makes sense once zoomed in; at 1x, a drag is just a
+      // tap-and-slip, not an attempt to move the (already fully visible) image.
+      if (lbScale > 1){
+        lbTx = lbDragStartTx + dx;
+        lbTy = lbDragStartTy + dy;
+        applyLightboxTransform();
+      }
+    }
+  });
+  function lbPointerEnd(e){
+    const wasSingle = lbPointers.size === 1;
+    lbPointers.delete(e.pointerId);
+    lbDragging = lbPointers.size === 1;
+    if (lbPointers.size < 2) lbPinchStartDist = 0;
+    lightboxImgEl.style.cursor = lbScale > 1 ? 'grab' : 'zoom-in';
+    // A tap (no movement) on a single pointer that wasn't part of a pinch
+    // toggles zoom — the touch-screen equivalent of the dblclick handler
+    // above, since real double-tap detection needs two of these in a row.
+    if (wasSingle && !lbTapMoved){
+      const now = Date.now();
+      if (now - lbLastTapTs < 300){ lbToggleZoom(); lbLastTapTs = 0; }
+      else lbLastTapTs = now;
+    }
+  }
+  lightboxViewportEl.addEventListener('pointerup', lbPointerEnd);
+  lightboxViewportEl.addEventListener('pointercancel', lbPointerEnd);
 
   document.getElementById('lightboxDownloadBtn').addEventListener('click', (e)=>{
     e.stopPropagation();
@@ -3597,11 +3870,76 @@
     location.reload();
   });
 
-  document.getElementById('approveDeviceOpenBtn').addEventListener('click', ()=>{
-    closeModal('profileOverlay');
+  // ================= PASSKEY RELOCK (not a fresh login — see setLockMessage) =================
+  // Mirrors mfaVerifyPasskeyBtn's flow exactly, just triggered from the
+  // lock screen instead of the login-time MFA gate, and authenticated with
+  // the locally-cached state.pin instead of a value the person just typed
+  // (there's nothing to type here — that's the whole point of this button).
+  document.getElementById('lockPasskeyBtn').addEventListener('click', async function(){
+    if (!window.PublicKeyCredential || !navigator.credentials || !state.pin) return;
+    const btn = this;
+    const original = btn.textContent;
+    btn.textContent = 'Waiting for Face ID / Touch ID…';
+    const optRes = await apiFetch('/webauthn/auth-options', { method: 'POST', headers: { 'X-Para-Pin-Hash': state.pin } });
+    if (!optRes.ok){ btn.textContent = original; return; }
+    const opts = optRes.body;
+    let assertion;
+    try {
+      assertion = await navigator.credentials.get({
+        publicKey: {
+          challenge: e2eeB64ToBuf(opts.challenge),
+          rpId: opts.rpId,
+          allowCredentials: (opts.allowCredentialIds || []).map(id => ({ type: 'public-key', id: e2eeB64ToBuf(id) })),
+          userVerification: 'preferred',
+          timeout: 60000,
+        },
+      });
+    } catch(e){
+      btn.textContent = original;
+      return; // cancelled/failed — the PIN keypad is right there as always, no error needed for a simple dismiss
+    }
+    const r = await apiFetch('/webauthn/auth-verify', {
+      method: 'POST',
+      headers: { 'X-Para-Pin-Hash': state.pin },
+      body: JSON.stringify({
+        deviceId: myDeviceId,
+        credentialId: e2eeBufToB64(assertion.rawId),
+        authenticatorData: e2eeBufToB64(assertion.response.authenticatorData),
+        clientDataJSON: e2eeBufToB64(assertion.response.clientDataJSON),
+        signature: e2eeBufToB64(assertion.response.signature),
+      }),
+    });
+    if (!r.ok){ btn.textContent = original; return; }
+    lockEl.style.display = 'none';
+    appEl.classList.add('show');
+    buffer = '';
+    // No raw PIN available on this path (only its hash) — myRawPin stays
+    // null, same as it already defensively handles (see the "Share my PIN"
+    // guard clauses above); everything else about signing in is identical
+    // to a normal PIN unlock.
+    myRawPin = null;
+    initSession(null, state.pin);
+    startDeviceStatusSelfCheck();
+    startInactivityTimer();
+    requestAnimationFrame(()=>initBothNavPills());
+  });
+
+  function openApproveDeviceFlow(){
     document.getElementById('approveDeviceCodeInput').value = '';
+    document.getElementById('approveDeviceModeInput').value = 'permanent';
+    document.getElementById('approveDeviceDurationInput').style.display = 'none';
     document.getElementById('approveDeviceMsg').style.display = 'none';
     openModal('approveDeviceOverlay');
+  }
+  document.getElementById('approveDeviceOpenBtn').addEventListener('click', ()=>{
+    closeModal('profileOverlay');
+    openApproveDeviceFlow();
+  });
+  document.getElementById('settingsApproveDeviceBtn').addEventListener('click', ()=>{
+    openApproveDeviceFlow();
+  });
+  document.getElementById('approveDeviceModeInput').addEventListener('change', function(){
+    document.getElementById('approveDeviceDurationInput').style.display = this.value === 'temporary' ? 'block' : 'none';
   });
   document.getElementById('approveDeviceSubmitBtn').addEventListener('click', async function(){
     const btn = this;
@@ -3613,18 +3951,22 @@
       msgEl.style.display = 'block';
       return;
     }
+    const mode = document.getElementById('approveDeviceModeInput').value;
+    const durationHours = mode === 'temporary' ? (parseInt(document.getElementById('approveDeviceDurationInput').value, 10) || 24) : null;
     btn.disabled = true;
     // deviceId is what lets the server confirm THIS device is one already
     // on the trusted list, not just that whoever's calling knows the PIN,
     // see the server-side comment on /device-link/approve for why that
     // distinction matters.
-    const r = await apiFetch('/device-link/approve', { method: 'POST', body: JSON.stringify({ code, deviceId: myDeviceId }) });
+    const r = await apiFetch('/device-link/approve', { method: 'POST', body: JSON.stringify({ code, deviceId: myDeviceId, mode, durationHours }) });
     btn.disabled = false;
     if (r.ok){
       msgEl.style.color = '#7ee08a';
       msgEl.textContent = 'Device approved.';
       msgEl.style.display = 'block';
       if (r.body.approvedDeviceId) rewrapAllChatsForDevice(r.body.approvedDeviceId); // fire-and-forget, lets the new device start decrypting without waiting on a fresh message
+      refreshDeviceList();
+      refreshUnknownDeviceList();
       setTimeout(()=>closeModal('approveDeviceOverlay'), 1200);
     } else {
       msgEl.style.color = '#ff6a6a';
@@ -3633,6 +3975,33 @@
         : r.body && r.body.error === 'not_a_trusted_device' ? "This device isn't trusted yet, so it can't approve others."
         : r.body && r.body.error === 'rate_limited' ? `Too many attempts. Try again in ${formatRetryAfter(r.body.retryAfterMs)}.`
         : "Couldn't approve that device. Try again.";
+      msgEl.style.display = 'block';
+    }
+  });
+  document.getElementById('rejectDeviceSubmitBtn').addEventListener('click', async function(){
+    const btn = this;
+    const msgEl = document.getElementById('approveDeviceMsg');
+    const code = document.getElementById('approveDeviceCodeInput').value.trim();
+    if (!/^\d{6}$/.test(code)){
+      msgEl.textContent = 'Enter the 6-digit code shown on the new device to reject it.';
+      msgEl.style.color = '#ff6a6a';
+      msgEl.style.display = 'block';
+      return;
+    }
+    btn.disabled = true;
+    const r = await apiFetch('/device-link/reject', { method: 'POST', body: JSON.stringify({ code, deviceId: myDeviceId }) });
+    btn.disabled = false;
+    if (r.ok){
+      msgEl.style.color = '#7ee08a';
+      msgEl.textContent = 'Request rejected.';
+      msgEl.style.display = 'block';
+      refreshUnknownDeviceList();
+      setTimeout(()=>closeModal('approveDeviceOverlay'), 1200);
+    } else {
+      msgEl.style.color = '#ff6a6a';
+      msgEl.textContent = r.body && r.body.error === 'wrong_code' ? "That code doesn't match."
+        : r.body && r.body.error === 'expired' ? 'That code already expired.'
+        : "Couldn't reject that request. Try again.";
       msgEl.style.display = 'block';
     }
   });
@@ -3782,6 +4151,15 @@
     else if (mode === 'confirm') lockMsg.textContent = 'Confirm your PIN';
     else lockMsg.textContent = 'Enter your PArA PIN';
     lockMsg.classList.remove('err');
+    // Only offered on a RELOCK of an already-set-up device (mode 'enter'),
+    // never during initial PIN creation/confirmation — and only if this
+    // account has a registered passkey (cached locally, see refreshMfaStatus).
+    // state.pin is the same sha256(PIN) value the account already
+    // authenticates with; it's what lets a passkey unlock skip re-typing
+    // the PIN without needing a fresh server round trip just to find out
+    // which account this device belongs to.
+    const canPasskeyUnlock = mode === 'enter' && state.pin && localStorage.getItem('parapin_has_passkey') === '1';
+    document.getElementById('lockPasskeyBtn').style.display = canPasskeyUnlock ? 'block' : 'none';
   }
 
   function shake(){
@@ -3833,10 +4211,68 @@
     buffer = '';
     myRawPin = pin;
     initSession(pin);
+    startDeviceStatusSelfCheck();
+    startInactivityTimer();
     // The nav bar goes from display:none to visible right above this,
     // measuring tab positions before that paint lands would just get zeros,
     // so this needs to run on the next frame rather than synchronously here.
     requestAnimationFrame(()=>initBothNavPills());
+  }
+
+  // ---------------- Inactivity auto-lock ----------------
+  // Previously the only way this app ever re-locked was a manual tap on
+  // "Lock app now" — there was no timeout-based auto-lock at all, on either
+  // idle-while-open or backgrounded-and-forgotten. This adds both, driven
+  // by one shared `lastActivityAt` timestamp: real user interaction
+  // (mouse/keyboard/touch/scroll) refreshes it while the tab is visible;
+  // going hidden freezes it in place (browsers throttle/suspend timers in
+  // background tabs anyway, so there's nothing meaningful to tick down
+  // while hidden); coming back to visible immediately re-checks elapsed
+  // time against the effective timeout rather than waiting for the next
+  // periodic tick, so a tab reopened after hours away doesn't get a few
+  // extra seconds of grace from timer-alignment luck.
+  const LOCK_TIMEOUT_TIERS = [0, 30, 60, 300]; // seconds — matches the four tiers an org admin can set as a workspace minimum
+  const DEFAULT_LOCK_TIMEOUT_SEC = 300; // 5 minutes — used until the person picks something else in Settings
+  let lastActivityAt = Date.now();
+  let inactivityCheckTimer = null;
+  function myLockTimeoutPreferenceSec(){
+    const stored = parseInt(localStorage.getItem('parapin_lock_timeout_sec') || '', 10);
+    return LOCK_TIMEOUT_TIERS.includes(stored) ? stored : DEFAULT_LOCK_TIMEOUT_SEC;
+  }
+  function setMyLockTimeoutPreference(sec){
+    localStorage.setItem('parapin_lock_timeout_sec', String(sec));
+  }
+  // The org sets a CEILING (loosest acceptable), not a fixed value — the
+  // effective timeout is whichever is stricter between what the person
+  // chose for themselves and the tightest minimum across every workspace
+  // they belong to. A workspace with no policy set (securityPolicy null or
+  // minTimeoutSec null) simply doesn't constrain this at all.
+  function effectiveLockTimeoutSec(){
+    let effective = myLockTimeoutPreferenceSec();
+    for (const org of (myOrgs || [])){
+      const min = org.securityPolicy && org.securityPolicy.minTimeoutSec;
+      if (min !== null && min !== undefined && min < effective) effective = min;
+    }
+    return effective;
+  }
+  function markActivity(){
+    if (document.visibilityState === 'visible') lastActivityAt = Date.now();
+  }
+  function checkInactivityLock(){
+    if (!myPinHash) return; // nothing to lock if we're not even signed in
+    const timeoutMs = effectiveLockTimeoutSec() * 1000;
+    if (Date.now() - lastActivityAt >= timeoutMs) lockApp();
+  }
+  function startInactivityTimer(){
+    lastActivityAt = Date.now();
+    if (inactivityCheckTimer) return;
+    ['mousemove', 'keydown', 'click', 'touchstart', 'scroll'].forEach(evt =>
+      document.addEventListener(evt, markActivity, { passive: true })
+    );
+    document.addEventListener('visibilitychange', ()=>{
+      if (document.visibilityState === 'visible'){ markActivity(); checkInactivityLock(); }
+    });
+    inactivityCheckTimer = setInterval(checkInactivityLock, 5000);
   }
 
   function lockApp(){
@@ -4223,7 +4659,12 @@
     if (!chat || chat.type !== 'dm') return;
     const otherId = chat.memberIds.find(id => id !== myUserId);
     const otherName = userNameCache[otherId] || 'PArA PIN user';
-    renderAvatar(document.getElementById('contactInfoAvatar'), otherName, false, userAvatarCache[otherId]);
+    const ciAvEl = document.getElementById('contactInfoAvatar');
+    renderAvatar(ciAvEl, otherName, false, userAvatarCache[otherId]);
+    ciAvEl.style.cursor = 'pointer';
+    ciAvEl.dataset.userId = otherId || '';
+    ciAvEl.dataset.name = otherName;
+    ciAvEl.dataset.thumb = userAvatarCache[otherId] || '';
     document.getElementById('contactInfoName').textContent = otherName;
     document.getElementById('contactInfoMeta').textContent = "That's everything visible about this contact from here, full profiles aren't shared between accounts.";
     openModal('contactInfoOverlay');
@@ -4730,6 +5171,15 @@
       resetWorkspaceBrandSaveBtn();
       loadSsoSettings(org.id);
       loadSamlSettings(org.id);
+      const sp = org.securityPolicy || {};
+      document.getElementById('securityPolicyTimeoutSelect').value = (sp.minTimeoutSec === null || sp.minTimeoutSec === undefined) ? '' : String(sp.minTimeoutSec);
+      document.getElementById('securityPolicyStepUpToggle').checked = !!sp.requireStepUpForSensitive;
+      document.getElementById('securityPolicySaveStatus').style.display = 'none';
+      document.getElementById('securityPolicySaveBtn').dataset.orgId = org.id;
+      const ap = org.avatarPolicy || {};
+      document.getElementById('avatarPolicyScreenshotToggle').checked = !!ap.preventScreenshotAndroid;
+      document.getElementById('avatarPolicyIdentityToggle').checked = !!ap.showViewerIdentityToOwner;
+      document.getElementById('avatarPolicySaveStatus').style.display = 'none';
     }
     // Cancel needs true org-admin server-side (isOrgAdmin), a manage_workspace
     // grant alone isn't enough to disable the whole workspace's billing, so
@@ -5035,6 +5485,52 @@
     statusEl.textContent = 'Saved.';
     statusEl.style.color = '#7ee08a';
     loadSsoSettings(activeWorkspaceForMembers.id);
+  });
+
+  document.getElementById('securityPolicySaveBtn').addEventListener('click', async ()=>{
+    if (!activeWorkspaceForMembers) return;
+    const statusEl = document.getElementById('securityPolicySaveStatus');
+    const raw = document.getElementById('securityPolicyTimeoutSelect').value;
+    const minTimeoutSec = raw === '' ? null : parseInt(raw, 10);
+    const requireStepUpForSensitive = document.getElementById('securityPolicyStepUpToggle').checked;
+    statusEl.style.display = 'block';
+    statusEl.style.color = '';
+    statusEl.textContent = 'Saving…';
+    const r = await apiFetch('/org/security-policy', { method: 'POST', body: JSON.stringify({ orgId: activeWorkspaceForMembers.id, minTimeoutSec, requireStepUpForSensitive }) });
+    if (!r.ok){
+      statusEl.textContent = "Couldn't save. Try again.";
+      statusEl.style.color = '#ff6a6a';
+      return;
+    }
+    statusEl.textContent = 'Saved.';
+    statusEl.style.color = '#7ee08a';
+    // Keep the in-memory org list current so the client-side lock-timeout
+    // enforcement (see startInactivityTimer) picks up the new policy on its
+    // next check without needing a full /session refresh.
+    activeWorkspaceForMembers.securityPolicy = r.body.securityPolicy;
+    const myOrg = (myOrgs || []).find(o => o.id === activeWorkspaceForMembers.id);
+    if (myOrg) myOrg.securityPolicy = r.body.securityPolicy;
+  });
+
+  document.getElementById('avatarPolicySaveBtn').addEventListener('click', async ()=>{
+    if (!activeWorkspaceForMembers) return;
+    const statusEl = document.getElementById('avatarPolicySaveStatus');
+    const preventScreenshotAndroid = document.getElementById('avatarPolicyScreenshotToggle').checked;
+    const showViewerIdentityToOwner = document.getElementById('avatarPolicyIdentityToggle').checked;
+    statusEl.style.display = 'block';
+    statusEl.style.color = '';
+    statusEl.textContent = 'Saving…';
+    const r = await apiFetch('/org/avatar-policy', { method: 'POST', body: JSON.stringify({ orgId: activeWorkspaceForMembers.id, preventScreenshotAndroid, showViewerIdentityToOwner }) });
+    if (!r.ok){
+      statusEl.textContent = "Couldn't save. Try again.";
+      statusEl.style.color = '#ff6a6a';
+      return;
+    }
+    statusEl.textContent = 'Saved.';
+    statusEl.style.color = '#7ee08a';
+    activeWorkspaceForMembers.avatarPolicy = r.body.avatarPolicy;
+    const myOrg = (myOrgs || []).find(o => o.id === activeWorkspaceForMembers.id);
+    if (myOrg) myOrg.avatarPolicy = r.body.avatarPolicy;
   });
 
   // ---------------- SSO (SAML 2.0) workspace settings ----------------
@@ -5769,7 +6265,13 @@
       ? { displayName: (dirEntry && dirEntry.displayName) || userNameCache[uid] || 'PArA PIN user', avatarUrl: (dirEntry && dirEntry.avatarUrl) || userAvatarCache[uid] || null }
       : { displayName: myDisplayName || 'PArA PIN user', avatarUrl: myAvatarUrl };
 
-    renderAvatar(document.getElementById('hrProfileAvatar'), userRec.displayName, false, userRec.avatarUrl);
+    const hrAvEl = document.getElementById('hrProfileAvatar');
+    renderAvatar(hrAvEl, userRec.displayName, false, userRec.avatarUrl);
+    hrAvEl.style.cursor = 'pointer';
+    hrAvEl.dataset.userId = uid || '';
+    hrAvEl.dataset.name = userRec.displayName;
+    hrAvEl.dataset.thumb = userRec.avatarUrl || '';
+    hrAvEl.dataset.orgId = (hrActiveOrg && hrActiveOrg.id) || '';
     document.getElementById('hrProfileName').textContent = userRec.displayName;
     document.getElementById('hrProfileTitle').textContent = employee.job.current.jobTitle || (isSelf ? 'No title set yet' : '');
 
@@ -6609,10 +7111,7 @@
 
     const img = e.target.closest('.msg-image');
     if (img){
-      document.getElementById('lightboxImg').src = img.dataset.full;
-      document.getElementById('lightboxDownloadBtn').dataset.url = img.dataset.full;
-      document.getElementById('lightboxDownloadBtn').dataset.filename = 'photo.jpg';
-      openModal('lightboxOverlay');
+      openLightbox(img.dataset.full, 'photo.jpg');
       return;
     }
 
@@ -9031,10 +9530,20 @@
   profilePhotoPreview.addEventListener('click', ()=>{
     const url = (pendingProfilePhoto && pendingProfilePhoto.url) || myAvatarUrl;
     if (!url) return; // nothing but initials showing yet, nothing to view
-    document.getElementById('lightboxImg').src = url;
-    document.getElementById('lightboxDownloadBtn').dataset.url = url;
-    document.getElementById('lightboxDownloadBtn').dataset.filename = 'profile-photo.jpg';
-    openModal('lightboxOverlay');
+    openLightbox(url, 'profile-photo.jpg');
+    // If a full-resolution private-tier copy already exists (uploaded on a
+    // previous save) and nothing is pending right now, swap up to it once
+    // it loads — same self-view path everyone else's high-res avatar-url
+    // fetch goes through, just always-allowed since viewer === owner.
+    if (!pendingProfilePhoto && myUserId){
+      document.getElementById('lightboxLoading').style.display = 'block';
+      apiFetch(`/profile/avatar-url?userId=${encodeURIComponent(myUserId)}`).then(r=>{
+        if (r.ok && r.body && r.body.url && document.getElementById('lightboxOverlay').classList.contains('show')){
+          lightboxImgEl.src = r.body.url;
+        }
+        document.getElementById('lightboxLoading').style.display = 'none';
+      }).catch(()=>{ document.getElementById('lightboxLoading').style.display = 'none'; });
+    }
   });
   profileNameInput.addEventListener('input', ()=>{ if (!pendingProfilePhoto && !myAvatarUrl) renderProfilePhotoPreview(null); });
 
@@ -9044,9 +9553,18 @@
     profilePhotoInput.value = '';
     if (!file || !file.type.startsWith('image/')){ showSessionBanner('Pick an image for your profile photo.'); return; }
     try {
-      const resized = await resizeImageFile(file, 480, 0.85);
+      // Two resizes from the same source file: a small one for the
+      // existing public thumbnail path (chat rows, member lists, nav —
+      // unchanged this round) and a larger one for the new private tier
+      // that the full-screen viewer's "High resolution" goal actually
+      // needs. Both come from resizeImageFile so this stays one code path
+      // rather than two different resizing implementations.
+      const [thumb, hiRes] = await Promise.all([
+        resizeImageFile(file, 480, 0.85),
+        resizeImageFile(file, 1600, 0.9),
+      ]);
       if (pendingProfilePhoto && pendingProfilePhoto.url) URL.revokeObjectURL(pendingProfilePhoto.url);
-      pendingProfilePhoto = { blob: resized.blob, url: URL.createObjectURL(resized.blob) };
+      pendingProfilePhoto = { blob: thumb.blob, hiResBlob: hiRes.blob, url: URL.createObjectURL(thumb.blob) };
       renderProfilePhotoPreview(pendingProfilePhoto.url);
     } catch(e){
       showSessionBanner("Couldn't process that photo, try a different one.");
@@ -9058,22 +9576,39 @@
     if (!name){ showSessionBanner('Enter a display name.'); return; }
     profileSaveBtn.disabled = true;
     let avatarUrl = myAvatarUrl;
+    let avatarMediaKey; // undefined = leave untouched server-side; only set when a new photo was actually picked
     if (pendingProfilePhoto){
-      const uploadRes = await apiFetch('/upload', {
-        method: 'POST',
-        headers: { 'content-type': pendingProfilePhoto.blob.type || 'image/jpeg', 'x-file-name': 'profile.jpg' },
-        body: pendingProfilePhoto.blob,
-      });
-      if (uploadRes.ok && uploadRes.body.url){
-        avatarUrl = uploadRes.body.url;
+      const [thumbRes, hiResRes] = await Promise.all([
+        apiFetch('/upload', {
+          method: 'POST',
+          headers: { 'content-type': pendingProfilePhoto.blob.type || 'image/jpeg', 'x-file-name': 'profile.jpg' },
+          body: pendingProfilePhoto.blob,
+        }),
+        apiFetch('/avatar/upload', {
+          method: 'POST',
+          headers: { 'content-type': pendingProfilePhoto.hiResBlob.type || 'image/jpeg' },
+          body: pendingProfilePhoto.hiResBlob,
+        }),
+      ]);
+      if (thumbRes.ok && thumbRes.body.url){
+        avatarUrl = thumbRes.body.url;
       } else {
         profileSaveBtn.disabled = false;
         showSessionBanner("Couldn't upload the photo. Try again.");
         return;
       }
+      // The private high-res copy is additive — if it fails, the profile
+      // save still proceeds with the public thumbnail rather than blocking
+      // someone from changing their photo over the new tier's write path
+      // having a hiccup.
+      if (hiResRes.ok && hiResRes.body.mediaKey){
+        avatarMediaKey = hiResRes.body.mediaKey;
+      }
     }
     const department = profileDeptInput.value.trim();
-    const r = await apiFetch('/profile', { method: 'POST', body: JSON.stringify({ displayName: name, avatarUrl, department }) });
+    const body = { displayName: name, avatarUrl, department };
+    if (avatarMediaKey !== undefined) body.avatarMediaKey = avatarMediaKey;
+    const r = await apiFetch('/profile', { method: 'POST', body: JSON.stringify(body) });
     profileSaveBtn.disabled = false;
     if (r.ok){
       myDisplayName = r.body.displayName;
@@ -9491,7 +10026,16 @@
   const COMING_SOON_COPY = {};
 
   function closeAllNavOverlays(){
-    ['rosterOverlay','settingsOverlay','comingSoonOverlay','profileOverlay','callsOverlay','meetingRoomOverlay','workspaceMembersOverlay'].forEach(closeModal);
+    // hrOverlay/crmOverlay were missing here — they're full-screen
+    // (.modal.lg.admin-console, width/height:100%) so there's no backdrop
+    // margin to click through either, meaning tapping a nav tab was the
+    // ONLY escape any of these overlays actually has (the backdrop-click
+    // listener further down never fires for a modal with zero visible
+    // backdrop, and the .admin-console-head .icon-btn close wiring queries
+    // a button that doesn't exist in any of these overlays' markup — dead
+    // code, not a real close path). Being left out of this one array is
+    // what made CRM and People & HR the only two truly un-closeable pages.
+    ['rosterOverlay','settingsOverlay','comingSoonOverlay','profileOverlay','callsOverlay','meetingRoomOverlay','workspaceMembersOverlay','hrOverlay','crmOverlay'].forEach(closeModal);
     callsOverlayOpen = false;
   }
 
@@ -9643,7 +10187,7 @@
   // the nav to "Chats" rather than leaving a non-Chats tab highlighted with
   // nothing open behind it. returnNavToChats() picks whichever nav (Personal
   // or workspace) is actually the one on screen.
-  ['rosterOverlay','settingsOverlay','comingSoonOverlay','callsOverlay','meetingRoomOverlay','workspaceMembersOverlay'].forEach(id=>{
+  ['rosterOverlay','settingsOverlay','comingSoonOverlay','callsOverlay','meetingRoomOverlay','workspaceMembersOverlay','hrOverlay','crmOverlay'].forEach(id=>{
     const el = document.getElementById(id);
     el.addEventListener('click', (e)=>{
       if (e.target === el){
@@ -9676,7 +10220,112 @@
     refreshPremiumStatus();
     refreshMfaStatus();
     refreshDeviceList();
+    refreshUnknownDeviceList();
+    refreshLockTimeoutSetting();
+    refreshAvatarPrivacySettings();
   }
+
+  // ---------------- profile photo privacy (personal) ----------------
+  async function refreshAvatarPrivacySettings(){
+    const r = await apiFetch('/profile/avatar-privacy');
+    const visibility = (r.ok && r.body && r.body.visibility) || 'everyone';
+    const customIds = new Set((r.ok && r.body && r.body.customListUserIds) || []);
+    document.getElementById('avatarVisibilitySelect').value = visibility;
+    document.getElementById('avatarCustomListSection').style.display = visibility === 'custom' ? 'block' : 'none';
+    document.getElementById('avatarPrivacySaveStatus').style.display = 'none';
+    await ensureNamesLoaded();
+    const pick = document.getElementById('avatarCustomListPick');
+    pick.innerHTML = '';
+    // Not scoped to the active workspace here (unlike the group-creation
+    // picker) — visibility is a personal, cross-workspace setting, so
+    // every DM contact anywhere is a valid pick.
+    const dmChats = sessionChats.filter(c => c.type === 'dm');
+    if (dmChats.length === 0){
+      pick.innerHTML = '<div class="hint">No contacts yet — DM someone first to add them to a custom list.</div>';
+    }
+    dmChats.forEach(c=>{
+      const otherId = c.memberIds.find(id => id !== myUserId);
+      if (!otherId) return;
+      const name = userNameCache[otherId] || 'PArA PIN user';
+      const row = document.createElement('label');
+      row.className = 'pick-row';
+      const av = document.createElement('div');
+      av.className = 'avatar';
+      renderAvatar(av, name, false, userAvatarCache[otherId]);
+      row.innerHTML = `<input type="checkbox" data-id="${escapeHtml(otherId)}" ${customIds.has(otherId) ? 'checked' : ''}>`;
+      row.appendChild(av);
+      const nm = document.createElement('div');
+      nm.className = 'pname';
+      nm.textContent = name;
+      row.appendChild(nm);
+      pick.appendChild(row);
+    });
+  }
+
+  document.getElementById('avatarVisibilitySelect').addEventListener('change', function(){
+    document.getElementById('avatarCustomListSection').style.display = this.value === 'custom' ? 'block' : 'none';
+  });
+
+  document.getElementById('avatarPrivacySaveBtn').addEventListener('click', async ()=>{
+    const statusEl = document.getElementById('avatarPrivacySaveStatus');
+    const visibility = document.getElementById('avatarVisibilitySelect').value;
+    const body = { visibility };
+    if (visibility === 'custom'){
+      body.customListUserIds = [...document.querySelectorAll('#avatarCustomListPick input[type="checkbox"]:checked')].map(cb => cb.dataset.id);
+    }
+    statusEl.style.display = 'block';
+    statusEl.style.color = '';
+    statusEl.textContent = 'Saving…';
+    const r = await apiFetch('/profile/avatar-privacy', { method: 'POST', body: JSON.stringify(body) });
+    if (!r.ok){
+      statusEl.textContent = "Couldn't save. Try again.";
+      statusEl.style.color = '#ff6a6a';
+      return;
+    }
+    statusEl.textContent = 'Saved.';
+    statusEl.style.color = '#7ee08a';
+  });
+
+  document.getElementById('avatarHistoryOpenBtn').addEventListener('click', async ()=>{
+    const list = document.getElementById('avatarHistoryList');
+    list.innerHTML = '<div class="hint">Loading…</div>';
+    openModal('avatarHistoryOverlay');
+    const r = await apiFetch('/profile/avatar-history');
+    if (!r.ok || !r.body || !Array.isArray(r.body.history)){
+      list.innerHTML = '<div class="hint">Could not load photo history.</div>';
+      return;
+    }
+    if (r.body.history.length === 0){
+      list.innerHTML = '<div class="hint">No previous photos yet — this fills in once you change your photo for the first time.</div>';
+      return;
+    }
+    list.innerHTML = '';
+    r.body.history.forEach(entry=>{
+      const row = document.createElement('div');
+      row.className = 'settings-row settings-row-action';
+      const when = entry.uploadedAt ? new Date(entry.uploadedAt).toLocaleString() : 'Unknown date';
+      row.innerHTML = `<span style="display:flex; align-items:center; gap:10px; min-width:0;"><img src="${entry.url}" style="width:36px; height:36px; border-radius:10px; object-fit:cover; flex-shrink:0;" alt=""><span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(when)}${entry.orgId ? ' · workspace photo' : ''}</span></span><span>›</span>`;
+      row.addEventListener('click', ()=> openLightbox(entry.url, 'profile-photo-history.jpg'));
+      list.appendChild(row);
+    });
+  });
+
+  function refreshLockTimeoutSetting(){
+    document.getElementById('settingsLockTimeoutSelect').value = String(myLockTimeoutPreferenceSec());
+    const effective = effectiveLockTimeoutSec();
+    const mine = myLockTimeoutPreferenceSec();
+    const note = document.getElementById('settingsLockTimeoutOrgNote');
+    if (effective < mine){
+      note.textContent = `A workspace you're in requires ${effective === 0 ? 'locking immediately' : `locking after ${effective < 60 ? effective + 's' : Math.round(effective/60) + 'm'}`} — that stricter setting is what's actually enforced.`;
+      note.style.display = 'block';
+    } else {
+      note.style.display = 'none';
+    }
+  }
+  document.getElementById('settingsLockTimeoutSelect').addEventListener('change', function(){
+    setMyLockTimeoutPreference(parseInt(this.value, 10));
+    refreshLockTimeoutSetting();
+  });
 
   // ---------------- Device list + remote logout ----------------
   function formatLastSeen(ts){
@@ -9687,6 +10336,23 @@
     if (diffMs < 24 * 60 * 60000) return `${Math.floor(diffMs / (60 * 60000))}h ago`;
     return `${Math.floor(diffMs / (24 * 60 * 60000))}d ago`;
   }
+  const PLATFORM_ICON = { ios: '📱', android: '📱', macos: '💻', windows: '💻', linux: '💻', other: '🖥️' };
+  const TRUST_BADGE = {
+    trusted: { label: 'Trusted', color: '#7ee08a' },
+    temporary: { label: 'Temporary', color: '#ffd166' },
+    revoked: { label: 'Revoked', color: 'var(--text-mid)' },
+    lost: { label: 'Lost', color: '#ff9a4a' },
+    compromised: { label: 'Compromised', color: '#ff6a6a' },
+  };
+  function riskColor(score){
+    if (score >= 60) return '#ff6a6a';
+    if (score >= 30) return '#ffd166';
+    return '#7ee08a';
+  }
+  function deviceLocationLine(d){
+    const parts = [d.city, d.country].filter(Boolean);
+    return parts.length ? parts.join(', ') : (d.ip || 'Unknown location');
+  }
   async function refreshDeviceList(){
     const listEl = document.getElementById('settingsDeviceList');
     const r = await apiFetch('/devices');
@@ -9696,13 +10362,31 @@
     }
     listEl.innerHTML = r.body.devices.map(d => {
       const isCurrent = d.id === myDeviceId;
+      const badge = TRUST_BADGE[d.trustLevel] || TRUST_BADGE.trusted;
+      const icon = PLATFORM_ICON[d.platform] || PLATFORM_ICON.other;
+      const revoked = d.status === 'revoked' || d.status === 'lost' || d.status === 'compromised';
+      const detailBits = [
+        d.browser ? `${d.browser}` : null,
+        d.osVersion ? `${d.osVersion}` : null,
+        d.manufacturer || d.model ? [d.manufacturer, d.model].filter(Boolean).join(' ') : null,
+        d.isEmulator ? 'Emulator' : null,
+      ].filter(Boolean).join(' · ');
       return `
-        <div class="settings-row">
-          <span>${escapeHtml(d.label)}${isCurrent ? ' <span style="color:var(--text-mid); font-size:12px;">(this device)</span>' : ''}<br><span class="hint" style="margin:0;">Active ${formatLastSeen(d.lastSeenAt)}</span></span>
+        <div class="settings-row" style="align-items:flex-start; flex-direction:column; gap:4px;">
+          <div style="display:flex; justify-content:space-between; width:100%; align-items:center;">
+            <span>${icon} ${escapeHtml(d.label)}${isCurrent ? ' <span style="color:var(--text-mid); font-size:12px;">(this device)</span>' : ''}</span>
+            <span style="font-size:11px; font-weight:700; color:${badge.color}; border:1px solid ${badge.color}; border-radius:20px; padding:2px 8px;">${badge.label}</span>
+          </div>
+          <span class="hint" style="margin:0;">${detailBits ? detailBits + ' · ' : ''}${escapeHtml(deviceLocationLine(d))}</span>
+          <span class="hint" style="margin:0;">Active ${formatLastSeen(d.lastSeenAt)} · ${d.sessionCount} session${d.sessionCount === 1 ? '' : 's'} · Risk <span style="color:${riskColor(d.riskScore)}; font-weight:700;">${d.riskScore}</span>${d.expiresAt ? ` · expires ${new Date(d.expiresAt).toLocaleString()}` : ''}${d.oneTimeUse ? ' · one-time' : ''}</span>
           ${isCurrent ? '' : `
-            <span style="display:flex; gap:6px;">
+            <span style="display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;">
               <span class="btn" style="padding:4px 10px; font-size:12px;" data-resync-device="${escapeHtml(d.id)}">Re-sync keys</span>
-              <span class="btn" style="padding:4px 10px; font-size:12px;" data-logout-device="${escapeHtml(d.id)}">Log out</span>
+              ${revoked ? '' : `
+                <span class="btn" style="padding:4px 10px; font-size:12px;" data-lost-device="${escapeHtml(d.id)}">Mark lost</span>
+                <span class="btn" style="padding:4px 10px; font-size:12px; color:#ff6a6a;" data-compromised-device="${escapeHtml(d.id)}">Mark compromised</span>
+              `}
+              <span class="btn" style="padding:4px 10px; font-size:12px;" data-logout-device="${escapeHtml(d.id)}">${revoked ? 'Remove' : 'Revoke / log out'}</span>
             </span>
           `}
         </div>
@@ -9710,9 +10394,9 @@
     }).join('') || '<div class="hint">No devices found.</div>';
   }
   document.getElementById('settingsDeviceList').addEventListener('click', async (e)=>{
-    const logoutId = e.target && e.target.dataset && e.target.dataset.logoutDevice;
-    const resyncId = e.target && e.target.dataset && e.target.dataset.resyncDevice;
-    if (resyncId){
+    const ds = e.target && e.target.dataset;
+    if (!ds) return;
+    if (ds.resyncDevice){
       // Hand-fixes the case where a device got trusted (via /device-link/
       // approve) but never actually received a chat-key wrap for one or
       // more chats — e.g. rewrapAllChatsForDevice's original fire-and-
@@ -9727,17 +10411,89 @@
       const btn = e.target;
       const original = btn.textContent;
       btn.textContent = 'Syncing…';
-      await rewrapAllChatsForDevice(resyncId);
+      await rewrapAllChatsForDevice(ds.resyncDevice);
       btn.textContent = 'Synced ✓';
       setTimeout(() => { btn.textContent = original; }, 2000);
       return;
     }
-    if (!logoutId) return;
-    if (!confirm('Log this device out? It will need to be re-approved (or clear MFA again) to sign back in.')) return;
-    const r = await apiFetch('/devices/remove', { method: 'POST', body: JSON.stringify({ id: logoutId }) });
-    if (r.ok) refreshDeviceList();
-    else alert("Couldn't log that device out. Try again.");
+    if (ds.lostDevice){
+      if (!confirm('Mark this device lost? It will be blocked from signing in again until you restore it.')) return;
+      const r = await apiFetch('/devices/mark-lost', { method: 'POST', body: JSON.stringify({ id: ds.lostDevice }) });
+      if (r.ok) refreshDeviceList(); else alert("Couldn't update that device. Try again.");
+      return;
+    }
+    if (ds.compromisedDevice){
+      if (!confirm('Mark this device compromised? It will be permanently blocked from signing in. Consider changing your PIN too.')) return;
+      const r = await apiFetch('/devices/mark-compromised', { method: 'POST', body: JSON.stringify({ id: ds.compromisedDevice }) });
+      if (r.ok) refreshDeviceList(); else alert("Couldn't update that device. Try again.");
+      return;
+    }
+    if (ds.logoutDevice){
+      if (!confirm('Log this device out? It will need to be re-approved (or clear MFA again) to sign back in.')) return;
+      const r = await apiFetch('/devices/remove', { method: 'POST', body: JSON.stringify({ id: ds.logoutDevice }) });
+      if (r.ok) refreshDeviceList();
+      else alert("Couldn't log that device out. Try again.");
+    }
   });
+
+  // ---------------- Unknown devices (pending approval) ----------------
+  // Informational only — approving/rejecting still goes through the code
+  // (see approveDeviceOverlay), reject alone can act directly from this
+  // list since declining never grants access, see /device-link/reject's
+  // targetDeviceId path.
+  async function refreshUnknownDeviceList(){
+    const wrap = document.getElementById('settingsUnknownDevicesWrap');
+    const listEl = document.getElementById('settingsUnknownDeviceList');
+    const r = await apiFetch('/devices');
+    const unknown = (r.ok && r.body && Array.isArray(r.body.unknownDevices)) ? r.body.unknownDevices : [];
+    if (!unknown.length){ wrap.style.display = 'none'; return; }
+    wrap.style.display = 'block';
+    listEl.innerHTML = unknown.map(d => `
+      <div class="settings-row" style="align-items:flex-start; flex-direction:column; gap:4px; border-color:rgba(255,209,102,0.4);">
+        <div style="display:flex; justify-content:space-between; width:100%; align-items:center;">
+          <span>${PLATFORM_ICON[d.platform] || PLATFORM_ICON.other} ${escapeHtml(d.label)}</span>
+          <span style="font-size:11px; font-weight:700; color:#ffd166; border:1px solid #ffd166; border-radius:20px; padding:2px 8px;">Unknown</span>
+        </div>
+        <span class="hint" style="margin:0;">${escapeHtml(deviceLocationLine(d))} · requested ${formatLastSeen(d.requestedAt)}</span>
+        <span style="display:flex; gap:6px; margin-top:4px;">
+          <span class="btn" style="padding:4px 10px; font-size:12px;" onclick="openApproveDeviceFlow()">Enter code to approve</span>
+          <span class="btn" style="padding:4px 10px; font-size:12px; color:#ff6a6a;" data-reject-unknown="${escapeHtml(d.id)}">Reject</span>
+        </span>
+      </div>
+    `).join('');
+  }
+  document.getElementById('settingsUnknownDeviceList').addEventListener('click', async (e)=>{
+    const targetDeviceId = e.target && e.target.dataset && e.target.dataset.rejectUnknown;
+    if (!targetDeviceId) return;
+    if (!confirm('Reject this sign-in request?')) return;
+    const r = await apiFetch('/device-link/reject', { method: 'POST', body: JSON.stringify({ deviceId: myDeviceId, targetDeviceId }) });
+    if (r.ok) refreshUnknownDeviceList();
+    else alert("Couldn't reject that request. Try again.");
+  });
+  window.openApproveDeviceFlow = openApproveDeviceFlow;
+
+  // ---------------- Self-check: detect this device's own revocation ----------------
+  // Mitigates the fact that pinHash is a static, shared-across-devices
+  // bearer credential with no per-device session token — the server can't
+  // forcibly kill an already-open tab the way a real revocable session
+  // token would let it. Polling this endpoint closes that gap down to "at
+  // most one interval of residual access" instead of indefinite access
+  // until the person happens to reload. Only runs once a session actually
+  // exists (myDeviceId set + past initial sign-in).
+  let deviceStatusCheckTimer = null;
+  function startDeviceStatusSelfCheck(){
+    if (deviceStatusCheckTimer) return;
+    deviceStatusCheckTimer = setInterval(async ()=>{
+      if (!myDeviceId || document.hidden) return;
+      const r = await apiFetch(`/devices/status?deviceId=${encodeURIComponent(myDeviceId)}`);
+      if (r.ok && r.body && r.body.status && r.body.status !== 'active' && r.body.status !== 'signed_out'){
+        clearInterval(deviceStatusCheckTimer);
+        deviceStatusCheckTimer = null;
+        alert('This device is no longer trusted on this account (' + r.body.status + '). You will be signed out.');
+        lockApp();
+      }
+    }, 60000);
+  }
 
   // ---------------- PArA Premium (per-user upgrade) ----------------
   async function refreshPremiumStatus(){
@@ -9827,6 +10583,14 @@
         <span class="btn" style="padding:4px 10px; font-size:12px;" data-remove-passkey="${escapeHtml(c.id)}">Remove</span>
       </div>
     `).join('') : '<div class="hint">No passkeys added yet.</div>';
+    // Cached locally (not re-fetched from the server) so the LOCK screen —
+    // reached before any authenticated call is made — can decide whether
+    // to offer "Unlock with Face ID/Touch ID" without a network round trip.
+    // Worst case this is one relock cycle stale (e.g. a passkey was just
+    // removed from another device); auth-verify still re-checks server-side
+    // regardless, so a stale "yes" here just means offering a button that
+    // then correctly fails, never a security gap.
+    localStorage.setItem('parapin_has_passkey', creds.length ? '1' : '0');
   }
   document.getElementById('settingsPasskeyList').addEventListener('click', async (e)=>{
     const id = e.target && e.target.dataset && e.target.dataset.removePasskey;

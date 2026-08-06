@@ -8,21 +8,33 @@
 // a-time queue (WebRTC only allows one offer/answer in flight per
 // RTCPeerConnection).
 //
+// This round (calling-UI redesign) added real host controls, a waiting
+// room, and ephemeral reactions — all server-enforced in the MeetingRoom
+// Durable Object, not just hidden client-side (see worker.js's MeetingRoom
+// class). Host is whoever the DO first saw join; if they leave, the
+// longest-present remaining participant is promoted automatically.
+//
 // Deliberate scope cuts vs. web, all workspace/AI features with no direct
-// mobile UI to attach to yet, not media-plane limitations:
-//  - No recording / AI meeting summary (worker.js gates both behind a
-//    workspace org, and there's no mobile "start_meetings" permission UI
-//    to check against yet).
-//  - No active-speaker highlighting (index.html's Web Audio
-//    AnalyserNode-per-participant sampler — no direct RN equivalent
-//    without a native audio-processing module).
-//  - No minimize-to-PiP while browsing other screens — the overlay is
-//    modal, same as CallOverlay's 1:1 call screen.
-//  - No invite picker: joining brings in whoever the *entry point* already
-//    knows (a group chat's own memberIds — see app/chat/[id].tsx's
-//    "Start meeting" button) or whoever's already been invited from web;
-//    there's no standalone contacts/roster browser on mobile yet to pick
-//    people from (see mobile-app/README.md).
+// mobile UI to attach to yet, or requiring native/ML capability this repo
+// doesn't have installed — not signaling-layer limitations (see
+// CALL_UI_REDESIGN.md for the full honest boundary):
+//  - No screen sharing capture (OS-level ReplayKit/MediaProjection wiring
+//    needed, a native-project change beyond an npm install; the SFU
+//    publish/pull signaling for an extra track already works generically
+//    and would carry a screen-share track the moment one exists).
+//  - No background blur/replacement (needs a real-time ML segmentation
+//    dependency, none installed).
+//  - No live captions/transcription (needs an on-device or streaming STT
+//    dependency, none installed; the existing POST /api/meeting/ai-
+//    assistant endpoint already does AFTER-the-fact Whisper transcription +
+//    summary from an uploaded recording, which is a legitimate, real,
+//    different feature this file doesn't wire mobile's Record button into
+//    yet, since actually capturing the mixed mic+remote audio locally needs
+//    a native audio-capture module this app doesn't have either).
+//  - No transfer/add-person mid-meeting invite picker (there's no
+//    standalone contacts/roster browser on mobile to pick people from, see
+//    mobile-app/README.md — inviting still only works from a group chat's
+//    own member list, same as before this round).
 
 import { create } from 'zustand';
 import {
@@ -34,6 +46,8 @@ import {
 import { apiFetch, wsUrl } from '../api/client';
 import { useSessionStore } from './session';
 import { getIceServers } from './callSignal';
+import { startNetworkMonitor } from '../utils/callNetworkMonitor';
+import type { NetworkQuality } from '../theme/callTheme';
 
 export interface MeetingInviteSignal {
   kind: 'meeting-invite';
@@ -53,7 +67,22 @@ export interface MeetingParticipant {
   hasAudio: boolean;
 }
 
-export type MeetingStatus = 'idle' | 'connecting' | 'active';
+export interface WaitingParticipant {
+  userId: string;
+  name: string;
+  avatarUrl: string | null;
+}
+
+export interface MeetingReaction {
+  id: string;
+  userId: string;
+  name: string;
+  emoji: string;
+  ts: number;
+}
+
+export type MeetingStatus = 'idle' | 'connecting' | 'waiting-for-host' | 'active';
+export type KnockDenied = 'denied' | 'removed' | null;
 
 interface WrapsTrackResponse {
   sessionId?: string;
@@ -75,6 +104,7 @@ let midToTrack: Record<string, { userId: string; kind: string }> = {};
 let pulledTracks = new Set<string>();
 let wsPingInterval: ReturnType<typeof setInterval> | null = null;
 let negotiationQueue: Promise<void> = Promise.resolve();
+let stopNetworkMonitor: (() => void) | null = null;
 // Presence-socket reconnect bookkeeping — mirrors index.html's
 // connectMeetingWs (meetingConnectAttempts/meetingWsReconnectTimer). This
 // was previously entirely absent on mobile (flagged inline as an explicit,
@@ -82,6 +112,7 @@ let negotiationQueue: Promise<void> = Promise.resolve();
 // stale in the room until it explicitly left, with no self-healing at all.
 let meetingConnectAttempts = 0;
 let meetingWsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let reactionExpiryTimers: ReturnType<typeof setTimeout>[] = [];
 
 function enqueue(fn: () => Promise<void>) {
   negotiationQueue = negotiationQueue.then(fn).catch(() => {});
@@ -116,6 +147,18 @@ interface MeetingState {
   errorMessage: string | null;
   pendingInvite: MeetingInviteSignal | null;
 
+  // --- added this round ---
+  hostUserId: string | null;
+  isHost: boolean;
+  waitingRoomEnabled: boolean;
+  waitingList: WaitingParticipant[]; // only ever populated for the host
+  knockDenied: KnockDenied; // this device's own knock outcome, if denied/removed
+  reactions: MeetingReaction[]; // ephemeral, auto-expire
+  pinnedUserId: string | null; // pure client UI state, no server round trip
+  networkQuality: NetworkQuality;
+  localAudioLevel: number | null;
+  muteAllRequestedAt: number | null; // bumped on receipt, UI shows a one-shot toast then clears it
+
   startMeeting: (meetingName: string, orgId: string | null, inviteUserIds: string[]) => Promise<void>;
   handleMeetingInvite: (signal: MeetingInviteSignal) => void;
   acceptInvite: () => Promise<void>;
@@ -124,6 +167,15 @@ interface MeetingState {
   toggleMute: () => void;
   toggleCamera: () => void;
   dismissError: () => void;
+
+  toggleWaitingRoom: (enabled: boolean) => void;
+  admitParticipant: (userId: string) => void;
+  denyParticipant: (userId: string) => void;
+  requestMuteAll: () => void;
+  removeParticipant: (userId: string) => void;
+  sendReaction: (emoji: string) => void;
+  setPinnedUserId: (userId: string | null) => void;
+  clearMuteAllToast: () => void;
 }
 
 export const useMeetingStore = create<MeetingState>((set, get) => {
@@ -133,6 +185,10 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
     if (meetingWsReconnectTimer) clearTimeout(meetingWsReconnectTimer);
     meetingWsReconnectTimer = null;
     meetingConnectAttempts = 0;
+    if (stopNetworkMonitor) stopNetworkMonitor();
+    stopNetworkMonitor = null;
+    reactionExpiryTimers.forEach(clearTimeout);
+    reactionExpiryTimers = [];
     if (meetingWs) {
       try {
         meetingWs.close();
@@ -173,7 +229,7 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
     });
   }
 
-  function removeParticipant(userId: string) {
+  function removeParticipantLocal(userId: string) {
     set((s) => {
       const next = { ...s.participants };
       delete next[userId];
@@ -269,8 +325,76 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
     if (meetingWs && meetingWs.readyState === WebSocket.OPEN) meetingWs.send(JSON.stringify(payload));
   }
 
+  // Runs the "actually join" sequence — mint an SFU session, publish local
+  // tracks, send invites — now factored out of the ws 'open' handler so it
+  // can be triggered either immediately (a genuine reconnect, which always
+  // bypasses the waiting room server-side) or once the very first 'roster'
+  // message proves this connection attempt was NOT gated into waiting.
+  async function completeJoin(inviteUserIds: string[]) {
+    const { meetingId, meetingName, orgId } = get();
+    const r = await sfuFetch('sessions/new', { method: 'POST' });
+    if (!r.ok || !r.body || !r.body.sessionId) {
+      const err = (r.body && (r.body.error || r.body.errorDescription)) || `HTTP ${r.status || '?'}`;
+      set({
+        errorMessage:
+          err === 'sfu_not_configured'
+            ? 'Meeting server not set up yet on this deployment.'
+            : `Could not start the meeting: ${err}`,
+      });
+      get().leaveMeeting();
+      return;
+    }
+    meetingSfuSessionId = r.body.sessionId;
+    wsSend({ type: 'set-session', sfuSessionId: meetingSfuSessionId });
+    set({ status: 'active' });
+    if (meetingPc) {
+      stopNetworkMonitor = startNetworkMonitor(meetingPc, (sample) => {
+        set({ networkQuality: sample.quality, localAudioLevel: sample.localAudioLevel });
+      });
+    }
+    await publishLocalTracks();
+    for (const toUserId of inviteUserIds) {
+      apiFetch('/meeting/invite', {
+        method: 'POST',
+        body: JSON.stringify({ toUserId, meetingId, meetingName, orgId }),
+      }).catch(() => {});
+    }
+  }
+
+  function scheduleReactionExpiry(id: string) {
+    const t = setTimeout(() => {
+      set((s) => ({ reactions: s.reactions.filter((r) => r.id !== id) }));
+    }, 2600);
+    reactionExpiryTimers.push(t);
+  }
+
   function handleWsMessage(data: any) {
     const myUserId = useSessionStore.getState().userId;
+
+    if (data.type === 'waiting') {
+      set({ status: 'waiting-for-host' });
+      return;
+    }
+    if (data.type === 'admitted') {
+      // The gating socket was a dead end (server never processes anything
+      // on it beyond ping) — close it and open a real one, now armed with
+      // the one-time admit pass the server just granted this userId.
+      try { meetingWs?.close(); } catch {}
+      meetingWs = null;
+      const pendingInvites: string[] = (get() as any)._pendingInviteUserIds || [];
+      connectWs(pendingInvites, false);
+      return;
+    }
+    if (data.type === 'denied') {
+      set({ knockDenied: 'denied' });
+      get().leaveMeeting();
+      return;
+    }
+    if (data.type === 'removed') {
+      set({ knockDenied: 'removed', errorMessage: 'The host removed you from this meeting.' });
+      get().leaveMeeting();
+      return;
+    }
     if (data.type === 'roster') {
       (data.participants || []).forEach((p: any) => {
         if (p.userId === myUserId) return;
@@ -282,6 +406,50 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
         }));
         (p.tracks || []).forEach((t: any) => pullTrack(p.userId, p.name, p.avatarUrl || null, p.sfuSessionId, t.trackName, t.kind));
       });
+      set({
+        hostUserId: data.hostUserId || null,
+        isHost: !!myUserId && data.hostUserId === myUserId,
+        waitingRoomEnabled: !!data.waitingRoomEnabled,
+        waitingList: Array.isArray(data.waiting) ? data.waiting : [],
+      });
+      // First 'roster' this connection has seen since opening — this is
+      // the "you actually got in" signal for a fresh (non-reconnect) join
+      // that wasn't gated into the waiting room; see connectWs's 'open'.
+      const alreadyJoined = (get() as any)._joinCompletedFor === meetingWs;
+      if (!alreadyJoined && get().status !== 'active') {
+        (get() as any)._joinCompletedFor = meetingWs;
+        completeJoin((get() as any)._pendingInviteUserIds || []);
+      }
+      return;
+    }
+    if (data.type === 'host-changed') {
+      set({ hostUserId: data.hostUserId, isHost: data.hostUserId === myUserId });
+      return;
+    }
+    if (data.type === 'waiting-room-changed') {
+      set({ waitingRoomEnabled: !!data.enabled });
+      return;
+    }
+    if (data.type === 'knock') {
+      if (!get().isHost) return;
+      set((s) => (s.waitingList.some((w) => w.userId === data.userId) ? s : { waitingList: [...s.waitingList, { userId: data.userId, name: data.name, avatarUrl: data.avatarUrl || null }] }));
+      return;
+    }
+    if (data.type === 'mute-all') {
+      if (data.byUserId !== myUserId) {
+        const { localStream, muted } = get();
+        if (!muted) {
+          localStream?.getAudioTracks().forEach((t: MediaStreamTrack) => { t.enabled = false; });
+          set({ muted: true });
+        }
+      }
+      set({ muteAllRequestedAt: Date.now() });
+      return;
+    }
+    if (data.type === 'reaction') {
+      const entry: MeetingReaction = { id: `${data.userId}-${Date.now()}-${Math.random()}`, userId: data.userId, name: data.name || 'Someone', emoji: data.emoji, ts: Date.now() };
+      set((s) => ({ reactions: [...s.reactions, entry] }));
+      scheduleReactionExpiry(entry.id);
       return;
     }
     if (data.type === 'participant-joined') {
@@ -295,7 +463,8 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
       return;
     }
     if (data.type === 'participant-left') {
-      removeParticipant(data.userId);
+      removeParticipantLocal(data.userId);
+      set((s) => ({ waitingList: s.waitingList.filter((w) => w.userId !== data.userId) }));
       return;
     }
     if (data.type === 'participant-track') {
@@ -316,6 +485,7 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
 
   function connectWs(inviteUserIds: string[], isReconnect: boolean) {
     const { meetingId, orgId } = get();
+    (get() as any)._pendingInviteUserIds = inviteUserIds;
     const params: Record<string, string> = { meetingId: meetingId! };
     if (orgId) params.orgId = orgId;
     const ws = new WebSocket(wsUrl('/meeting/room/ws', params));
@@ -356,54 +526,28 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
         return;
       }
 
-      // Deliberately bodiless — see index.html's identical comment: the
-      // live Cloudflare Realtime API 400s an empty JSON object here, a
-      // truly bodiless POST is what it wants.
-      const r = await sfuFetch('sessions/new', { method: 'POST' });
-      if (!r.ok || !r.body || !r.body.sessionId) {
-        const err = (r.body && (r.body.error || r.body.errorDescription)) || `HTTP ${r.status || '?'}`;
-        set({
-          errorMessage:
-            err === 'sfu_not_configured'
-              ? 'Meeting server not set up yet on this deployment.'
-              : `Could not start the meeting: ${err}`,
-        });
-        get().leaveMeeting();
-        return;
-      }
-      meetingSfuSessionId = r.body.sessionId;
-      // Must happen before publishLocalTracks()'s 'publish' messages go
-      // out — the DO stamps every 'participant-track' broadcast with
-      // whatever me.sfuSessionId it currently has on file (worker.js's
-      // MeetingRoom.fetch, the 'publish' handler), which starts out null
-      // until this arrives. Skipping this left every OTHER participant's
-      // pullTrack() call with a null remoteSessionId, silently unable to
-      // ever pull this device's tracks.
-      wsSend({ type: 'set-session', sfuSessionId: meetingSfuSessionId });
-      set({ status: 'active' });
-      await publishLocalTracks();
-      for (const toUserId of inviteUserIds) {
-        apiFetch('/meeting/invite', {
-          method: 'POST',
-          body: JSON.stringify({ toUserId, meetingId, meetingName: get().meetingName, orgId }),
-        }).catch(() => {});
-      }
+      // Deliberately does nothing else here — whether this connection is
+      // let straight in or gated into the waiting room is decided
+      // server-side and only known once the FIRST message arrives ('roster'
+      // = in, 'waiting' = gated). See handleWsMessage's 'roster' branch for
+      // where completeJoin() actually fires for a fresh join.
     });
     ws.addEventListener('close', () => {
       if (wsPingInterval) clearInterval(wsPingInterval);
       wsPingInterval = null;
       // `meetingWs !== ws` covers two cases at once: teardown() already ran
       // (it nulls meetingWs before closing, an intentional leave) or a
-      // newer connectWs() already superseded this one — either way this
-      // stale close event must not also schedule its own reconnect on top.
+      // newer connectWs() already superseded this one (including the
+      // waiting-room -> admitted transition, which closes the old socket
+      // itself) — either way this stale close event must not also schedule
+      // its own reconnect on top.
       if (meetingWs !== ws) return;
       meetingWs = null;
+      if (get().status === 'waiting-for-host') return; // denied/left while waiting, not a drop to recover from
       // The RTCPeerConnection/SFU session are independent of this presence
       // socket (same reasoning as web), so a drop doesn't end the meeting
-      // outright. Previously there was genuinely no reconnect loop at all
-      // here — a drop just left this device's presence stale in the room
-      // until it explicitly left. Mirrors index.html's connectMeetingWs:
-      // bounded retries with a jittered delay, not indefinite.
+      // outright. Mirrors index.html's connectMeetingWs: bounded retries
+      // with a jittered delay, not indefinite.
       if (!get().meetingId) return;
       meetingConnectAttempts++;
       if (meetingConnectAttempts > 4) {
@@ -432,6 +576,16 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
       cameraOff: false,
       errorMessage: null,
       pendingInvite: null,
+      hostUserId: null,
+      isHost: false,
+      waitingRoomEnabled: false,
+      waitingList: [],
+      knockDenied: null,
+      reactions: [],
+      pinnedUserId: null,
+      networkQuality: 'unknown',
+      localAudioLevel: null,
+      muteAllRequestedAt: null,
     });
 
     let stream: MediaStream;
@@ -470,6 +624,17 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
     cameraOff: false,
     errorMessage: null,
     pendingInvite: null,
+
+    hostUserId: null,
+    isHost: false,
+    waitingRoomEnabled: false,
+    waitingList: [],
+    knockDenied: null,
+    reactions: [],
+    pinnedUserId: null,
+    networkQuality: 'unknown',
+    localAudioLevel: null,
+    muteAllRequestedAt: null,
 
     startMeeting: async (meetingName, orgId, inviteUserIds) => {
       const id = globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : String(Date.now()) + Math.random();
@@ -518,6 +683,15 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
         localStream: null,
         muted: false,
         cameraOff: false,
+        hostUserId: null,
+        isHost: false,
+        waitingRoomEnabled: false,
+        waitingList: [],
+        reactions: [],
+        pinnedUserId: null,
+        networkQuality: 'unknown',
+        localAudioLevel: null,
+        muteAllRequestedAt: null,
       });
     },
 
@@ -538,5 +712,41 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
     },
 
     dismissError: () => set({ errorMessage: null }),
+
+    // ---- host controls (server double-checks isHost on every one of
+    // these too — see MeetingRoom's message handler — this is UX-speed,
+    // not the actual authorization boundary) ----
+    toggleWaitingRoom: (enabled) => {
+      if (!get().isHost) return;
+      wsSend({ type: 'set-waiting-room', enabled });
+    },
+    admitParticipant: (userId) => {
+      if (!get().isHost) return;
+      wsSend({ type: 'admit', targetUserId: userId });
+      set((s) => ({ waitingList: s.waitingList.filter((w) => w.userId !== userId) }));
+    },
+    denyParticipant: (userId) => {
+      if (!get().isHost) return;
+      wsSend({ type: 'deny', targetUserId: userId });
+      set((s) => ({ waitingList: s.waitingList.filter((w) => w.userId !== userId) }));
+    },
+    requestMuteAll: () => {
+      if (!get().isHost) return;
+      wsSend({ type: 'mute-all' });
+    },
+    removeParticipant: (userId) => {
+      if (!get().isHost) return;
+      wsSend({ type: 'remove-participant', targetUserId: userId });
+    },
+    sendReaction: (emoji) => {
+      wsSend({ type: 'reaction', emoji });
+      const myUserId = useSessionStore.getState().userId || 'me';
+      const myName = useSessionStore.getState().displayName || 'You';
+      const entry: MeetingReaction = { id: `local-${Date.now()}-${Math.random()}`, userId: myUserId, name: myName, emoji, ts: Date.now() };
+      set((s) => ({ reactions: [...s.reactions, entry] }));
+      scheduleReactionExpiry(entry.id);
+    },
+    setPinnedUserId: (userId) => set({ pinnedUserId: userId }),
+    clearMuteAllToast: () => set({ muteAllRequestedAt: null }),
   };
 });

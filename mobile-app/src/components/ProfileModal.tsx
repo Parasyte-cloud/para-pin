@@ -20,7 +20,8 @@ import * as ImagePicker from 'expo-image-picker';
 import { useSessionStore } from '../state/session';
 import { useTheme } from '../hooks/useTheme';
 import { initials, colorFromString } from '../utils/avatar';
-import { uploadProfilePhoto, ProfilePhotoUploadError } from '../utils/profilePhotoUpload';
+import { uploadProfilePhoto, uploadPrivateAvatarPhoto, ProfilePhotoUploadError } from '../utils/profilePhotoUpload';
+import AvatarViewer from './AvatarViewer';
 
 export default function ProfileModal({ visible, onClose }: { visible: boolean; onClose: () => void }) {
   const theme = useTheme();
@@ -35,6 +36,7 @@ export default function ProfileModal({ visible, onClose }: { visible: boolean; o
   const [pendingPhotoMime, setPendingPhotoMime] = useState('image/jpeg');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [viewerOpen, setViewerOpen] = useState(false);
 
   const goToDeviceSecurity = () => {
     onClose();
@@ -81,10 +83,21 @@ export default function ProfileModal({ visible, onClose }: { visible: boolean; o
     setError(null);
     try {
       let newAvatarUrl: string | undefined;
+      let newAvatarMediaKey: string | undefined;
       if (pendingPhotoUri) {
         newAvatarUrl = await uploadProfilePhoto(pendingPhotoUri, pendingPhotoMime);
+        // Private-tier upload is additive — if it fails, the save still
+        // proceeds with just the public thumbnail (see
+        // profilePhotoUpload.ts's header comment). newAvatarMediaKey stays
+        // undefined in that case, which updateProfile treats as "leave
+        // whatever private-tier photo is already saved untouched".
+        try {
+          newAvatarMediaKey = await uploadPrivateAvatarPhoto(pendingPhotoUri, pendingPhotoMime);
+        } catch {
+          // swallow — see comment above
+        }
       }
-      const res = await updateProfile(nameInput, newAvatarUrl);
+      const res = await updateProfile(nameInput, newAvatarUrl, newAvatarMediaKey);
       if (!res.ok) {
         setError(res.error);
         return;
@@ -125,7 +138,7 @@ export default function ProfileModal({ visible, onClose }: { visible: boolean; o
           >
             <Text style={[styles.title, { color: theme.textHi }]}>Your profile</Text>
 
-            <Pressable onPress={editing ? pickPhoto : undefined} disabled={!editing}>
+            <Pressable onPress={editing ? pickPhoto : () => shownAvatarUrl && setViewerOpen(true)} disabled={editing ? false : !shownAvatarUrl}>
               {shownAvatarUrl ? (
                 <Image source={{ uri: shownAvatarUrl }} style={styles.avatarImg} />
               ) : (
@@ -198,6 +211,13 @@ export default function ProfileModal({ visible, onClose }: { visible: boolean; o
           </BlurView>
         </Pressable>
       </Pressable>
+      <AvatarViewer
+        visible={viewerOpen}
+        onClose={() => setViewerOpen(false)}
+        userId={userId}
+        name={shownName}
+        thumbUrl={shownAvatarUrl}
+      />
     </Modal>
   );
 }
