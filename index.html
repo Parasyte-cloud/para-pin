@@ -13306,15 +13306,89 @@
     }
   });
 
-  window.closeModal = function(id){ document.getElementById(id).classList.remove('show'); };
-  window.openModal = function(id){ document.getElementById(id).classList.add('show'); };
+  // ---------------- Back-gesture / browser-back overlay dismissal ----------------
+  // None of the overlays here ever changed the URL or pushed browser
+  // history when they opened, so Chrome's edge-swipe-back gesture (and
+  // Android's back gesture, and an installed PWA's back button) never did
+  // anything for any of them — first reported against CRM specifically
+  // ("swipe left not working"), but it was really every overlay in the app;
+  // CRM was just the one with no OTHER way out either (see the
+  // closeAllNavOverlays fix above) that made it obvious.
+  //
+  // Fixed generally rather than just for CRM: the FIRST transition from
+  // "nothing open" to "something open" pushes exactly one history entry;
+  // the transition back to "nothing open" (by any in-app means — a close
+  // button, backdrop tap, nav switch) consumes it with history.back(); a
+  // real back-gesture/button press is caught by the popstate listener
+  // below, which closes whatever's open instead of letting the browser
+  // navigate this single-page app away from itself.
+  //
+  // The check is deliberately deferred to a microtask (Promise.resolve()
+  // .then, below) rather than reacting synchronously inside every single
+  // open/close call — a lot of code here does closeModal(A); openModal(B)
+  // back-to-back in the same tick (CRM/HR both close workspaceMembersOverlay
+  // right before opening themselves) to SWAP which overlay is showing, and
+  // that swap must not round-trip through history.back() then push a new
+  // entry — it nets out to "still one overlay open," so it needs zero
+  // history operations, which only checking the settled DOM state after the
+  // synchronous code finishes can tell you.
+  let paraOverlayHistoryPushed = false;
+  let handlingParaPopstate = false;
+  function scheduleOverlayHistorySync(){
+    Promise.resolve().then(()=>{
+      const anyOpen = !!document.querySelector('.overlay.show');
+      if (anyOpen && !paraOverlayHistoryPushed){
+        paraOverlayHistoryPushed = true;
+        history.pushState({ paraOverlay: true }, '', location.href);
+      } else if (!anyOpen && paraOverlayHistoryPushed && !handlingParaPopstate){
+        paraOverlayHistoryPushed = false;
+        history.back();
+      }
+    });
+  }
+
+  window.closeModal = function(id){
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.remove('show');
+    scheduleOverlayHistorySync();
+  };
+  window.openModal = function(id){
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.add('show');
+    scheduleOverlayHistorySync();
+  };
 
   document.querySelectorAll('.overlay').forEach(ov=>{
-    // Mandatory overlays (currently just the forced-PIN-change screen) can't
-    // be dismissed by tapping outside them, the whole point is that nothing
-    // else is usable until that step is done.
+    // Mandatory overlays (currently just the forced-PIN-change/MFA-verify
+    // screens) can't be dismissed by tapping outside them, the whole point
+    // is that nothing else is usable until that step is done.
     if (ov.dataset.mandatory === '1') return;
-    ov.addEventListener('click', (e)=>{ if (e.target === ov) ov.classList.remove('show'); });
+    ov.addEventListener('click', (e)=>{ if (e.target === ov) closeModal(ov.id); });
+  });
+
+  // The actual back-gesture/back-button handler. By the time popstate
+  // fires, the browser has ALREADY moved off the entry we pushed — so
+  // paraOverlayHistoryPushed is set to false synchronously, right here,
+  // before closing anything, rather than left for scheduleOverlayHistorySync
+  // to figure out later; that ordering is what stops the deferred check
+  // from also calling history.back() a second time for the same gesture.
+  // Same mandatory-overlay exemption as the backdrop-click handler, plus
+  // incoming-call/meeting-invite prompts — those carry a real decision
+  // (answer/decline, accept/decline) that a stray back-swipe shouldn't
+  // silently make on someone's behalf.
+  window.addEventListener('popstate', ()=>{
+    const openOverlays = Array.from(document.querySelectorAll('.overlay.show')).filter(ov=>
+      ov.dataset.mandatory !== '1' && ov.id !== 'incomingCallOverlay' && ov.id !== 'meetingInviteOverlay'
+    );
+    if (openOverlays.length === 0) return;
+    handlingParaPopstate = true;
+    paraOverlayHistoryPushed = false;
+    openOverlays.forEach(ov=> ov.classList.remove('show'));
+    if (typeof returnNavToChats === 'function') returnNavToChats();
+    if (typeof callsOverlayOpen !== 'undefined') callsOverlayOpen = false;
+    handlingParaPopstate = false;
   });
 
   // init

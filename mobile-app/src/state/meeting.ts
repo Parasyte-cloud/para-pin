@@ -166,6 +166,7 @@ interface MeetingState {
   leaveMeeting: () => void;
   toggleMute: () => void;
   toggleCamera: () => void;
+  switchCamera: () => void;
   dismissError: () => void;
 
   toggleWaitingRoom: (enabled: boolean) => void;
@@ -237,6 +238,16 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
     });
     for (const [mid, info] of Object.entries(midToTrack)) {
       if (info.userId === userId) delete midToTrack[mid];
+    }
+    // Also drop this user's pull-dedupe entries (bug fix: pulledTracks
+    // previously only ever grew for the life of the meeting. Without this,
+    // someone who left and rejoined the SAME meeting — or even just
+    // dropped/restored their own presence socket while staying published —
+    // would come back with a trackName pullTrack() had already marked as
+    // "pulled", so their video/audio would silently never get re-requested
+    // for anyone already in the call.
+    for (const key of pulledTracks) {
+      if (key.startsWith(userId + '|')) pulledTracks.delete(key);
     }
   }
 
@@ -386,7 +397,7 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
       return;
     }
     if (data.type === 'denied') {
-      set({ knockDenied: 'denied' });
+      set({ knockDenied: 'denied', errorMessage: "The host didn't let you into this meeting." });
       get().leaveMeeting();
       return;
     }
@@ -474,10 +485,31 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
       return;
     }
     if (data.type === 'participant-untrack') {
+      // Same dedupe-staleness bug as removeParticipantLocal, narrower case:
+      // publishLocalTracks always reuses the SAME trackName ('video-'+userId)
+      // for as long as that user's session lives, so someone turning their
+      // camera off (unpublish) then back on (publish again, identical
+      // trackName) would hit pullTrack's dedupe cache on the re-publish and
+      // never actually get pulled — their video would stay blank for
+      // everyone else even though they've turned the camera back on.
+      // trackName tells us which kind (worker.js's MeetingRoom always
+      // includes it on this message type, see the 'unpublish' handler).
+      if (data.trackName) pulledTracks.delete(data.userId + '|' + data.trackName);
+      const isVideo = typeof data.trackName === 'string' && data.trackName.startsWith('video-');
+      const isAudio = typeof data.trackName === 'string' && data.trackName.startsWith('audio-');
       set((s) => {
         const existing = s.participants[data.userId];
         if (!existing) return s;
-        return { participants: { ...s.participants, [data.userId]: { ...existing, videoStream: null } } };
+        return {
+          participants: {
+            ...s.participants,
+            [data.userId]: {
+              ...existing,
+              videoStream: isVideo ? null : existing.videoStream,
+              hasAudio: isAudio ? false : existing.hasAudio,
+            },
+          },
+        };
       });
       return;
     }
@@ -533,15 +565,26 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
       // where completeJoin() actually fires for a fresh join.
     });
     ws.addEventListener('close', () => {
-      if (wsPingInterval) clearInterval(wsPingInterval);
-      wsPingInterval = null;
       // `meetingWs !== ws` covers two cases at once: teardown() already ran
       // (it nulls meetingWs before closing, an intentional leave) or a
       // newer connectWs() already superseded this one (including the
       // waiting-room -> admitted transition, which closes the old socket
       // itself) — either way this stale close event must not also schedule
       // its own reconnect on top.
+      //
+      // Bug fix: this check used to run AFTER clearing wsPingInterval below,
+      // which raced the 'admitted' transition specifically — the NEW
+      // socket's 'open' handler (which starts its own ping interval and
+      // overwrites the module-level wsPingInterval variable) can fire before
+      // the OLD socket's 'close' event does, so the old handler would end up
+      // clearInterval-ing the NEW connection's interval and nulling the
+      // variable out from under it, silently leaving the meeting with no
+      // presence heartbeat at all until the next drop/reconnect. Checking
+      // staleness first means a stale close event never touches the current
+      // connection's interval.
       if (meetingWs !== ws) return;
+      if (wsPingInterval) clearInterval(wsPingInterval);
+      wsPingInterval = null;
       meetingWs = null;
       if (get().status === 'waiting-for-host') return; // denied/left while waiting, not a drop to recover from
       // The RTCPeerConnection/SFU session are independent of this presence
@@ -709,6 +752,17 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
         t.enabled = cameraOff;
       });
       set({ cameraOff: !cameraOff });
+    },
+
+    // Same real react-native-webrtc extension method call.ts's switchCamera
+    // uses (`_switchCamera()`, not in the public TS types hence the cast) —
+    // was missing here entirely; camera switching mid-meeting silently did
+    // nothing before this.
+    switchCamera: () => {
+      const { localStream } = get();
+      localStream?.getVideoTracks().forEach((t: any) => {
+        if (typeof t._switchCamera === 'function') t._switchCamera();
+      });
     },
 
     dismissError: () => set({ errorMessage: null }),

@@ -1,22 +1,44 @@
-// iOS-native call UI: full-bleed remote video (or a soft gradient backdrop
-// for audio-only/pre-connect), a draggable local PiP self-view that snaps
-// to whichever corner it's released nearest to, and — once a call is
-// live — the real iOS in-call control grid: six circular liquid-glass
-// buttons in two rows of three (Speaker / Camera / Mute, then Flip camera /
-// End / More), matching the reference layout instead of the single
-// horizontal row this used to be. Mute/camera controls are available as
-// soon as there's a live call (ringing-out included, matching FaceTime
-// letting you pre-mute before the other side even picks up) rather than
-// only once connected — one of the audio/video consistency fixes, see
-// mobile-app/README.md's call-reliability section for the rest.
+// Redesigned 1:1 call screen — premium audio + video call UI (task #221/
+// #222 of the calling-experience redesign; see CALL_UI_REDESIGN.md for the
+// full spec once written). Explicitly NOT a FaceTime/WhatsApp/Telegram
+// reskin — see callTheme.ts's header for the concrete differences this
+// design commits to instead.
+//
+// Audio call: large breathing avatar, a live waveform ring reacting to the
+// real local mic level (see callNetworkMonitor.ts — genuinely measured off
+// getStats(), not simulated), a drifting two-tone aurora backdrop, a status
+// capsule stack (state + quality + HD/encrypted badges), and the floating
+// glass dock (GlassDock). Video call: same chrome over full-bleed remote
+// video with a draggable local PiP, avatar/waveform only shown for the
+// audio-only portions of a video call (ringing/connecting, or if the peer's
+// video hasn't arrived yet).
+//
+// Two things this UI deliberately does NOT claim, stated here rather than
+// silently faked, because the state machine underneath them (call.ts) is
+// explicit about not supporting them:
+//  - Bluetooth/headphone ROUTE DETECTION: react-native-webrtc's
+//    enumerateDevices() never returns an 'audiooutput' device on this
+//    platform (verified by reading the native module directly — see
+//    call.ts's toggleSpeaker comment). There is no reliable signal to show
+//    "connected via AirPods" from, so this UI doesn't show one. The Speaker
+//    button is real UI state (drives the OS's default routing preference)
+//    the same way it always has been, not audio-route control.
+//  - A DTMF keypad: calls here are PIN-to-PIN VoIP between PArA accounts,
+//    there's no PSTN/phone-number dial path for a keypad to send tones
+//    into, so the "Keypad" item from the brief has nothing to actually do
+//    on this call type — omitted rather than shown as a dead button.
 
 import { useEffect, useRef, useState } from 'react';
-import { View, Text, Pressable, StyleSheet, Modal, Alert, Animated, PanResponder, Dimensions } from 'react-native';
+import { View, Text, Pressable, StyleSheet, Modal, Alert, Animated, Easing, PanResponder, Dimensions, AccessibilityInfo } from 'react-native';
 import { RTCView } from 'react-native-webrtc';
 import { BlurView } from 'expo-blur';
+import { LinearGradient } from 'expo-linear-gradient';
 import { useCallStore } from '../state/call';
-import { useTheme } from '../hooks/useTheme';
 import { initials, colorFromString } from '../utils/avatar';
+import { callColors, callMotion } from '../theme/callTheme';
+import { AnimatedAvatar, ConnectionQualityDots, GlassBadge, isReduceMotionEnabled } from './call/primitives';
+import { GlassDock, type DockItem } from './call/GlassDock';
+import { isTrackHd } from '../utils/callNetworkMonitor';
 
 const PIP_WIDTH = 108;
 const PIP_HEIGHT = 152;
@@ -28,10 +50,10 @@ function formatElapsed(sec: number): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-// Draggable, corner-snapping local self-view — a lightweight PanResponder
-// + Animated implementation (no reanimated dependency) so it behaves like
-// FaceTime's PiP without adding another native module on top of the ones
-// Phase 3/4 already required.
+// Draggable, corner-snapping local self-view — unchanged from the previous
+// design (already worked well, nothing about the redesign brief asked for
+// a different interaction here beyond "floating self preview," which this
+// already was).
 function LocalPip({ streamURL, borderColor }: { streamURL: string; borderColor: string }) {
   const { width: screenW, height: screenH } = Dimensions.get('window');
   const pan = useRef(new Animated.ValueXY({ x: screenW - PIP_WIDTH - PIP_MARGIN, y: 70 })).current;
@@ -60,6 +82,8 @@ function LocalPip({ streamURL, borderColor }: { streamURL: string; borderColor: 
   return (
     <Animated.View
       {...panResponder.panHandlers}
+      accessible
+      accessibilityLabel="Your camera preview, draggable"
       style={[styles.localPreview, { borderColor, transform: pan.getTranslateTransform() }]}
     >
       <RTCView streamURL={streamURL} style={StyleSheet.absoluteFill} objectFit="cover" mirror zOrder={2} />
@@ -67,24 +91,55 @@ function LocalPip({ streamURL, borderColor }: { streamURL: string; borderColor: 
   );
 }
 
+// Slow two-blob aurora drift behind the avatar on an audio call / any
+// no-remote-video moment — the brief's "elegant background." Deliberately
+// subtle (low opacity, slow) so it reads as ambient depth, not a distraction
+// from the actual call. Skips the drift animation (holds a static position)
+// under Reduce Motion, same policy as every other idle loop in this surface.
+function AuroraBackdrop() {
+  const drift = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (isReduceMotionEnabled()) return;
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(drift, { toValue: 1, duration: 9000, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+        Animated.timing(drift, { toValue: 0, duration: 9000, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [drift]);
+  const translate1 = drift.interpolate({ inputRange: [0, 1], outputRange: [-24, 24] });
+  const translate2 = drift.interpolate({ inputRange: [0, 1], outputRange: [18, -18] });
+  return (
+    <View style={StyleSheet.absoluteFill} pointerEvents="none">
+      <LinearGradient colors={[callColors.voidTop, callColors.voidBottom]} style={StyleSheet.absoluteFill} />
+      <Animated.View style={[styles.glowCircle, { backgroundColor: callColors.ice, opacity: 0.14, top: -160, left: -110, transform: [{ translateX: translate1 }, { translateY: translate1 }] }]} />
+      <Animated.View style={[styles.glowCircle, { backgroundColor: callColors.fire, opacity: 0.1, bottom: -180, right: -130, transform: [{ translateX: translate2 }, { translateY: translate2 }] }]} />
+    </View>
+  );
+}
+
 // Rendered once at the root (see app/_layout.tsx) so an incoming call can
-// interrupt whatever screen/tab is currently open, same as a phone's
-// native call UI — not scoped to any one route.
+// interrupt whatever screen/tab is currently open, same mount point as
+// before this redesign — the component name/default-export/no-props shape
+// is unchanged on purpose so swapping this file in was a drop-in replace.
 export default function CallOverlay() {
-  const theme = useTheme();
   const callState = useCallStore((s) => s.callState);
   const peerName = useCallStore((s) => s.peerName);
   const peerId = useCallStore((s) => s.peerId);
-  const direction = useCallStore((s) => s.direction);
   const hasVideo = useCallStore((s) => s.hasVideo);
   const muted = useCallStore((s) => s.muted);
   const cameraOff = useCallStore((s) => s.cameraOff);
   const speakerOn = useCallStore((s) => s.speakerOn);
   const awaitingConnection = useCallStore((s) => s.awaitingConnection);
+  const isReconnecting = useCallStore((s) => s.isReconnecting);
   const elapsedSec = useCallStore((s) => s.elapsedSec);
   const localStream = useCallStore((s) => s.localStream);
   const remoteStream = useCallStore((s) => s.remoteStream);
   const connectError = useCallStore((s) => s.connectError);
+  const networkQuality = useCallStore((s) => s.networkQuality);
+  const localAudioLevel = useCallStore((s) => s.localAudioLevel);
   const acceptCall = useCallStore((s) => s.acceptCall);
   const declineCall = useCallStore((s) => s.declineCall);
   const endCall = useCallStore((s) => s.endCall);
@@ -93,7 +148,8 @@ export default function CallOverlay() {
   const toggleSpeaker = useCallStore((s) => s.toggleSpeaker);
   const switchCamera = useCallStore((s) => s.switchCamera);
   const dismissConnectError = useCallStore((s) => s.dismissConnectError);
-  const [moreOpen, setMoreOpen] = useState(false);
+  const [addPersonNoticeOpen, setAddPersonNoticeOpen] = useState(false);
+  const [isHdRemote, setIsHdRemote] = useState(false);
 
   useEffect(() => {
     if (connectError) {
@@ -101,179 +157,173 @@ export default function CallOverlay() {
     }
   }, [connectError, dismissConnectError]);
 
+  // Recomputed off the actual negotiated remote video track's settings
+  // whenever the remote stream (or its tracks) change — genuine resolution
+  // check (see isTrackHd's own comment), not a guess from callState.
+  useEffect(() => {
+    if (!remoteStream) {
+      setIsHdRemote(false);
+      return;
+    }
+    const track = remoteStream.getVideoTracks()[0];
+    setIsHdRemote(isTrackHd(track as any));
+    // react-native-webrtc doesn't emit a resize event through this binding,
+    // so this is a best-effort snapshot at the moment the stream/track
+    // reference changes rather than a live subscription — acceptable here
+    // since resolution renegotiation mid-call is rare and the badge isn't
+    // safety-critical.
+  }, [remoteStream]);
+
+  // VoiceOver announcement on state transitions that matter but have no
+  // other non-visual signal (ringing/vibration already covers incoming
+  // calls; this covers the ones that don't already announce themselves).
+  useEffect(() => {
+    if (callState === 'connected') AccessibilityInfo.announceForAccessibility?.('Call connected');
+    if (isReconnecting) AccessibilityInfo.announceForAccessibility?.('Reconnecting call');
+  }, [callState, isReconnecting]);
+
   if (callState === 'idle') return null;
 
   const name = peerName || 'PArA PIN user';
-  const avatarColor = colorFromString(peerId || name, theme.ice, theme.fire);
-  const hasRemoteVideo = hasVideo && !!remoteStream;
-  // Controls are available from the moment a call is live (ringing-out
-  // included, same as FaceTime letting you pre-mute before the other side
-  // even answers) rather than gated to `connected` only — that gating was
-  // one of the audio/video inconsistencies: an outgoing video call let you
-  // toggle camera before pickup already (no gate bug there), but mute was
-  // silently unavailable until connected for BOTH types, which is the
-  // asymmetry worth fixing — a call already has live local audio/video
-  // tracks well before the peer answers.
+  const hasRemoteVideo = hasVideo && !!remoteStream && remoteStream.getVideoTracks().length > 0;
   const controlsActive = callState === 'connected' || callState === 'ringing-out';
+  const isPoorConnection = callState === 'connected' && !isReconnecting && (networkQuality === 'poor' || networkQuality === 'fair');
+
   const statusLabel =
     callState === 'ringing-in'
       ? `Incoming ${hasVideo ? 'video ' : ''}call`
       : callState === 'ringing-out'
         ? 'Calling…'
-        : awaitingConnection
-          ? 'Connecting…'
-          : formatElapsed(elapsedSec);
+        : isReconnecting
+          ? 'Reconnecting…'
+          : awaitingConnection
+            ? 'Connecting…'
+            : formatElapsed(elapsedSec);
+
+  const primaryDock: DockItem[] = [
+    {
+      key: 'mute',
+      icon: muted ? '🔇' : '🎤',
+      label: muted ? 'Unmute' : 'Mute',
+      active: muted,
+      disabled: !controlsActive,
+      onPress: toggleMute,
+      accessibilityHint: muted ? 'Turns your microphone back on' : 'Turns your microphone off',
+    },
+    {
+      key: 'speaker',
+      icon: '🔊',
+      label: 'Speaker',
+      active: speakerOn,
+      disabled: !controlsActive,
+      onPress: toggleSpeaker,
+      accessibilityHint: 'Toggles the speaker indicator',
+    },
+    ...(hasVideo
+      ? [
+          {
+            key: 'camera',
+            icon: '🎥',
+            label: cameraOff ? 'Start video' : 'Stop video',
+            active: !cameraOff,
+            disabled: !controlsActive,
+            onPress: toggleCamera,
+            accessibilityHint: cameraOff ? 'Turns your camera back on' : 'Turns your camera off',
+          } as DockItem,
+        ]
+      : []),
+  ];
+  const overflowDock: DockItem[] = [
+    ...(hasVideo
+      ? [
+          {
+            key: 'flip',
+            icon: '🔄',
+            label: 'Flip camera',
+            disabled: !controlsActive || cameraOff,
+            onPress: switchCamera,
+            accessibilityHint: 'Switches between front and back camera',
+          } as DockItem,
+        ]
+      : []),
+    {
+      key: 'add',
+      icon: '➕',
+      label: 'Add person',
+      disabled: !controlsActive,
+      onPress: () => setAddPersonNoticeOpen(true),
+      accessibilityHint: 'Explains how to bring more people into this call',
+    },
+  ];
 
   return (
     <Modal visible animationType="slide" presentationStyle="fullScreen" statusBarTranslucent>
-      <View style={[styles.container, { backgroundColor: theme.bg0 }]}>
+      <View style={styles.container}>
         {hasRemoteVideo ? (
           <RTCView streamURL={remoteStream!.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" />
         ) : (
-          // FaceTime-style soft backdrop for audio-only calls and any
-          // moment before the remote video stream actually arrives —
-          // flat black/bg0 alone read as "is this even working," two
-          // large soft-edged tinted circles behind the avatar reads as a
-          // deliberate design instead. No image/blur asset, just layered
-          // low-opacity Views.
-          <View style={StyleSheet.absoluteFill} pointerEvents="none">
-            <View style={[styles.glowCircle, { backgroundColor: theme.ice, opacity: 0.16, top: -140, left: -100 }]} />
-            <View style={[styles.glowCircle, { backgroundColor: theme.fire, opacity: 0.1, bottom: -160, right: -120 }]} />
-          </View>
+          <AuroraBackdrop />
         )}
 
         {hasVideo && localStream && !cameraOff && (
-          <LocalPip streamURL={localStream.toURL()} borderColor={theme.glassBrdHi} />
+          <LocalPip streamURL={localStream.toURL()} borderColor={callColors.glassBrdHi} />
+        )}
+
+        <View style={styles.badgeRow} pointerEvents="none">
+          <GlassBadge label="Encrypted" icon="🔒" tone="ok" />
+          {hasVideo && isHdRemote && <GlassBadge label="HD" tone="neutral" />}
+          {callState === 'connected' && (
+            <BlurView intensity={40} tint="dark" style={styles.qualityPill}>
+              <ConnectionQualityDots quality={isReconnecting ? 'unknown' : networkQuality} />
+            </BlurView>
+          )}
+        </View>
+
+        {isPoorConnection && (
+          <View style={styles.poorBanner} pointerEvents="none">
+            <GlassBadge label="Poor connection" icon="⚠️" tone="warn" />
+          </View>
         )}
 
         <View style={styles.header} pointerEvents="none">
           {!hasRemoteVideo && (
-            <View style={[styles.bigAvatar, { backgroundColor: avatarColor }]}>
-              <Text style={styles.bigAvatarText}>{initials(name)}</Text>
-            </View>
+            <AnimatedAvatar
+              name={name}
+              userId={peerId || name}
+              size={128}
+              breathing={callState === 'ringing-in' || callState === 'ringing-out' || awaitingConnection || isReconnecting}
+              audioLevel={callState === 'connected' && !isReconnecting ? localAudioLevel : null}
+            />
           )}
-          <Text style={[styles.name, { color: hasRemoteVideo ? '#fff' : theme.textHi }]}>{name}</Text>
-          {/* Frosted glass status pill — most useful (and most visible)
-              while remote video is playing behind it; falls back to a
-              plain semi-transparent pill on Android where BlurView has no
-              true blur without the experimental method (still reads as
-              "glass chrome", just softer). */}
+          <Text style={styles.name} accessibilityRole="header">{name}</Text>
           <BlurView intensity={40} tint="dark" style={styles.statusPill}>
-            <Text style={styles.status}>{statusLabel}</Text>
+            <Text style={styles.status} accessibilityLiveRegion="polite">{statusLabel}</Text>
           </BlurView>
         </View>
 
         <View style={styles.controlsWrap}>
           {callState === 'ringing-in' ? (
-            // Colors match index.html's `.incoming-call-decline`/
-            // `.incoming-call-accept` exactly (index.html:489/491:
-            // #ff4d4d / #2ecf7a) — were iOS system red/green before this
-            // pass, close but not literally web's palette.
-            <View style={styles.row}>
+            <View style={styles.incomingRow}>
               <View style={styles.controlCol}>
-                <Pressable onPress={() => declineCall()} style={[styles.roundBtn, { backgroundColor: '#ff4d4d' }]}>
-                  <Text style={styles.roundBtnLabel}>✕</Text>
-                </Pressable>
-                <Text style={styles.controlLabel}>Decline</Text>
+                <GlassBadgeButton icon="✕" color={callColors.danger} label="Decline" onPress={() => declineCall()} accessibilityHint="Declines this call" />
               </View>
               <View style={styles.controlCol}>
-                <Pressable onPress={() => acceptCall()} style={[styles.roundBtn, { backgroundColor: '#2ecf7a' }]}>
-                  <Text style={styles.roundBtnLabel}>{hasVideo ? '🎥' : '✓'}</Text>
-                </Pressable>
-                <Text style={styles.controlLabel}>Accept</Text>
+                <GlassBadgeButton icon={hasVideo ? '🎥' : '✓'} color={callColors.ok} label="Accept" onPress={() => acceptCall()} accessibilityHint="Answers this call" />
               </View>
             </View>
           ) : (
-            // 2x3 iOS in-call grid. Every cell is the SAME circular glass
-            // treatment (see .gridBtn) regardless of what it does — the
-            // active/toggled states (mute, speaker, camera) invert to a
-            // solid white fill same as the real iOS control grid, End
-            // stays red/prominent, and anything not actually wired to a
-            // real action (More, and Flip camera when there's no video
-            // track to flip) renders visibly dimmed rather than silently
-            // doing nothing, so it doesn't read as broken.
-            <View style={styles.grid}>
-              {/* Active/toggled state matches index.html's
-                  `.video-call-btn.active` exactly (index.html:571:
-                  rgba(255,255,255,0.35), a translucent lift, not opaque
-                  white) — was solid #fff before this pass. */}
-              <View style={styles.gridRow}>
-                <View style={styles.controlCol}>
-                  <Pressable
-                    onPress={toggleSpeaker}
-                    disabled={!controlsActive}
-                    style={[styles.gridBtn, { backgroundColor: speakerOn ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.16)', opacity: controlsActive ? 1 : 0.4 }]}
-                  >
-                    <Text style={{ fontSize: 21 }}>🔊</Text>
-                  </Pressable>
-                  <Text style={styles.controlLabel}>Speaker</Text>
-                </View>
-                <View style={styles.controlCol}>
-                  <Pressable
-                    onPress={toggleCamera}
-                    disabled={!controlsActive || !hasVideo}
-                    style={[
-                      styles.gridBtn,
-                      { backgroundColor: hasVideo && !cameraOff ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.16)', opacity: controlsActive && hasVideo ? 1 : 0.4 },
-                    ]}
-                  >
-                    <Text style={{ fontSize: 21 }}>🎥</Text>
-                  </Pressable>
-                  <Text style={styles.controlLabel}>Camera</Text>
-                </View>
-                <View style={styles.controlCol}>
-                  <Pressable
-                    onPress={toggleMute}
-                    disabled={!controlsActive}
-                    style={[styles.gridBtn, { backgroundColor: muted ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.16)', opacity: controlsActive ? 1 : 0.4 }]}
-                  >
-                    <Text style={{ fontSize: 21 }}>{muted ? '🔇' : '🎤'}</Text>
-                  </Pressable>
-                  <Text style={styles.controlLabel}>{muted ? 'Unmute' : 'Mute'}</Text>
-                </View>
-              </View>
-              <View style={styles.gridRow}>
-                <View style={styles.controlCol}>
-                  <Pressable
-                    onPress={switchCamera}
-                    disabled={!controlsActive || !hasVideo || cameraOff}
-                    style={[styles.gridBtn, { backgroundColor: 'rgba(255,255,255,0.16)', opacity: controlsActive && hasVideo && !cameraOff ? 1 : 0.35 }]}
-                  >
-                    <Text style={{ fontSize: 21 }}>🔄</Text>
-                  </Pressable>
-                  <Text style={styles.controlLabel}>Flip</Text>
-                </View>
-                <View style={styles.controlCol}>
-                  {/* End-call color matches index.html's
-                      `.video-call-end-btn` exactly (index.html:572:
-                      #ff4d4d), was iOS system red (#ff453a). */}
-                  <Pressable onPress={() => endCall()} style={[styles.gridBtn, styles.endBtn, { backgroundColor: '#ff4d4d' }]}>
-                    <Text style={styles.endBtnLabel}>✕</Text>
-                  </Pressable>
-                  <Text style={styles.controlLabel}>End</Text>
-                </View>
-                <View style={styles.controlCol}>
-                  <Pressable
-                    onPress={() => setMoreOpen(true)}
-                    disabled={!controlsActive}
-                    style={[styles.gridBtn, { backgroundColor: 'rgba(255,255,255,0.16)', opacity: controlsActive ? 1 : 0.4 }]}
-                  >
-                    <Text style={{ fontSize: 21 }}>⋯</Text>
-                  </Pressable>
-                  <Text style={styles.controlLabel}>More</Text>
-                </View>
-              </View>
-            </View>
+            <GlassDock
+              primary={primaryDock}
+              overflow={overflowDock}
+              endCall={{ label: 'End call', onPress: () => endCall() }}
+            />
           )}
 
-          {moreOpen && (
-            <Pressable style={styles.moreBackdrop} onPress={() => setMoreOpen(false)}>
+          {addPersonNoticeOpen && (
+            <Pressable style={styles.moreBackdrop} onPress={() => setAddPersonNoticeOpen(false)}>
               <BlurView intensity={60} tint="dark" style={styles.moreSheet}>
-                <Text style={styles.moreTitle}>{name}</Text>
-                <Text style={styles.moreSub}>
-                  {hasVideo ? 'Video call' : 'Audio call'} · {formatElapsed(elapsedSec)}
-                </Text>
-                <Text style={styles.moreHint}>To add more people, end this call and start a group meeting from a group chat instead.</Text>
+                <Text style={styles.moreTitle}>Add someone to this call</Text>
+                <Text style={styles.moreHint}>1:1 calls can't grow into a group mid-call yet. End this call and start a Meeting Room from a group chat instead — everyone gets a push the moment it starts.</Text>
               </BlurView>
             </Pressable>
           )}
@@ -283,15 +333,41 @@ export default function CallOverlay() {
   );
 }
 
+// Large circular accept/decline button — same visual language as
+// GlassIconButton's press animation but bigger and solid-colored, matching
+// how every serious calling UI (this one included) treats accept/decline
+// as the two highest-stakes taps on the whole screen.
+function GlassBadgeButton({ icon, color, label, onPress, accessibilityHint }: { icon: string; color: string; label: string; onPress: () => void; accessibilityHint?: string }) {
+  const scale = useRef(new Animated.Value(1)).current;
+  const press = () => {
+    Animated.sequence([
+      Animated.timing(scale, { toValue: 0.9, duration: 80, useNativeDriver: true }),
+      Animated.spring(scale, { toValue: 1, useNativeDriver: true, ...callMotion.springSnappy }),
+    ]).start();
+    onPress();
+  };
+  return (
+    <View style={{ alignItems: 'center', gap: 8 }}>
+      <Animated.View style={{ transform: [{ scale }] }}>
+        <Pressable onPress={press} accessibilityRole="button" accessibilityLabel={label} accessibilityHint={accessibilityHint} style={[styles.roundBtn, { backgroundColor: color }]}>
+          <Text style={styles.roundBtnLabel}>{icon}</Text>
+        </Pressable>
+      </Animated.View>
+      <Text style={styles.controlLabel}>{label}</Text>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
-  container: { flex: 1, justifyContent: 'space-between', paddingVertical: 60, paddingHorizontal: 24 },
-  glowCircle: { position: 'absolute', width: 340, height: 340, borderRadius: 170 },
-  header: { alignItems: 'center', gap: 8, marginTop: 40 },
-  bigAvatar: { width: 116, height: 116, borderRadius: 58, alignItems: 'center', justifyContent: 'center' },
-  bigAvatarText: { color: '#0a0d12', fontWeight: '700', fontSize: 38 },
-  name: { fontSize: 22, fontWeight: '700' },
+  container: { flex: 1, justifyContent: 'space-between', paddingVertical: 60, paddingHorizontal: 24, backgroundColor: callColors.voidBottom },
+  glowCircle: { position: 'absolute', width: 360, height: 360, borderRadius: 180 },
+  badgeRow: { position: 'absolute', top: 56, left: 0, right: 0, flexDirection: 'row', gap: 8, justifyContent: 'center', flexWrap: 'wrap' },
+  qualityPill: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 7, overflow: 'hidden' },
+  poorBanner: { position: 'absolute', top: 92, left: 0, right: 0, alignItems: 'center' },
+  header: { alignItems: 'center', gap: 10, marginTop: 40 },
+  name: { fontSize: 23, fontWeight: '700', color: callColors.textHi },
   statusPill: { borderRadius: 999, paddingHorizontal: 14, paddingVertical: 5, overflow: 'hidden', marginTop: 2 },
-  status: { fontSize: 13, color: '#fff', fontWeight: '500' },
+  status: { fontSize: 13, color: callColors.textHi, fontWeight: '500' },
   localPreview: {
     position: 'absolute',
     width: PIP_WIDTH,
@@ -300,46 +376,30 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     overflow: 'hidden',
     zIndex: 5,
+    top: 100,
   },
   controlsWrap: { alignItems: 'center', width: '100%' },
-  row: { flexDirection: 'row', gap: 28, justifyContent: 'center', alignItems: 'flex-start' },
-  controlCol: { alignItems: 'center', gap: 6, width: 64 },
-  controlLabel: { fontSize: 11, color: 'rgba(255,255,255,0.85)' },
-  roundBtn: { width: 62, height: 62, borderRadius: 31, alignItems: 'center', justifyContent: 'center' },
-  roundBtnLabel: { fontSize: 24, color: '#fff', fontWeight: '700' },
-  // 2x3 in-call control grid — three equal-width columns per row, same
-  // circular glass button in every cell (see the comment at the JSX call
-  // site for why every cell shares one style regardless of what it does).
-  grid: { gap: 20, alignItems: 'center' },
-  gridRow: { flexDirection: 'row', gap: 26, justifyContent: 'center' },
-  gridBtn: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.22)',
-  },
-  endBtn: { borderColor: 'transparent' },
-  endBtnLabel: { fontSize: 24, color: '#fff', fontWeight: '700' },
+  incomingRow: { flexDirection: 'row', gap: 40, justifyContent: 'center', alignItems: 'flex-start' },
+  controlCol: { alignItems: 'center', gap: 6, width: 72 },
+  controlLabel: { fontSize: 11, color: callColors.textMid },
+  roundBtn: { width: 66, height: 66, borderRadius: 33, alignItems: 'center', justifyContent: 'center' },
+  roundBtnLabel: { fontSize: 25, color: '#fff', fontWeight: '700' },
   moreBackdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.35)',
+    ...StyleSheet.absoluteFill,
+    backgroundColor: 'rgba(0,0,0,0.4)',
     alignItems: 'center',
     justifyContent: 'flex-end',
-    paddingBottom: 220,
+    paddingBottom: 230,
   },
   moreSheet: {
     width: '84%',
     borderRadius: 20,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.18)',
+    borderColor: callColors.glassBrd,
     padding: 18,
     alignItems: 'center',
     overflow: 'hidden',
   },
-  moreTitle: { color: '#fff', fontSize: 16, fontWeight: '700' },
-  moreSub: { color: 'rgba(255,255,255,0.7)', fontSize: 12.5, marginTop: 2 },
-  moreHint: { color: 'rgba(255,255,255,0.55)', fontSize: 11.5, marginTop: 10, textAlign: 'center' },
+  moreTitle: { color: callColors.textHi, fontSize: 16, fontWeight: '700' },
+  moreHint: { color: callColors.textMid, fontSize: 12.5, marginTop: 8, textAlign: 'center', lineHeight: 18 },
 });

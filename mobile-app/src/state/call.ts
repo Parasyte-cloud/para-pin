@@ -32,6 +32,8 @@ import {
 import { useSessionStore } from './session';
 import { getIceServers, iceTurnErrorCache, sendCallSignal, logCallEntry, type CallSignal } from './callSignal';
 import { playIncomingRingtone, playOutgoingRingback, stopRingAudio } from '../utils/ringtonePlayer';
+import { startNetworkMonitor } from '../utils/callNetworkMonitor';
+import type { NetworkQuality } from '../theme/callTheme';
 
 export type CallState = 'idle' | 'ringing-out' | 'ringing-in' | 'connected';
 
@@ -53,6 +55,11 @@ let callTimerInterval: ReturnType<typeof setInterval> | null = null;
 // One ICE-restart attempt per call, not per 'failed' event — mirrors
 // index.html's iceRestartAttempted. Reset in teardownMedia (finishCall).
 let iceRestartAttempted = false;
+// Real getStats()-driven quality/level sampling (see callNetworkMonitor.ts)
+// — started right after rtcPeerConn exists in both startOutgoingCall and
+// acceptCall, stopped in teardownMedia. Feeds the new call UI's connection-
+// quality dots/badge and the waveform ring's live audio-reactive motion.
+let stopCallNetworkMonitor: (() => void) | null = null;
 
 interface CallStoreState {
   callState: CallState;
@@ -76,6 +83,17 @@ interface CallStoreState {
   // this device writes lands in the same workspace as whichever chat (or
   // incoming offer) the call started from.
   orgId: string | null;
+  // Real getStats()-backed signals for the redesigned call UI — see
+  // callNetworkMonitor.ts. networkQuality drives the connection-quality
+  // dots/badge and the "Poor Connection" banner; localAudioLevel drives the
+  // waveform ring's live reaction to the mic. isReconnecting is true for
+  // the DISCONNECT_GRACE_MS window after the underlying RTCPeerConnection
+  // drops (see createPeerConnection's connectionstatechange handler) —
+  // distinct from awaitingConnection, which only covers the very first
+  // connect, not a mid-call blip.
+  networkQuality: NetworkQuality;
+  localAudioLevel: number | null;
+  isReconnecting: boolean;
 
   startOutgoingCall: (peerId: string, peerName: string, peerAvatarUrl: string | null, video: boolean, orgId?: string | null) => Promise<void>;
   acceptCall: () => Promise<void>;
@@ -120,7 +138,8 @@ async function createPeerConnection(
   onRemoteStream: (stream: MediaStream) => void,
   onConnected: () => void,
   onClosed: () => void,
-  onDisconnected: () => void
+  onDisconnected: () => void,
+  onReconnecting: () => void
 ): Promise<RTCPeerConnection> {
   const iceServers = await getIceServers();
   const pc = new RTCPeerConnection({ iceServers });
@@ -161,6 +180,7 @@ async function createPeerConnection(
     // onDisconnected('hangup') callback either way if nothing pans out —
     // same worst case as before this fix, only the success case improves.
     if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+      onReconnecting();
       if (pc.connectionState === 'failed' && direction === 'outgoing' && !iceRestartAttempted) {
         iceRestartAttempted = true;
         (pc.createOffer({ iceRestart: true } as any) as Promise<any>)
@@ -181,6 +201,10 @@ async function createPeerConnection(
 export const useCallStore = create<CallStoreState>((set, get) => {
   function teardownMedia() {
     const { localStream } = get();
+    if (stopCallNetworkMonitor) {
+      stopCallNetworkMonitor();
+      stopCallNetworkMonitor = null;
+    }
     if (localStream) {
       localStream.getTracks().forEach((t: MediaStreamTrack) => t.stop());
     }
@@ -234,18 +258,30 @@ export const useCallStore = create<CallStoreState>((set, get) => {
       localStream: null,
       remoteStream: null,
       orgId: null,
+      networkQuality: 'unknown',
+      localAudioLevel: null,
+      isReconnecting: false,
     });
   }
 
   function onCallConnected() {
-    if (get().callState === 'connected') return;
+    // No early-return-if-already-connected here anymore: this same
+    // function is also the recovery path after a 'disconnected'/'failed'
+    // blip (see onReconnecting below), and that path NEEDS to clear
+    // isReconnecting even though callState was already 'connected' the
+    // whole time. Everything inside remains safe to re-run on a genuine
+    // no-op call (setting the same values again, restarting an interval
+    // that's about to be cleared and replaced) — the guard was only ever
+    // there to skip redundant work, not for correctness.
     // Stops the outgoing ringback the instant the call actually connects —
     // acceptCall()/finishCall() already call this for the incoming-ring
     // side, but a caller going ringing-out -> connected never passes
     // through either of those, so without this the ringback tone would
     // keep looping underneath a now-live call.
+    const wasAlreadyConnected = get().callState === 'connected';
     stopRinging();
-    set({ callState: 'connected', callStartedAt: Date.now(), awaitingConnection: false, elapsedSec: 0 });
+    set({ callState: 'connected', callStartedAt: get().callStartedAt || Date.now(), awaitingConnection: false, elapsedSec: get().elapsedSec, isReconnecting: false });
+    if (wasAlreadyConnected) return; // recovered from a blip — timer/timeouts below are already running, don't touch them
     if (ringTimeoutTimer) clearTimeout(ringTimeoutTimer);
     if (connectTimeoutTimer) clearTimeout(connectTimeoutTimer);
     ringTimeoutTimer = null;
@@ -298,6 +334,9 @@ export const useCallStore = create<CallStoreState>((set, get) => {
     remoteStream: null,
     connectError: null,
     orgId: null,
+    networkQuality: 'unknown',
+    localAudioLevel: null,
+    isReconnecting: false,
 
     startOutgoingCall: async (peerId, peerName, peerAvatarUrl, video, orgId = null) => {
       if (get().callState !== 'idle') return;
@@ -333,9 +372,11 @@ export const useCallStore = create<CallStoreState>((set, get) => {
         (remoteStream) => set({ remoteStream }),
         onCallConnected,
         () => get().endCall('hangup'),
-        () => get().endCall('hangup')
+        () => get().endCall('hangup'),
+        () => set({ isReconnecting: true })
       );
       rtcPeerConn = pc;
+      stopCallNetworkMonitor = startNetworkMonitor(pc, (sample) => set({ networkQuality: sample.quality, localAudioLevel: sample.localAudioLevel }));
       stream.getTracks().forEach((t: MediaStreamTrack) => pc.addTrack(t, stream));
       const offer = await pc.createOffer(undefined);
       await pc.setLocalDescription(offer);
@@ -369,9 +410,11 @@ export const useCallStore = create<CallStoreState>((set, get) => {
         (remoteStream) => set({ remoteStream }),
         onCallConnected,
         () => get().endCall('hangup'),
-        () => get().endCall('hangup')
+        () => get().endCall('hangup'),
+        () => set({ isReconnecting: true })
       );
       rtcPeerConn = pc;
+      stopCallNetworkMonitor = startNetworkMonitor(pc, (sample) => set({ networkQuality: sample.quality, localAudioLevel: sample.localAudioLevel }));
       stream.getTracks().forEach((t: MediaStreamTrack) => pc.addTrack(t, stream));
       await pc.setRemoteDescription({ type: 'offer', sdp: pendingRemoteOfferSdp! });
       flushPendingIceCandidates();

@@ -424,6 +424,7 @@ export default function ChatDetailScreen() {
         _pending: true,
         attachment: attachment
           ? {
+              url: '', // real URL doesn't exist yet — this optimistic message gets replaced once the actual upload/send below resolves. Never fed through messages.ts's decrypt-fetch pipeline in the meantime because _e2eeDone/_decryptedUri (below) already short-circuit that.
               kind: attachment.kind,
               mime: attachment.mime,
               size: attachment.size,
