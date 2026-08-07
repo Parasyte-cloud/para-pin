@@ -163,24 +163,22 @@
   #lock{
     position:fixed; inset:0; z-index:10; display:flex; align-items:center; justify-content:center;
     flex-direction:column; gap:28px; padding:24px;
-    /* iOS Safari (standalone PWA especially) can report `100vh`-derived box
-       heights before the visual viewport actually settles, and inset:0's
-       centering math against that stale, too-tall box is what reads as
-       "content stuck near the top with dead space below" — the logo/keypad
-       render at their normal size but the invisible flex box they're being
-       centered inside is taller than what's actually visible, so the true
-       center sits below the fold. `100dvh` (dynamic viewport height)
-       recalculates against the real, current visual viewport instead; the
-       plain 100vh line stays first as a fallback for older browsers that
-       don't support dvh at all, dvh overrides it wherever it's understood.
-       Safe-area padding is explicit rather than folded into the flat 24px
-       so a notch/Dynamic Island or the home-indicator area doesn't eat into
-       the same budget the centering math is using. overflow-y:auto is the
-       backstop for the one case dvh can't fix — a genuinely short viewport
-       (small phone + a big system font size) where the content is taller
-       than the screen even once measured correctly; scrolling beats
-       clipping the keypad off unreachably. */
-    height:100vh; height:100dvh;
+    /* #lock's actual height/top on screens where it matters (iOS PWA) isn't
+       controlled here at all — JS (syncViewportSize, near lockEl's other
+       listeners below) sets them directly from window.visualViewport on
+       every load/resize/scroll, specifically to track Safari's collapsible
+       toolbar and the standalone status bar correctly; a plain CSS height
+       (100vh, 100dvh, whichever) would just get silently overridden by that
+       inline style and do nothing, so this rule intentionally leaves height
+       unset rather than imply it's what's in control. What genuinely IS
+       still this rule's job: safe-area padding (explicit rather than folded
+       into the flat 24px, so a notch/Dynamic Island or the home-indicator
+       area doesn't eat into the same budget the centering math uses) and
+       overflow-y:auto as a backstop for a genuinely short viewport (small
+       phone + a big system font size) where content is taller than the
+       screen even once sized correctly — scrolling beats clipping the
+       keypad off unreachably.
+    */
     padding-top:calc(24px + env(safe-area-inset-top, 0px));
     padding-bottom:calc(24px + env(safe-area-inset-bottom, 0px));
     overflow-y:auto;
@@ -4229,6 +4227,29 @@
     window.visualViewport.addEventListener('resize', syncViewportSize);
     window.visualViewport.addEventListener('scroll', syncViewportSize);
     syncViewportSize();
+    // The lock screen is very often the very first thing painted (cold
+    // launch of the installed PWA) — this is the one screen where a
+    // too-small FIRST reading of visualViewport.height (iOS occasionally
+    // hasn't finished settling the standalone status-bar/chrome layout by
+    // the moment this script runs) never gets corrected afterward, because
+    // nothing here ever triggers a visualViewport 'resize' to re-fire
+    // syncViewportSize(): there's no real <input> to focus (the PIN pad is
+    // custom-drawn), so the keyboard — the normal trigger for this event —
+    // never appears. #app doesn't show this because its content stretches
+    // to fill whatever height it's given (flex:1 on .shell); #lock's
+    // content is centered, so a short initial reading shows up as visible
+    // dead space instead of being silently absorbed. Re-running the same
+    // sync a few times over the first second (cheap, idempotent, a no-op
+    // once the value stops changing) self-corrects a bad first read without
+    // needing a real interaction to shake it loose.
+    [50, 150, 300, 600, 1000].forEach((ms) => setTimeout(syncViewportSize, ms));
+    // Also covers the PWA being resumed from the background (iOS fires
+    // 'pageshow' with persisted:true rather than a fresh script load in
+    // that case, so the one-time listeners above never run again on their
+    // own) and an orientation flip, both moments the same stale-reading risk
+    // applies.
+    window.addEventListener('pageshow', syncViewportSize);
+    window.addEventListener('orientationchange', () => setTimeout(syncViewportSize, 200));
   }
 
   let mode = state.pin ? 'enter' : 'create';
@@ -10600,18 +10621,18 @@
         <div class="settings-row" style="align-items:flex-start; flex-direction:column; gap:4px;">
           <div style="display:flex; justify-content:space-between; width:100%; align-items:center; gap:8px;">
             <span style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${icon} ${escapeHtml(d.label)}${isCurrent ? ' <span style="color:var(--text-mid); font-size:12px;">(this device)</span>' : ''}</span>
-            <span style="flex-shrink:0; white-space:nowrap; font-size:11px; font-weight:700; color:${badge.color}; border:1px solid ${badge.color}; border-radius:20px; padding:2px 8px;">${badge.label}</span>
+            <span style="flex-shrink:0; white-space:nowrap; font-size:11px; font-weight:700; color:${badge.color}; border:1px solid ${badge.color}; border-radius:6px; padding:2px 8px;">${badge.label}</span>
           </div>
           <span class="hint" style="margin:0;">${detailBits ? detailBits + ' · ' : ''}${escapeHtml(deviceLocationLine(d))}</span>
           <span class="hint" style="margin:0;">Active ${formatLastSeen(d.lastSeenAt)} · ${d.sessionCount ?? 0} session${(d.sessionCount ?? 0) === 1 ? '' : 's'} · Risk <span style="color:${riskColor(d.riskScore ?? 0)}; font-weight:700;">${d.riskScore ?? 0}</span>${d.expiresAt ? ` · expires ${new Date(d.expiresAt).toLocaleString()}` : ''}${d.oneTimeUse ? ' · one-time' : ''}</span>
           ${isCurrent ? '' : `
             <span style="display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;">
-              <span class="btn" style="padding:4px 10px; font-size:12px;" data-resync-device="${escapeHtml(d.id)}">Re-sync keys</span>
+              <span class="btn" style="padding:4px 10px; font-size:12px; border-radius:8px;" data-resync-device="${escapeHtml(d.id)}">Re-sync keys</span>
               ${revoked ? '' : `
-                <span class="btn" style="padding:4px 10px; font-size:12px;" data-lost-device="${escapeHtml(d.id)}">Mark lost</span>
-                <span class="btn" style="padding:4px 10px; font-size:12px; color:#ff6a6a;" data-compromised-device="${escapeHtml(d.id)}">Mark compromised</span>
+                <span class="btn" style="padding:4px 10px; font-size:12px; border-radius:8px;" data-lost-device="${escapeHtml(d.id)}">Mark lost</span>
+                <span class="btn" style="padding:4px 10px; font-size:12px; border-radius:8px; color:#ff6a6a;" data-compromised-device="${escapeHtml(d.id)}">Mark compromised</span>
               `}
-              <span class="btn" style="padding:4px 10px; font-size:12px;" data-logout-device="${escapeHtml(d.id)}">${revoked ? 'Remove' : 'Revoke / log out'}</span>
+              <span class="btn" style="padding:4px 10px; font-size:12px; border-radius:8px;" data-logout-device="${escapeHtml(d.id)}">${revoked ? 'Remove' : 'Revoke / log out'}</span>
             </span>
           `}
         </div>
@@ -10677,12 +10698,12 @@
       <div class="settings-row" style="align-items:flex-start; flex-direction:column; gap:4px; border-color:rgba(255,209,102,0.4);">
         <div style="display:flex; justify-content:space-between; width:100%; align-items:center; gap:8px;">
           <span style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${PLATFORM_ICON[d.platform] || PLATFORM_ICON.other} ${escapeHtml(d.label)}</span>
-          <span style="flex-shrink:0; white-space:nowrap; font-size:11px; font-weight:700; color:#ffd166; border:1px solid #ffd166; border-radius:20px; padding:2px 8px;">Unknown</span>
+          <span style="flex-shrink:0; white-space:nowrap; font-size:11px; font-weight:700; color:#ffd166; border:1px solid #ffd166; border-radius:6px; padding:2px 8px;">Unknown</span>
         </div>
         <span class="hint" style="margin:0;">${escapeHtml(deviceLocationLine(d))} · requested ${formatLastSeen(d.requestedAt)}</span>
         <span style="display:flex; gap:6px; margin-top:4px;">
-          <span class="btn" style="padding:4px 10px; font-size:12px;" onclick="openApproveDeviceFlow()">Enter code to approve</span>
-          <span class="btn" style="padding:4px 10px; font-size:12px; color:#ff6a6a;" data-reject-unknown="${escapeHtml(d.id)}">Reject</span>
+          <span class="btn" style="padding:4px 10px; font-size:12px; border-radius:8px;" onclick="openApproveDeviceFlow()">Enter code to approve</span>
+          <span class="btn" style="padding:4px 10px; font-size:12px; border-radius:8px; color:#ff6a6a;" data-reject-unknown="${escapeHtml(d.id)}">Reject</span>
         </span>
       </div>
     `).join('');
