@@ -14,14 +14,39 @@
 // class). Host is whoever the DO first saw join; if they leave, the
 // longest-present remaining participant is promoted automatically.
 //
-// Deliberate scope cuts vs. web, all workspace/AI features with no direct
-// mobile UI to attach to yet, or requiring native/ML capability this repo
-// doesn't have installed — not signaling-layer limitations (see
-// CALL_UI_REDESIGN.md for the full honest boundary):
-//  - No screen sharing capture (OS-level ReplayKit/MediaProjection wiring
-//    needed, a native-project change beyond an npm install; the SFU
-//    publish/pull signaling for an extra track already works generically
-//    and would carry a screen-share track the moment one exists).
+// Screen sharing (startScreenShare/stopScreenShare below): react-native-
+// webrtc genuinely ships mediaDevices.getDisplayMedia() + a
+// ScreenCapturePickerView native component on both platforms (verified by
+// reading the installed package's native modules directly, not assumed
+// from the JS API surface alone) — this is NOT the same "impossible without
+// ejecting" situation as background blur/captions below.
+//   - Android: works end-to-end after a normal `expo prebuild` + build —
+//     the library's own AndroidManifest.xml fragment already declares the
+//     foregroundServiceType="mediaProjection" service it needs, Gradle's
+//     manifest merger picks it up automatically, no manual native edit.
+//   - iOS: getDisplayMedia() will resolve a track that silently never
+//     produces any frames until a Broadcast Upload Extension exists — this
+//     genuinely can't be added by editing source files in this repo, it's
+//     a new Xcode target. Needed, concretely: (1) a Broadcast Upload
+//     Extension target with a SampleHandler that streams frames into an App
+//     Group-shared Unix socket (protocol implied by react-native-webrtc's
+//     ios/RCTWebRTC/SocketConnection.*), (2) an App Group entitlement
+//     shared by the app and the extension, (3) Info.plist keys
+//     RTCAppGroupIdentifier (the App Group ID) and RTCScreenSharingExtension
+//     (the extension's bundle ID) on the main app target. None of the
+//     installed config plugins (@config-plugins/react-native-webrtc) add
+//     any of this — confirmed by reading its source, it only wires up
+//     camera/mic Info.plist strings and bitcode. The client code below
+//     works identically on both platforms either way; only iOS needs that
+//     one-time Xcode addition before real frames actually flow.
+// The SFU publish/pull signaling itself needed ZERO backend changes — it
+// was already fully generic (worker.js's MeetingRoom DO literally has "mic,
+// camera, screen-share, ..." in its own comment for the 'publish' message
+// type), a screen track is just another trackName/kind pair to it.
+//
+// Other deliberate scope cuts vs. web, all workspace/AI features with no
+// direct mobile UI to attach to yet, or requiring native/ML capability this
+// repo doesn't have installed:
 //  - No background blur/replacement (needs a real-time ML segmentation
 //    dependency, none installed).
 //  - No live captions/transcription (needs an on-device or streaming STT
@@ -64,6 +89,12 @@ export interface MeetingParticipant {
   name: string;
   avatarUrl: string | null;
   videoStream: MediaStream | null;
+  // Separate from videoStream on purpose — a participant can be sharing
+  // their screen AND have their camera on at the same time (the trackName
+  // convention keeps them as two independent tracks, 'video-'+userId vs
+  // 'screen-'+userId), the UI needs to tell them apart to show the screen
+  // share prominently instead of just replacing the camera tile.
+  screenStream: MediaStream | null;
   hasAudio: boolean;
 }
 
@@ -100,6 +131,11 @@ let meetingWs: WebSocket | null = null;
 let meetingPc: RTCPeerConnection | null = null;
 let meetingSfuSessionId: string | null = null;
 let meetingLocalStreamRef: MediaStream | null = null;
+// The local getDisplayMedia() capture track, kept module-level (not in
+// Zustand state, same reasoning as meetingPc/meetingWs above) so both the
+// native 'ended' listener and stopScreenShare() can find and stop the exact
+// same track instance without round-tripping through React state.
+let meetingScreenTrack: MediaStreamTrack | null = null;
 let midToTrack: Record<string, { userId: string; kind: string }> = {};
 let pulledTracks = new Set<string>();
 let wsPingInterval: ReturnType<typeof setInterval> | null = null;
@@ -158,6 +194,13 @@ interface MeetingState {
   networkQuality: NetworkQuality;
   localAudioLevel: number | null;
   muteAllRequestedAt: number | null; // bumped on receipt, UI shows a one-shot toast then clears it
+  // Real getDisplayMedia()-backed screen share, see this file's header
+  // comment for the honest Android-works/iOS-needs-one-Xcode-target
+  // breakdown. isScreenSharing/screenShareStream are LOCAL (this device);
+  // remote participants' shares show up as MeetingParticipant.screenStream.
+  isScreenSharing: boolean;
+  screenShareStream: MediaStream | null;
+  screenShareError: string | null;
 
   startMeeting: (meetingName: string, orgId: string | null, inviteUserIds: string[]) => Promise<void>;
   handleMeetingInvite: (signal: MeetingInviteSignal) => void;
@@ -177,6 +220,9 @@ interface MeetingState {
   sendReaction: (emoji: string) => void;
   setPinnedUserId: (userId: string | null) => void;
   clearMuteAllToast: () => void;
+  startScreenShare: () => Promise<void>;
+  stopScreenShare: () => void;
+  dismissScreenShareError: () => void;
 }
 
 export const useMeetingStore = create<MeetingState>((set, get) => {
@@ -210,21 +256,37 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
       meetingLocalStreamRef.getTracks().forEach((t: MediaStreamTrack) => t.stop());
       meetingLocalStreamRef = null;
     }
+    if (meetingScreenTrack) {
+      try {
+        meetingScreenTrack.stop();
+      } catch {
+        // already stopped
+      }
+      meetingScreenTrack = null;
+    }
     meetingSfuSessionId = null;
     midToTrack = {};
     pulledTracks = new Set();
     negotiationQueue = Promise.resolve();
   }
 
-  function attachTrack(userId: string, name: string, avatarUrl: string | null, track: MediaStreamTrack, stream: MediaStream) {
+  // `signalKind` is OUR own publish-time label ('audio'/'video'/'screen',
+  // see midToTrack — carried through from pullTrack's server-provided
+  // `kind`), NOT the native MediaStreamTrack.kind, which is only ever
+  // 'audio'/'video' at the WebRTC level and can't tell a screen-share video
+  // track apart from a camera one — that distinction only exists in this
+  // app's own signaling, so routing has to key off signalKind, not
+  // track.kind, or a screen share would just overwrite the camera tile.
+  function attachTrack(userId: string, name: string, avatarUrl: string | null, track: MediaStreamTrack, stream: MediaStream, signalKind: string) {
     set((s) => {
-      const existing = s.participants[userId] || { userId, name, avatarUrl, videoStream: null, hasAudio: false };
+      const existing = s.participants[userId] || { userId, name, avatarUrl, videoStream: null, screenStream: null, hasAudio: false };
       const next = {
         ...existing,
         name: name || existing.name,
         avatarUrl: avatarUrl ?? existing.avatarUrl,
-        videoStream: track.kind === 'video' ? stream : existing.videoStream,
-        hasAudio: track.kind === 'audio' ? true : existing.hasAudio,
+        videoStream: signalKind === 'video' ? stream : existing.videoStream,
+        screenStream: signalKind === 'screen' ? stream : existing.screenStream,
+        hasAudio: signalKind === 'audio' ? true : existing.hasAudio,
       };
       return { participants: { ...s.participants, [userId]: next } };
     });
@@ -332,6 +394,56 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
     });
   }
 
+  // Renegotiates to publish ONLY the just-added screen transceiver —
+  // deliberately separate from publishLocalTracks (which re-sends every
+  // transceiver with a live sender.track) because that function derives
+  // trackName purely from track.kind ('video'/'audio'), which can't tell a
+  // screen-share video track apart from the camera's; reusing it here would
+  // both mis-name the screen track 'video-'+userId (colliding with the
+  // already-published camera track) and needlessly re-POST tracks/new for
+  // tracks the SFU already has. Errors are absorbed into screenShareError
+  // state rather than thrown — enqueue()'s own .catch already swallows
+  // rejections, so a caller awaiting this can never observe a throw.
+  function publishScreenTrack(mid: string | null) {
+    return enqueue(async () => {
+      if (!meetingPc || !meetingSfuSessionId || !mid) {
+        set({ screenShareError: 'Could not start screen sharing.', isScreenSharing: false, screenShareStream: null });
+        return;
+      }
+      const myUserId = useSessionStore.getState().userId || '';
+      const trackName = 'screen-' + myUserId;
+      const offer = await meetingPc.createOffer(undefined);
+      await meetingPc.setLocalDescription(offer);
+      const publishOnce = () =>
+        sfuFetch(`sessions/${meetingSfuSessionId}/tracks/new`, {
+          method: 'POST',
+          body: JSON.stringify({
+            sessionDescription: { type: offer.type, sdp: offer.sdp },
+            tracks: [{ location: 'local', mid, trackName }],
+          }),
+        });
+      let r = await publishOnce();
+      if (!r.ok || !r.body || !r.body.sessionDescription) {
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        r = await publishOnce();
+      }
+      if (!r.ok || !r.body || !r.body.sessionDescription) {
+        if (meetingScreenTrack) {
+          try {
+            meetingScreenTrack.stop();
+          } catch {
+            // already stopped
+          }
+          meetingScreenTrack = null;
+        }
+        set({ screenShareError: 'Could not start screen sharing — try again.', isScreenSharing: false, screenShareStream: null });
+        return;
+      }
+      await meetingPc.setRemoteDescription(r.body.sessionDescription as any);
+      wsSend({ type: 'publish', trackName, kind: 'screen' });
+    });
+  }
+
   function wsSend(payload: unknown) {
     if (meetingWs && meetingWs.readyState === WebSocket.OPEN) meetingWs.send(JSON.stringify(payload));
   }
@@ -412,7 +524,7 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
         set((s) => ({
           participants: {
             ...s.participants,
-            [p.userId]: s.participants[p.userId] || { userId: p.userId, name: p.name, avatarUrl: p.avatarUrl || null, videoStream: null, hasAudio: false },
+            [p.userId]: s.participants[p.userId] || { userId: p.userId, name: p.name, avatarUrl: p.avatarUrl || null, videoStream: null, screenStream: null, hasAudio: false },
           },
         }));
         (p.tracks || []).forEach((t: any) => pullTrack(p.userId, p.name, p.avatarUrl || null, p.sfuSessionId, t.trackName, t.kind));
@@ -468,7 +580,7 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
       set((s) => ({
         participants: {
           ...s.participants,
-          [data.userId]: s.participants[data.userId] || { userId: data.userId, name: data.name, avatarUrl: data.avatarUrl || null, videoStream: null, hasAudio: false },
+          [data.userId]: s.participants[data.userId] || { userId: data.userId, name: data.name, avatarUrl: data.avatarUrl || null, videoStream: null, screenStream: null, hasAudio: false },
         },
       }));
       return;
@@ -497,6 +609,7 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
       if (data.trackName) pulledTracks.delete(data.userId + '|' + data.trackName);
       const isVideo = typeof data.trackName === 'string' && data.trackName.startsWith('video-');
       const isAudio = typeof data.trackName === 'string' && data.trackName.startsWith('audio-');
+      const isScreen = typeof data.trackName === 'string' && data.trackName.startsWith('screen-');
       set((s) => {
         const existing = s.participants[data.userId];
         if (!existing) return s;
@@ -506,6 +619,7 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
             [data.userId]: {
               ...existing,
               videoStream: isVideo ? null : existing.videoStream,
+              screenStream: isScreen ? null : existing.screenStream,
               hasAudio: isAudio ? false : existing.hasAudio,
             },
           },
@@ -629,6 +743,9 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
       networkQuality: 'unknown',
       localAudioLevel: null,
       muteAllRequestedAt: null,
+      isScreenSharing: false,
+      screenShareStream: null,
+      screenShareError: null,
     });
 
     let stream: MediaStream;
@@ -649,7 +766,7 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
       const mid = ev.transceiver && ev.transceiver.mid;
       const info = mid != null ? (midToTrack as any)[mid] : null;
       if (!info) return;
-      attachTrack(info.userId, info.name || 'Someone', info.avatarUrl ?? null, ev.track, ev.streams[0]);
+      attachTrack(info.userId, info.name || 'Someone', info.avatarUrl ?? null, ev.track, ev.streams[0], info.kind);
     });
     meetingPc = pc;
 
@@ -678,6 +795,9 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
     networkQuality: 'unknown',
     localAudioLevel: null,
     muteAllRequestedAt: null,
+    isScreenSharing: false,
+    screenShareStream: null,
+    screenShareError: null,
 
     startMeeting: async (meetingName, orgId, inviteUserIds) => {
       const id = globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : String(Date.now()) + Math.random();
@@ -735,6 +855,9 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
         networkQuality: 'unknown',
         localAudioLevel: null,
         muteAllRequestedAt: null,
+        isScreenSharing: false,
+        screenShareStream: null,
+        screenShareError: null,
       });
     },
 
@@ -766,6 +889,85 @@ export const useMeetingStore = create<MeetingState>((set, get) => {
     },
 
     dismissError: () => set({ errorMessage: null }),
+
+    startScreenShare: async () => {
+      if (get().isScreenSharing || !meetingPc) return;
+      set({ screenShareError: null });
+      let stream: MediaStream;
+      try {
+        // No constraints object needed — unlike getUserMedia, getDisplayMedia
+        // always goes through the OS's own picker (Control Center broadcast
+        // sheet on iOS, the system share-a-screen dialog on Android), which
+        // is where the person actually chooses what gets captured.
+        stream = (await mediaDevices.getDisplayMedia({})) as unknown as MediaStream;
+      } catch {
+        // Person cancelled the OS picker or refused permission — not a real
+        // error worth surfacing as a banner, same as declining a camera
+        // prompt elsewhere in this store.
+        return;
+      }
+      const track = stream.getVideoTracks()[0];
+      if (!track) {
+        stream.getTracks().forEach((t: MediaStreamTrack) => t.stop());
+        set({ screenShareError: 'Screen sharing is not available on this device.' });
+        return;
+      }
+      meetingScreenTrack = track;
+      // Fires when the person stops sharing from the OS's own control (iOS
+      // Control Center "Stop Broadcast", Android's persistent share
+      // notification) instead of this app's own button — the same native
+      // event both platforms' capture surfaces raise through
+      // react-native-webrtc, so one listener covers both stop paths.
+      // Cast to `any`: react-native-webrtc's published MediaStreamTrack.d.ts
+      // imports its EventTarget base from a relative './vendor/event-target-
+      // shim' path that only exists in the package's own src/ tree, not in
+      // the shipped lib/typescript/ output (confirmed by checking
+      // node_modules directly) — a real gap in their published types, not a
+      // capability MediaStreamTrack actually lacks; it's a genuine
+      // EventTarget at runtime and 'ended' genuinely fires here.
+      (track as any).addEventListener('ended', () => {
+        if (meetingScreenTrack === track) get().stopScreenShare();
+      });
+      const sender = meetingPc.addTrack(track, stream);
+      const transceiver = meetingPc.getTransceivers().find((t) => t.sender === sender);
+      set({ isScreenSharing: true, screenShareStream: stream });
+      await publishScreenTrack(transceiver?.mid ?? null);
+    },
+
+    stopScreenShare: () => {
+      if (!get().isScreenSharing) return;
+      const myUserId = useSessionStore.getState().userId || '';
+      const track = meetingScreenTrack;
+      meetingScreenTrack = null;
+      // Best-effort: pull the track off its sender immediately so the SFU
+      // stops getting frames right away, rather than waiting on the stopped
+      // track to time out server-side. Deliberately not renegotiated away
+      // (same minimalism as toggleCamera above, which also never removes
+      // the transceiver) — the 'unpublish' signal below is what actually
+      // tells other participants to clear the tile; a dead sender left in
+      // the SDP is harmless.
+      if (meetingPc && track) {
+        const sender = meetingPc.getSenders().find((s: any) => s.track === track);
+        if (sender) {
+          try {
+            sender.replaceTrack(null);
+          } catch {
+            // sender already gone (peer connection torn down mid-call)
+          }
+        }
+      }
+      if (track) {
+        try {
+          track.stop();
+        } catch {
+          // already stopped (e.g. this ran from the track's own 'ended' event)
+        }
+      }
+      wsSend({ type: 'unpublish', trackName: 'screen-' + myUserId });
+      set({ isScreenSharing: false, screenShareStream: null });
+    },
+
+    dismissScreenShareError: () => set({ screenShareError: null }),
 
     // ---- host controls (server double-checks isHost on every one of
     // these too — see MeetingRoom's message handler — this is UX-speed,

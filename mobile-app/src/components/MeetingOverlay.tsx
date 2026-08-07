@@ -13,17 +13,38 @@
 //    associates a given report back to a specific participant reliably
 //    enough to highlight them with confidence, so no tile gets a fake
 //    "speaking now" ring.
-//  - Screen sharing, background blur/replacement, live captions/
-//    transcription, real-time recording capture: none of the underlying
-//    capture/ML/STT pieces exist on mobile yet (screen-share signaling
-//    itself already works generically server-side, see worker.js's
-//    MeetingRoom — only the OS-level capture API is missing).
+//  - Background blur/replacement, live captions/transcription, real-time
+//    recording capture: none of the underlying ML/STT capture pieces exist
+//    on mobile yet.
 //  - Noise suppression / bandwidth adaptation beyond whatever Cloudflare
 //    Calls and libwebrtc already do automatically under the hood.
+//
+// Screen sharing (below, wired to state/meeting.ts's startScreenShare/
+// stopScreenShare) IS real capture, not a stub — see meeting.ts's own
+// header for the full Android-works/iOS-needs-one-Xcode-target breakdown.
+// The one piece that lives here rather than in the store: on iOS,
+// react-native-webrtc's getDisplayMedia() alone never starts real capture —
+// it just creates a track that waits on frames from a Broadcast Upload
+// Extension, and that extension only starts once the OS's own
+// RPSystemBroadcastPickerView is tapped. ScreenCapturePickerView (rendered
+// invisibly below) is that native picker; handleShareScreen simulates the
+// tap on it via its exported `show` command before calling startScreenShare.
+// On Android this whole dance is a no-op — the picker component simply
+// isn't rendered there, and getDisplayMedia() goes straight to the OS's
+// MediaProjection permission dialog on its own.
 
 import { useEffect, useRef, useState } from 'react';
-import { View, Text, Pressable, StyleSheet, Modal, Alert, ScrollView, Animated, Easing, AccessibilityInfo } from 'react-native';
-import { RTCView } from 'react-native-webrtc';
+import { View, Text, Pressable, StyleSheet, Modal, Alert, ScrollView, Animated, Easing, AccessibilityInfo, Platform, NativeModules, findNodeHandle } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { RTCView, ScreenCapturePickerView as RawScreenCapturePickerView } from 'react-native-webrtc';
+
+// react-native-webrtc's published ScreenCapturePickerView.d.ts types the
+// native component as `HostComponent<unknown>` (confirmed by checking
+// node_modules directly — its props were never typed at all, not just
+// loosely), so `style`/`ref` don't type-check even though the underlying
+// native view genuinely accepts both. Cast once here rather than sprinkling
+// `as any` at the JSX call site below.
+const ScreenCapturePickerView = RawScreenCapturePickerView as any;
 import { BlurView } from 'expo-blur';
 import { useMeetingStore, type MeetingParticipant, type WaitingParticipant } from '../state/meeting';
 import { initials, colorFromString } from '../utils/avatar';
@@ -287,6 +308,9 @@ function TileActionSheet({
 // tab is currently open. Component name/default-export/no-props shape is
 // unchanged from before this redesign, so the mount point needed no edits.
 export default function MeetingOverlay() {
+  // Same reasoning as CallOverlay's insets usage — real per-device safe-area
+  // values instead of a fixed paddingVertical guess.
+  const insets = useSafeAreaInsets();
   const status = useMeetingStore((s) => s.status);
   const meetingName = useMeetingStore((s) => s.meetingName);
   const participants = useMeetingStore((s) => s.participants);
@@ -319,15 +343,47 @@ export default function MeetingOverlay() {
   const sendReaction = useMeetingStore((s) => s.sendReaction);
   const setPinnedUserId = useMeetingStore((s) => s.setPinnedUserId);
   const clearMuteAllToast = useMeetingStore((s) => s.clearMuteAllToast);
+  const isScreenSharing = useMeetingStore((s) => s.isScreenSharing);
+  const screenShareStream = useMeetingStore((s) => s.screenShareStream);
+  const screenShareError = useMeetingStore((s) => s.screenShareError);
+  const startScreenShare = useMeetingStore((s) => s.startScreenShare);
+  const stopScreenShare = useMeetingStore((s) => s.stopScreenShare);
+  const dismissScreenShareError = useMeetingStore((s) => s.dismissScreenShareError);
 
   const [participantsSheetOpen, setParticipantsSheetOpen] = useState(false);
   const [reactionPickerOpen, setReactionPickerOpen] = useState(false);
   const [tileActionFor, setTileActionFor] = useState<{ userId: string; name: string } | null>(null);
   const [recordNoticeOpen, setRecordNoticeOpen] = useState(false);
+  // Ref to the invisible native picker view (iOS only — see this file's
+  // header comment for why getDisplayMedia() alone isn't enough there).
+  const screenPickerRef = useRef<any>(null);
 
   useEffect(() => {
     if (errorMessage) Alert.alert('Meeting problem', errorMessage, [{ text: 'OK', onPress: dismissError }]);
   }, [errorMessage, dismissError]);
+
+  useEffect(() => {
+    if (screenShareError) Alert.alert('Screen sharing', screenShareError, [{ text: 'OK', onPress: dismissScreenShareError }]);
+  }, [screenShareError, dismissScreenShareError]);
+
+  async function handleShareScreen() {
+    if (isScreenSharing) {
+      stopScreenShare();
+      return;
+    }
+    if (Platform.OS === 'ios' && screenPickerRef.current) {
+      try {
+        const reactTag = findNodeHandle(screenPickerRef.current);
+        if (reactTag != null) NativeModules.ScreenCapturePickerViewManager?.show(reactTag);
+      } catch {
+        // Best-effort — if the native module isn't there (e.g. this build
+        // predates the config plugin picking it up), startScreenShare()
+        // below still runs and simply won't get real frames on iOS, which
+        // is the same honest failure mode described in the header comment.
+      }
+    }
+    await startScreenShare();
+  }
 
   useEffect(() => {
     if (!muteAllRequestedAt) return;
@@ -342,7 +398,7 @@ export default function MeetingOverlay() {
   if (pendingInvite && status === 'idle') {
     return (
       <Modal visible animationType="slide" presentationStyle="fullScreen" statusBarTranslucent>
-        <View style={[styles.container, styles.centered]}>
+        <View style={[styles.container, styles.centered, { paddingTop: insets.top + 20, paddingBottom: insets.bottom + 20 }]}>
           <AnimatedAvatar name={pendingInvite.fromName} userId={pendingInvite.fromUserId} size={112} breathing />
           <Text style={[styles.name, { marginTop: 16 }]}>{pendingInvite.meetingName || 'Group meeting'}</Text>
           <Text style={styles.subText}>{pendingInvite.fromName} is inviting you</Text>
@@ -369,7 +425,7 @@ export default function MeetingOverlay() {
   if (status === 'waiting-for-host') {
     return (
       <Modal visible animationType="slide" presentationStyle="fullScreen" statusBarTranslucent>
-        <View style={[styles.container, styles.centered]}>
+        <View style={[styles.container, styles.centered, { paddingTop: insets.top + 20, paddingBottom: insets.bottom + 20 }]}>
           <AnimatedAvatar name={meetingName || 'Meeting'} userId={meetingName || 'meeting'} size={100} breathing />
           <Text style={[styles.name, { marginTop: 16 }]}>Waiting to be let in</Text>
           <Text style={styles.subText}>The host will let you into {meetingName || 'the meeting'} shortly.</Text>
@@ -390,9 +446,33 @@ export default function MeetingOverlay() {
   const filmstripList = heroActive ? (pinnedIsSelf ? remoteList : [{ userId: 'me', name: 'You' } as any, ...remoteList.filter((p) => p.userId !== pinnedUserId)]) : [];
   const gridColumns = remoteList.length === 0 ? 1 : remoteList.length === 1 ? 2 : 2;
 
+  // Whoever is currently sharing their screen (at most one at a time, same
+  // as every mainstream meeting app — the SFU/UI don't stop a second person
+  // from publishing a screen track, but nothing here surfaces more than one
+  // as a hero, so a second concurrent share would just not get a spotlight).
+  // Local takes priority in the rare case both happen to flip true the same
+  // tick (e.g. right at a reconnect).
+  const remoteScreenSharer = remoteList.find((p) => p.screenStream);
+  const activeScreenShare = isScreenSharing && screenShareStream
+    ? { ownerId: 'me', label: 'Your screen', streamURL: screenShareStream.toURL() }
+    : remoteScreenSharer
+    ? { ownerId: remoteScreenSharer.userId, label: `${remoteScreenSharer.name || 'Someone'}'s screen`, streamURL: remoteScreenSharer.screenStream!.toURL() }
+    : null;
+  const screenShareFilmstripList = activeScreenShare ? [{ userId: 'me', name: 'You' } as any, ...remoteList] : [];
+
   const primaryDock: DockItem[] = [
     { key: 'mute', icon: muted ? '🔇' : '🎤', label: muted ? 'Unmute' : 'Mute', active: muted, onPress: toggleMute, accessibilityHint: muted ? 'Turns your microphone back on' : 'Turns your microphone off' },
     { key: 'camera', icon: '🎥', label: cameraOff ? 'Start video' : 'Stop video', active: !cameraOff, onPress: toggleCamera, accessibilityHint: cameraOff ? 'Turns your camera back on' : 'Turns your camera off' },
+    {
+      key: 'screen',
+      icon: '🖥️',
+      label: isScreenSharing ? 'Stop sharing' : 'Share screen',
+      active: isScreenSharing,
+      danger: isScreenSharing,
+      disabled: !isScreenSharing && !!remoteScreenSharer,
+      onPress: handleShareScreen,
+      accessibilityHint: isScreenSharing ? 'Stops sharing your screen' : remoteScreenSharer ? `${remoteScreenSharer.name || 'Someone'} is already sharing` : 'Shares your screen with everyone in the meeting',
+    },
     { key: 'react', icon: '🙂', label: 'React', onPress: () => setReactionPickerOpen(true), accessibilityHint: 'Opens the reaction picker' },
     {
       key: 'participants',
@@ -410,7 +490,11 @@ export default function MeetingOverlay() {
 
   return (
     <Modal visible animationType="slide" presentationStyle="fullScreen" statusBarTranslucent>
-      <View style={styles.container}>
+      <View style={[styles.container, { paddingTop: insets.top + 12, paddingBottom: insets.bottom + 12 }]}>
+        {/* Invisible native picker — iOS only, see header comment. Renders
+            nothing visible (0x0, no touches) and Android doesn't ship this
+            native component at all, hence the platform gate. */}
+        {Platform.OS === 'ios' && <ScreenCapturePickerView ref={screenPickerRef} style={styles.hiddenPicker} />}
         <View style={styles.header}>
           <Text style={styles.name} numberOfLines={1}>{meetingName || 'Meeting'}</Text>
           <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', marginTop: 2 }}>
@@ -426,7 +510,49 @@ export default function MeetingOverlay() {
           </View>
         )}
 
-        {heroActive ? (
+        {activeScreenShare ? (
+          <View style={styles.heroWrap}>
+            <View style={[styles.tile, styles.screenShareTile]}>
+              <RTCView streamURL={activeScreenShare.streamURL} style={StyleSheet.absoluteFill} objectFit="contain" />
+              <View style={styles.tileFooter}>
+                <BlurView intensity={40} tint="dark" style={styles.tileNamePill}>
+                  <Text style={styles.tileHostIcon}>🖥️</Text>
+                  <Text style={styles.tileNameText} numberOfLines={1}>{activeScreenShare.label}</Text>
+                </BlurView>
+              </View>
+            </View>
+            <FloatingSelfPreview streamURL={!cameraOff && localStream ? localStream.toURL() : null} muted={muted} />
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filmstrip} contentContainerStyle={{ gap: 8, paddingHorizontal: 4 }}>
+              {screenShareFilmstripList.map((p: any) =>
+                p.userId === 'me' ? (
+                  <View key="me" style={styles.filmstripTile}>
+                    <ParticipantTile
+                      name="You"
+                      userId="me"
+                      videoStreamURL={!cameraOff && localStream ? localStream.toURL() : null}
+                      hasAudio={!muted}
+                      mirror
+                      isSelf
+                      isHost={isHost}
+                      audioLevel={localAudioLevel}
+                    />
+                  </View>
+                ) : (
+                  <View key={p.userId} style={styles.filmstripTile}>
+                    <ParticipantTile
+                      name={p.name || 'Someone'}
+                      userId={p.userId}
+                      videoStreamURL={p.videoStream ? p.videoStream.toURL() : null}
+                      hasAudio={p.hasAudio}
+                      isHost={p.userId === hostUserId}
+                      onLongPress={isHost ? () => setTileActionFor({ userId: p.userId, name: p.name || 'Someone' }) : undefined}
+                    />
+                  </View>
+                )
+              )}
+            </ScrollView>
+          </View>
+        ) : heroActive ? (
           <View style={styles.heroWrap}>
             {pinnedIsSelf ? (
               <ParticipantTile
@@ -594,7 +720,10 @@ export default function MeetingOverlay() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, paddingVertical: 50, backgroundColor: callColors.voidBottom },
+  // paddingTop/paddingBottom applied inline per-render from
+  // useSafeAreaInsets() (see the three call sites above) instead of a fixed
+  // guess — same reasoning as CallOverlay's container.
+  container: { flex: 1, backgroundColor: callColors.voidBottom },
   centered: { justifyContent: 'center', alignItems: 'center' },
   header: { alignItems: 'center', gap: 2, marginBottom: 10, paddingHorizontal: 16 },
   name: { fontSize: 18, fontWeight: '700', color: callColors.textHi },
@@ -603,6 +732,17 @@ const styles = StyleSheet.create({
   grid: { flexWrap: 'wrap', gap: '4%', paddingBottom: 20, paddingHorizontal: 12 },
   tileWrap: { aspectRatio: 3 / 4, marginBottom: 12 },
   tile: { flex: 1, borderRadius: 18, borderWidth: 1.5, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' },
+  // Screen share gets a plain dark backdrop (objectFit="contain" can letterbox
+  // a share that isn't the device's native aspect ratio) and the neutral
+  // border color rather than the ice "pinned" highlight — it's not something
+  // a person tapped to pin, it took over automatically.
+  screenShareTile: { backgroundColor: '#000', borderColor: callColors.glassBrd },
+  // Off-screen and untouchable — this view exists purely so its native
+  // handle can be passed to ScreenCapturePickerViewManager.show(), see
+  // handleShareScreen above. 0x0 rather than `display: none`, since RN
+  // sometimes skips mounting the underlying native view entirely for
+  // display:none, which would leave the ref null.
+  hiddenPicker: { width: 0, height: 0 },
   tileAvatarWrap: { alignItems: 'center', justifyContent: 'center' },
   tileFooter: { position: 'absolute', bottom: 8, left: 8, right: 8 },
   tileNamePill: {

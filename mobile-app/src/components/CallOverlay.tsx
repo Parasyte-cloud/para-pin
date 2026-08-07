@@ -30,6 +30,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { View, Text, Pressable, StyleSheet, Modal, Alert, Animated, Easing, PanResponder, Dimensions, AccessibilityInfo } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { RTCView } from 'react-native-webrtc';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -125,6 +126,13 @@ function AuroraBackdrop() {
 // before this redesign — the component name/default-export/no-props shape
 // is unchanged on purpose so swapping this file in was a drop-in replace.
 export default function CallOverlay() {
+  // Real per-device safe-area insets (notch, Dynamic Island, home
+  // indicator) rather than one fixed padding guess — the old design's
+  // paddingVertical:60 either wasted space on an SE or crowded the status
+  // bar/Dynamic Island on a Pro Max; this is the actual "100% responsive
+  // across screen sizes" fix, not a cosmetic one. SafeAreaProvider already
+  // wraps the whole app (see app/_layout.tsx), so this Just Works here.
+  const insets = useSafeAreaInsets();
   const callState = useCallStore((s) => s.callState);
   const peerName = useCallStore((s) => s.peerName);
   const peerId = useCallStore((s) => s.peerId);
@@ -258,7 +266,7 @@ export default function CallOverlay() {
 
   return (
     <Modal visible animationType="slide" presentationStyle="fullScreen" statusBarTranslucent>
-      <View style={styles.container}>
+      <View style={[styles.container, { paddingTop: insets.top + 20, paddingBottom: insets.bottom + 20 }]}>
         {hasRemoteVideo ? (
           <RTCView streamURL={remoteStream!.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" />
         ) : (
@@ -269,7 +277,7 @@ export default function CallOverlay() {
           <LocalPip streamURL={localStream.toURL()} borderColor={callColors.glassBrdHi} />
         )}
 
-        <View style={styles.badgeRow} pointerEvents="none">
+        <View style={[styles.badgeRow, { top: insets.top + 12 }]} pointerEvents="none">
           <GlassBadge label="Encrypted" icon="🔒" tone="ok" />
           {hasVideo && isHdRemote && <GlassBadge label="HD" tone="neutral" />}
           {callState === 'connected' && (
@@ -280,7 +288,7 @@ export default function CallOverlay() {
         </View>
 
         {isPoorConnection && (
-          <View style={styles.poorBanner} pointerEvents="none">
+          <View style={[styles.poorBanner, { top: insets.top + 48 }]} pointerEvents="none">
             <GlassBadge label="Poor connection" icon="⚠️" tone="warn" />
           </View>
         )}
@@ -359,11 +367,18 @@ function GlassBadgeButton({ icon, color, label, onPress, accessibilityHint }: { 
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, justifyContent: 'space-between', paddingVertical: 60, paddingHorizontal: 24, backgroundColor: callColors.voidBottom },
+  // paddingTop/paddingBottom deliberately NOT set here — applied inline
+  // per-render from useSafeAreaInsets() instead, so this same style works
+  // correctly on an SE (no notch), any notched iPhone, a Dynamic Island
+  // model, and Android's variable status/nav bar heights, rather than one
+  // fixed guess that was only ever right for whichever device it was
+  // designed against.
+  container: { flex: 1, justifyContent: 'space-between', paddingHorizontal: 24, backgroundColor: callColors.voidBottom },
   glowCircle: { position: 'absolute', width: 360, height: 360, borderRadius: 180 },
-  badgeRow: { position: 'absolute', top: 56, left: 0, right: 0, flexDirection: 'row', gap: 8, justifyContent: 'center', flexWrap: 'wrap' },
+  // `top` likewise applied inline (insets.top + a small gap) for the same reason.
+  badgeRow: { position: 'absolute', left: 0, right: 0, flexDirection: 'row', gap: 8, justifyContent: 'center', flexWrap: 'wrap' },
   qualityPill: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 7, overflow: 'hidden' },
-  poorBanner: { position: 'absolute', top: 92, left: 0, right: 0, alignItems: 'center' },
+  poorBanner: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
   header: { alignItems: 'center', gap: 10, marginTop: 40 },
   name: { fontSize: 23, fontWeight: '700', color: callColors.textHi },
   statusPill: { borderRadius: 999, paddingHorizontal: 14, paddingVertical: 5, overflow: 'hidden', marginTop: 2 },
