@@ -1754,6 +1754,50 @@ async function sendFcmPush(deviceToken, payloadObj, env) {
   }
 }
 
+// ================= Per-user notification preferences =================
+// Maps every `type` a /push-direct payload actually carries (grepped every
+// call site to build this list — see the comment on /push-direct) to a
+// gateable category, or to `null` for the handful that deliberately CANNOT
+// be muted. `unknown_login`/`suspicious_login`/`new_device` are the actual
+// security prompts (an unrecognized sign-in, a device asking to be
+// approved) — if an account is compromised, the attacker could otherwise
+// mute the exact alerts meant to catch them, which would make this feature
+// actively dangerous rather than a convenience. `administrator_action` is
+// similarly always-on: it's how someone finds out their own account was
+// just touched by an org admin (role change, removal, etc.), not something
+// that should be silenceable by whoever the notification is warning.
+// Anything not listed here (a type this file doesn't know about, or no type
+// at all — e.g. a real chat message) resolves to null too, i.e. always
+// delivered, matching today's behavior exactly for anything this feature
+// doesn't explicitly know how to gate.
+const NOTIFY_TYPE_TO_CATEGORY = {
+  unknown_login: null,
+  suspicious_login: null,
+  new_device: null,
+  administrator_action: null,
+  device_approved: 'deviceUpdates',
+  device_rejected: 'deviceUpdates',
+  avatar_screenshot: 'deviceUpdates',
+  birthday: 'birthdays',
+  crm_deal_won: 'crm',
+  crm_deal_lost: 'crm',
+  hr_leave_decided: 'hr',
+};
+function resolveNotifyCategory(type) {
+  return type && Object.prototype.hasOwnProperty.call(NOTIFY_TYPE_TO_CATEGORY, type) ? NOTIFY_TYPE_TO_CATEGORY[type] : null;
+}
+// Defaults are all `true` (nothing goes silent just from this feature
+// existing) — someone has to explicitly opt out of a category for anything
+// to change, matching how every notification in this app already behaved
+// before this existed.
+const NOTIFY_CATEGORY_DEFAULTS = { deviceUpdates: true, birthdays: true, crm: true, hr: true };
+const NOTIFY_CATEGORY_INFO = {
+  deviceUpdates: { label: 'Device confirmations', hint: 'A device you approved/rejected finished processing, or someone viewed a screenshot warning for your profile photo. The actual "approve this new device?" security prompt is never muted.' },
+  birthdays: { label: 'Birthday alerts', hint: "A teammate you manage or have HR access over has a birthday today." },
+  crm: { label: 'CRM updates', hint: 'A deal you own moved to Won or Lost.' },
+  hr: { label: 'HR updates', hint: 'A leave request you submitted was approved or denied.' },
+};
+
 // Sends one payload to EVERY registered target for a user — every Web Push
 // subscription (`pushSubs`, browsers/PWA) plus every native device token
 // (`deviceTokens`, mobile app) — and prunes only the ones a push service
@@ -1996,6 +2040,43 @@ async function sendAlertEmail(env, { subject, text }) {
 }
 function escapeHtmlEmail(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ================= Registry DO backup/export =================
+// Paginates the ENTIRE Registry DO keyspace (every user, org, roster entry,
+// billing record, CRM record — this DO is the only copy of all of it) into
+// fixed-size JSON chunks written to the existing MEDIA R2 bucket under
+// `backups/{timestamp}/`, plus a manifest. Module-scope (not a class method)
+// because both a public, admin-gated request (Registry's /admin/backup/run)
+// and the unauthenticated internal cron trigger (/internal/backup-run) need
+// to call it, and it doesn't touch `this` — just the storage/bucket handles
+// it's given.
+const BACKUP_CHUNK_KEYS = 1000;
+async function runRegistryBackup(storage, mediaBucket) {
+  const startedAt = Date.now();
+  const timestamp = new Date(startedAt).toISOString().replace(/[:.]/g, '-');
+  let cursor = '';
+  let chunkIndex = 0;
+  let totalKeys = 0;
+  for (;;) {
+    const batch = await storage.list({ start: cursor, limit: BACKUP_CHUNK_KEYS });
+    if (batch.size === 0) break;
+    const entries = {};
+    let lastKey = cursor;
+    for (const [k, v] of batch.entries()) { entries[k] = v; lastKey = k; }
+    await mediaBucket.put(`backups/${timestamp}/chunk-${chunkIndex}.json`, JSON.stringify(entries), {
+      httpMetadata: { contentType: 'application/json' },
+    });
+    totalKeys += batch.size;
+    chunkIndex += 1;
+    if (batch.size < BACKUP_CHUNK_KEYS) break;
+    cursor = lastKey + '\0'; // exclusive-start trick: next page starts right after lastKey
+  }
+  const manifest = { createdAt: startedAt, timestamp, chunkCount: chunkIndex, totalKeys, durationMs: Date.now() - startedAt };
+  await mediaBucket.put(`backups/${timestamp}/manifest.json`, JSON.stringify(manifest), {
+    httpMetadata: { contentType: 'application/json' },
+  });
+  return manifest;
 }
 
 // ================= Paystack (workspace admin billing) =================
@@ -2948,6 +3029,13 @@ export class Registry {
         }
         user.avatarMediaKey = avatarMediaKey;
         user.avatarMediaKeyUploadedAt = Date.now();
+        // This avatar (both its public and private R2 keys, minted together
+        // by /api/avatar/upload) is now actually referenced by a user
+        // record — clear the orphan-tracking entries so the sweep doesn't
+        // reclaim a photo that's genuinely in use.
+        const publicMediaMatch = typeof avatarUrl === 'string' && avatarUrl.match(/^\/api\/media\/([A-Za-z0-9_-]{1,100})$/);
+        const clearKeys = [avatarMediaKey, ...(publicMediaMatch ? [publicMediaMatch[1]] : [])];
+        for (const k of clearKeys) this.state.storage.delete(`pendingMedia:${k}`);
       } else if (avatarMediaKey === null) {
         user.avatarMediaKey = null;
         user.avatarMediaKeyUploadedAt = null;
@@ -5170,6 +5258,11 @@ export class Registry {
           title: 'PArA PIN',
           body: `Your ${reqRec.type === 'sick' ? 'sick' : 'annual'} leave request was ${reqRec.status}${reqRec.comment ? `: ${reqRec.comment}` : ''}`,
           chatId: null,
+          // Gateable via the 'hr' notification category (see
+          // NOTIFY_TYPE_TO_CATEGORY) — this push existed before that system
+          // did but never carried a type, so it was structurally impossible
+          // to mute independently of every other kind of alert.
+          type: 'hr_leave_decided',
         });
         try { await this.env.USER_CHANNEL.get(this.env.USER_CHANNEL.idFromName(reqRec.userId)).fetch('https://internal/push-direct', { method: 'POST', body: payload }); } catch (e) {}
       }
@@ -5502,6 +5595,36 @@ export class Registry {
           ? `Moved deal "${clean.title}" from ${existing.stage} to ${clean.stage}`
           : `Updated deal: ${clean.title}`,
       });
+      // Notify the rest of the CRM team the moment a deal actually lands on
+      // Won or Lost — only on the transition itself (wasClosed false, now
+      // true), not on every subsequent edit to an already-closed deal, and
+      // never to the person who just made the change themselves (they
+      // already know). Deals have no assignee/owner field yet (see
+      // crmSanitizeDeal), so this reaches everyone with manage_crm rather
+      // than one specific person — the natural target narrows automatically
+      // once ownership is added to the CRM data model. Gateable via the
+      // 'crm' notification category (see NOTIFY_TYPE_TO_CATEGORY);
+      // deliberately fire-and-forget, a notification failing here should
+      // never fail the deal update itself.
+      if (nowClosed && !wasClosed && this.env.USER_CHANNEL) {
+        const teamIds = (await this.state.storage.get(`orgMembers:${orgId}`)) || [];
+        const targets = [];
+        for (const mid of teamIds) {
+          if (mid === me.id) continue;
+          if (await hasOrgPermission(this.state.storage, orgId, mid, 'manage_crm')) targets.push(mid);
+        }
+        const payload = JSON.stringify({
+          title: 'PArA PIN',
+          body: clean.stage === 'won'
+            ? `🎉 Deal won: "${clean.title}"${clean.value ? ` (${clean.currency} ${clean.value.toLocaleString()})` : ''}`
+            : `Deal lost: "${clean.title}"`,
+          chatId: null,
+          type: clean.stage === 'won' ? 'crm_deal_won' : 'crm_deal_lost',
+        });
+        for (const targetId of targets) {
+          try { await this.env.USER_CHANNEL.get(this.env.USER_CHANNEL.idFromName(targetId)).fetch('https://internal/push-direct', { method: 'POST', body: payload }); } catch (e) {}
+        }
+      }
       return json({ deal });
     }
 
@@ -6228,6 +6351,103 @@ export class Registry {
       return json({ orgs });
     }
 
+    // ---- Full Registry DO backup / export / restore ----
+    // The Registry DO is the ONLY copy of every user, org, roster entry,
+    // billing record, and CRM record on the entire platform — there was no
+    // way to get any of it back out except reading it live through the API.
+    // A single storage-layer crash, a bad migration, or an operator mistake
+    // (e.g. a bug in some future admin bulk-edit tool) had no recovery path
+    // at all. This writes a full snapshot to the existing MEDIA R2 bucket
+    // (under a `backups/` prefix — reusing the bucket that's already
+    // provisioned rather than needing a new one) and offers a superset-safe
+    // restore (writes keys back, never deletes anything first) so a bad
+    // restore can't itself become a second data-loss event.
+    //
+    // Honest scope note: this runs inline in a single request/cron
+    // invocation. Fine at the platform's current size; if the keyspace ever
+    // grows large enough that one export can't finish inside a single
+    // invocation's wall-clock budget, this needs to become a cursor-based,
+    // resumable job (persist where it left off, continue on the next
+    // invocation) — the same real limitation flagged for the retention-purge
+    // cron in scheduled(), not something to solve blind here.
+    // (runRegistryBackup itself lives at module scope, below Registry —
+    // it doesn't touch `this`, and scheduled()'s weekly trigger needs to
+    // reach it too, via the /internal/backup-run route right below.)
+
+    if (request.method === 'POST' && url.pathname === '/admin/backup/run') {
+      const { requesterId } = await request.json().catch(() => ({}));
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      if (!this.env.MEDIA) return json({ error: 'media_not_configured' }, 501);
+      try {
+        const manifest = await runRegistryBackup(this.state.storage, this.env.MEDIA);
+        try { console.log('[backup]', JSON.stringify({ event: 'manual_run', ...manifest })); } catch (e) {}
+        return json({ ok: true, manifest });
+      } catch (e) {
+        return json({ error: 'backup_failed', message: String(e && e.message || e) }, 500);
+      }
+    }
+
+    // Internal-only trigger for scheduled()'s weekly automated backup — not
+    // exposed under /api/*, so it's unreachable from outside a Worker-to-DO
+    // fetch and deliberately skips the admins-list check that /admin/backup/run
+    // above requires (there's no "requesting user" for a cron job to check).
+    if (request.method === 'POST' && url.pathname === '/internal/backup-run') {
+      if (!this.env.MEDIA) return json({ error: 'media_not_configured' }, 501);
+      const manifest = await runRegistryBackup(this.state.storage, this.env.MEDIA);
+      return json({ ok: true, manifest });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/admin/backup/list') {
+      const requesterId = url.searchParams.get('requesterId');
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      if (!this.env.MEDIA) return json({ error: 'media_not_configured' }, 501);
+      const listed = await this.env.MEDIA.list({ prefix: 'backups/' });
+      const manifests = [];
+      for (const obj of listed.objects) {
+        if (obj.key.endsWith('/manifest.json')) {
+          try {
+            const body = await (await this.env.MEDIA.get(obj.key)).json();
+            manifests.push(body);
+          } catch (e) {}
+        }
+      }
+      manifests.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      return json({ backups: manifests.slice(0, 100) });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/admin/backup/restore') {
+      const { requesterId, timestamp } = await request.json().catch(() => ({}));
+      const admins = (await this.state.storage.get('admins')) || [];
+      if (!requesterId || !admins.includes(requesterId)) return json({ error: 'forbidden' }, 403);
+      if (!this.env.MEDIA) return json({ error: 'media_not_configured' }, 501);
+      if (!timestamp || !/^[A-Za-z0-9_-]+$/.test(timestamp)) return json({ error: 'invalid_timestamp' }, 400);
+      const manifestObj = await this.env.MEDIA.get(`backups/${timestamp}/manifest.json`);
+      if (!manifestObj) return json({ error: 'backup_not_found' }, 404);
+      const manifest = await manifestObj.json();
+      let restoredKeys = 0;
+      try {
+        for (let i = 0; i < manifest.chunkCount; i++) {
+          const chunkObj = await this.env.MEDIA.get(`backups/${timestamp}/chunk-${i}.json`);
+          if (!chunkObj) continue; // missing chunk: skip rather than abort the whole restore
+          const entries = await chunkObj.json();
+          // Superset-safe by design: this only ever WRITES keys present in
+          // the backup, it never deletes a key that exists now but wasn't
+          // in the backup. A restore can therefore only add/overwrite data,
+          // never wipe something created after the backup was taken — the
+          // worst case of a mistaken restore is stale values coming back,
+          // not a second data-loss event on top of whatever prompted it.
+          await this.state.storage.put(entries);
+          restoredKeys += Object.keys(entries).length;
+        }
+        try { console.log('[backup]', JSON.stringify({ event: 'restore', timestamp, restoredKeys })); } catch (e) {}
+        return json({ ok: true, restoredKeys, chunkCount: manifest.chunkCount });
+      } catch (e) {
+        return json({ error: 'restore_failed', message: String(e && e.message || e), restoredKeys }, 500);
+      }
+    }
+
     // Admin status is account-level (controls access to this Admin Console)
     // and is completely separate from who created a given group, creating
     // a group doesn't make you its "admin" in any special sense here; every
@@ -6706,6 +6926,50 @@ export class Registry {
     // many don't), and the existing HR Home "Celebrations" widget already
     // gives every member a passive, opt-in way to see upcoming birthdays
     // without anyone being pushed one they didn't ask for.
+    // ---- Orphaned R2 upload tracking ----
+    // /api/upload and /api/avatar/upload write to R2 immediately, before
+    // anything actually references the resulting key (a chat message isn't
+    // sent yet, a profile update hasn't landed yet). If the client aborts
+    // between "file is in R2" and "something points at it" — closed tab,
+    // crashed app, network drop, user just changes their mind — that object
+    // sits in the bucket forever with nothing to ever clean it up. These two
+    // endpoints let upload call sites mark a key as pending right after the
+    // R2 write, and clear it the moment whatever's supposed to reference the
+    // key actually does. The scheduled() sweep below reclaims anything still
+    // marked pending past a grace window, on the assumption it was abandoned.
+    if (request.method === 'POST' && url.pathname === '/internal/pending-media/mark') {
+      const { keys } = await request.json().catch(() => ({}));
+      if (Array.isArray(keys) && keys.length) {
+        const now = Date.now();
+        await Promise.all(keys.slice(0, 20).map((k) => this.state.storage.put(`pendingMedia:${String(k)}`, now)));
+      }
+      return json({ ok: true });
+    }
+    if (request.method === 'POST' && url.pathname === '/internal/pending-media/clear') {
+      const { keys } = await request.json().catch(() => ({}));
+      if (Array.isArray(keys) && keys.length) {
+        await Promise.all(keys.slice(0, 20).map((k) => this.state.storage.delete(`pendingMedia:${String(k)}`)));
+      }
+      return json({ ok: true });
+    }
+    // Returns pending keys older than `olderThanMs` (default 24h) for the
+    // scheduled() sweep to reclaim. Capped per call, same reasoning as the
+    // retention-purge/birthday-sweep batching elsewhere: bound the work any
+    // single invocation can be asked to do rather than trusting the caller.
+    if (request.method === 'GET' && url.pathname === '/internal/pending-media/expired') {
+      const olderThanMs = parseInt(url.searchParams.get('olderThanMs'), 10) || 24 * 60 * 60 * 1000;
+      const cutoff = Date.now() - olderThanMs;
+      const map = await this.state.storage.list({ prefix: 'pendingMedia:' });
+      const expired = [];
+      for (const [k, uploadedAt] of map.entries()) {
+        if (typeof uploadedAt === 'number' && uploadedAt < cutoff) {
+          expired.push(k.slice('pendingMedia:'.length));
+          if (expired.length >= 500) break;
+        }
+      }
+      return json({ keys: expired });
+    }
+
     if (request.method === 'POST' && url.pathname === '/internal/birthday-sweep') {
       const nowDate = new Date();
       const todayKey = nowDate.toISOString().slice(0, 10); // UTC calendar date — used both for the month/day match and the dedupe key
@@ -7145,9 +7409,51 @@ export class UserChannel {
       // point of a caller passing `type` at all, and the next feature that
       // wants to group/icon/deep-link by notification category would hit a
       // wall of always-undefined types for anything routed through here.
+      //
+      // Preference check: every /push-direct call from anywhere in the app
+      // (13 call sites as of this writing — device alerts, birthdays, CRM,
+      // HR, admin actions) funnels through this one handler before ever
+      // reaching pushToAllTargets, which makes this the one place that can
+      // enforce a user's notification preferences without threading a check
+      // through every individual call site by hand. See resolveNotifyCategory
+      // for which types are gateable at all — a handful of genuine security
+      // prompts (a new sign-in, a new device asking to be approved) are
+      // deliberately NOT gateable: letting a compromised or careless account
+      // mute the exact alert meant to catch that compromise defeats the
+      // point of sending it.
+      const category = resolveNotifyCategory(type);
+      if (category) {
+        const prefs = (await this.state.storage.get('notificationPrefs')) || {};
+        if (prefs[category] === false) {
+          return json({ delivered: 0, total: 0, skipped: 'muted', category });
+        }
+      }
       const payload = { title: title || 'PArA PIN', body: body || '', chatId: chatId || null, type: type || null };
       const result = await pushToAllTargets(this.state.storage, payload, this.env);
       return json(result);
+    }
+
+    // ---- Per-user notification preferences ----
+    // One flat record per user (not per-org — muting "birthday pings" is a
+    // personal preference regardless of which workspace triggered it), kept
+    // in this same UserChannel DO since it's already the single choke point
+    // every non-chat push passes through (see /push-direct above). Chat
+    // message notifications have their own, older, per-chat mute mechanism
+    // (see /notify-pref) and are deliberately NOT part of this — muting
+    // "deal won" pings shouldn't have anything to do with a specific
+    // conversation's mute state, they're not the same kind of setting.
+    if (request.method === 'GET' && url.pathname === '/notification-prefs') {
+      const prefs = (await this.state.storage.get('notificationPrefs')) || {};
+      return json({ prefs: { ...NOTIFY_CATEGORY_DEFAULTS, ...prefs }, categories: NOTIFY_CATEGORY_INFO });
+    }
+    if (request.method === 'POST' && url.pathname === '/notification-prefs') {
+      const body = await request.json().catch(() => ({}));
+      const prefs = (await this.state.storage.get('notificationPrefs')) || {};
+      for (const key of Object.keys(NOTIFY_CATEGORY_DEFAULTS)) {
+        if (typeof body[key] === 'boolean') prefs[key] = body[key];
+      }
+      await this.state.storage.put('notificationPrefs', prefs);
+      return json({ ok: true, prefs: { ...NOTIFY_CATEGORY_DEFAULTS, ...prefs } });
     }
 
     if (request.method === 'POST' && url.pathname === '/notify-pref') {
@@ -7365,6 +7671,26 @@ export class ChatRoom {
       await this.state.storage.put('messages', msgs);
 
       this.broadcast(JSON.stringify({ type: 'message', message: msg }), null);
+
+      // The attachment's R2 key is now genuinely referenced by a stored
+      // message — clear its orphan-tracking entry (set at upload time by
+      // POST /api/upload) so the sweep never reclaims it. Best-effort: this
+      // never blocks or fails the send itself.
+      if (hasAttachment && this.env.REGISTRY) {
+        const mediaMatch = msg.attachment.url.match(/^\/api\/media\/([A-Za-z0-9_-]{1,100})$/);
+        if (mediaMatch) {
+          // Not awaited and no ctx.waitUntil available in a Durable Object's
+          // fetch() (unlike a stateless Worker) — but a DO's own execution
+          // context stays alive while a promise it created is still
+          // pending, so this background call reliably completes without
+          // adding latency to the send itself.
+          const registryStub = this.env.REGISTRY.get(this.env.REGISTRY.idFromName('global-registry-v1'));
+          registryStub.fetch('https://internal/internal/pending-media/clear', {
+            method: 'POST',
+            body: JSON.stringify({ keys: [mediaMatch[1]] }),
+          }).catch(() => {});
+        }
+      }
       return json({ message: msg });
     }
 
@@ -8203,6 +8529,20 @@ export default {
           httpMetadata: { contentType },
           customMetadata: { fileName },
         });
+        // Marks this key as "uploaded but not yet attached to anything" so
+        // the retention-style sweep in scheduled() can reclaim it if the
+        // client never actually sends the chat message that references it
+        // (closed tab, aborted send, crashed app, etc.). Cleared the moment
+        // ChatRoom's POST /messages actually stores a message pointing at
+        // this key (see the clear-call there). Best-effort and fire-and-forget
+        // via waitUntil: a failure here just means the sweep has a slightly
+        // stale view of one upload, never blocks the upload itself.
+        ctx.waitUntil(
+          registryStub.fetch('https://internal/internal/pending-media/mark', {
+            method: 'POST',
+            body: JSON.stringify({ keys: [key] }),
+          }).catch(() => {})
+        );
         return json({ id: key, url: `/api/media/${key}`, name: fileName, size: buf.byteLength, mime: contentType });
       }
 
@@ -8268,6 +8608,17 @@ export default {
           env.MEDIA.put(publicKey, buf, { httpMetadata: { contentType }, customMetadata: { fileName: 'avatar' } }),
           env.MEDIA.put(privateKey, buf, { httpMetadata: { contentType }, customMetadata: { fileName: 'avatar', ownerId: who.userId } }),
         ]);
+        // Same orphan-tracking as /api/upload — a photo is uploaded here
+        // first, then applied via a separate POST /profile call. If that
+        // second call never happens (picker flow abandoned after upload),
+        // these two keys would otherwise sit in R2 forever. POST /profile
+        // clears both the moment avatarMediaKey is actually saved.
+        ctx.waitUntil(
+          registryStub.fetch('https://internal/internal/pending-media/mark', {
+            method: 'POST',
+            body: JSON.stringify({ keys: [publicKey, privateKey] }),
+          }).catch(() => {})
+        );
         return json({ url: `/api/media/${publicKey}`, mediaKey: privateKey, size: buf.byteLength, mime: contentType });
       }
 
@@ -8894,6 +9245,40 @@ export default {
         return registryStub.fetch(`https://internal/admin/orgs?requesterId=${encodeURIComponent(who.userId)}`);
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/admin/backup/run') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        return registryStub.fetch('https://internal/admin/backup/run', {
+          method: 'POST',
+          body: JSON.stringify({ requesterId: who.userId }),
+        });
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/admin/backup/list') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        return registryStub.fetch(`https://internal/admin/backup/list?requesterId=${encodeURIComponent(who.userId)}`);
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/admin/backup/restore') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const body = await request.json().catch(() => ({}));
+        return registryStub.fetch('https://internal/admin/backup/restore', {
+          method: 'POST',
+          body: JSON.stringify({ requesterId: who.userId, timestamp: body.timestamp }),
+        });
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/admin/reset-device') {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
@@ -8990,6 +9375,27 @@ export default {
           method: 'POST',
           body: JSON.stringify({ requesterId: who.userId, id: body.id }),
         });
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/notification-prefs') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const channelStub = env.USER_CHANNEL.get(env.USER_CHANNEL.idFromName(who.userId));
+        return channelStub.fetch('https://internal/notification-prefs');
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/notification-prefs') {
+        const pinHash = authHash(request, url);
+        if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
+        const whoRes = await registryStub.fetch(`https://internal/whoami?pinHash=${encodeURIComponent(pinHash)}`);
+        const who = await whoRes.json();
+        if (!who.ok) return json({ error: 'not_registered' }, 401);
+        const body = await request.text();
+        const channelStub = env.USER_CHANNEL.get(env.USER_CHANNEL.idFromName(who.userId));
+        return channelStub.fetch('https://internal/notification-prefs', { method: 'POST', body });
       }
 
       if (request.method === 'GET' && url.pathname === '/api/presence') {
@@ -10752,6 +11158,61 @@ export default {
         subject: 'Birthday sweep cron job crashed',
         text: `The daily birthday-notification job threw before completing: ${e && e.message ? e.message : String(e)}`,
       });
+    }
+
+    try {
+      // Reclaims R2 objects that /api/upload or /api/avatar/upload wrote
+      // but that nothing ever actually referenced (message never sent,
+      // avatar picker abandoned mid-flow) — see the /internal/pending-media/*
+      // endpoints on Registry for how a key gets marked and cleared. Only
+      // keys still pending past the grace window are treated as abandoned;
+      // anything cleared in time (the normal case) never shows up here.
+      if (env.MEDIA) {
+        const expRes = await registryStub.fetch('https://internal/internal/pending-media/expired?olderThanMs=' + (24 * 60 * 60 * 1000));
+        const { keys } = await expRes.json().catch(() => ({ keys: [] }));
+        const toReclaim = keys || [];
+        const CHUNK = 20;
+        let reclaimed = 0, failed = 0;
+        for (let i = 0; i < toReclaim.length; i += CHUNK) {
+          const chunk = toReclaim.slice(i, i + CHUNK);
+          const results = await Promise.allSettled(chunk.map((key) => env.MEDIA.delete(key)));
+          for (const r of results) { if (r.status === 'fulfilled') reclaimed++; else failed++; }
+          // Clear the index entries regardless of individual R2-delete
+          // outcome — a failed delete just means the object stays in R2 to
+          // be picked up (and retried) by tomorrow's sweep instead of
+          // leaking an index entry that no longer matches reality.
+          await registryStub.fetch('https://internal/internal/pending-media/clear', {
+            method: 'POST',
+            body: JSON.stringify({ keys: chunk }),
+          }).catch(() => {});
+        }
+        const summary = { job: 'orphaned_media_sweep', total: toReclaim.length, reclaimed, failed, durationMs: Date.now() - startedAt };
+        try { console.log('[cron]', JSON.stringify(summary)); } catch (e) {}
+      }
+    } catch (e) {
+      await sendAlertEmail(env, {
+        subject: 'Orphaned media sweep cron job crashed',
+        text: `The daily orphaned-upload cleanup job threw before completing: ${e && e.message ? e.message : String(e)}`,
+      });
+    }
+
+    // Weekly full Registry backup — only one cron trigger exists for this
+    // Worker (daily, see wrangler.jsonc), so "weekly" is implemented as a
+    // day-of-week gate inside the daily invocation rather than needing a
+    // second cron trigger and a redeploy just for this. Runs Sundays (UTC).
+    if (new Date(startedAt).getUTCDay() === 0) {
+      try {
+        if (env.MEDIA) {
+          const backupRes = await registryStub.fetch('https://internal/internal/backup-run', { method: 'POST' });
+          const { manifest } = await backupRes.json();
+          try { console.log('[cron]', JSON.stringify({ job: 'weekly_backup', ...manifest })); } catch (e) {}
+        }
+      } catch (e) {
+        await sendAlertEmail(env, {
+          subject: 'Weekly backup cron job crashed',
+          text: `The weekly Registry backup job threw before completing: ${e && e.message ? e.message : String(e)}`,
+        });
+      }
     }
   },
 };

@@ -182,6 +182,7 @@
     <button class="navBtn" data-panel="governance" onclick="showPanel('governance')">Governance</button>
     <button class="navBtn" data-panel="developer" onclick="showPanel('developer')">Developer</button>
     <button class="navBtn" data-panel="status" onclick="showPanel('status')">Status page</button>
+    <button class="navBtn" data-panel="backups" onclick="showPanel('backups')">Backups</button>
     <div class="whoami" id="whoamiBox"></div>
     <button id="logoutBtn" onclick="doLogout()">Sign out</button>
   </div>
@@ -288,6 +289,22 @@
         <button class="btnPrimary" onclick="postIncident()">Post update</button>
       </div>
       <div id="incidentsList"></div>
+    </section>
+
+    <!-- Backups -->
+    <section class="panel" id="panel-backups">
+      <div class="panelHead"><div><h2>Backups</h2><p>Full snapshots of the Registry — every user, org, roster entry, and billing record on the platform. Runs automatically every Sunday; you can also run one now.</p></div><button class="btnSm" onclick="loadBackups()">Refresh</button></div>
+      <div class="card lg">
+        <h3>Run a backup now</h3>
+        <p class="hint">Writes a full snapshot to storage. Safe to run any time — doesn't touch live data.</p>
+        <button class="btnPrimary" id="runBackupBtn" onclick="runBackupNow()">Run backup now</button>
+        <div id="runBackupResult" class="hint" style="margin-top:10px;"></div>
+      </div>
+      <div class="card lg">
+        <h3>Restore from a backup</h3>
+        <p class="hint">Writes every key from the chosen backup back into the Registry. This only adds/overwrites — it never deletes anything created since the backup, so it can't itself cause data loss. Pick the backup below, then confirm.</p>
+      </div>
+      <div class="tableWrap lg"><table id="backupsTable"><thead><tr><th>Taken</th><th>Keys</th><th>Chunks</th><th>Duration</th><th></th></tr></thead><tbody><tr><td colspan="5" class="loading">Loading…</td></tr></tbody></table></div>
     </section>
 
   </div>
@@ -640,7 +657,7 @@ document.getElementById('pinInput').addEventListener('keydown', (e) => { if (e.k
 // ---------------------------------------------------------------------
 // Nav
 // ---------------------------------------------------------------------
-const PANEL_LOADERS = { overview: loadOverview, workspaces: loadOrgs, users: loadUsers, roster: loadRoster, governance: loadGovernance, developer: loadDeveloper, status: loadStatus };
+const PANEL_LOADERS = { overview: loadOverview, workspaces: loadOrgs, users: loadUsers, roster: loadRoster, governance: loadGovernance, developer: loadDeveloper, status: loadStatus, backups: loadBackups };
 function showPanel(name){
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
   document.querySelectorAll('.navBtn').forEach(b => b.classList.toggle('active', b.dataset.panel === name));
@@ -933,6 +950,56 @@ async function postIncident(){
   const res = await apiFetch('/admin/status/incident', { method: 'POST', body: JSON.stringify({ incidentId, title, severity, status, message }) });
   toast(res.ok ? 'Posted.' : 'Failed.', res.ok ? 'ok' : 'err');
   if (res.ok) { document.getElementById('incidentMessage').value = ''; loadStatus(); }
+}
+
+// ---------------------------------------------------------------------
+// Backups
+// ---------------------------------------------------------------------
+function fmtDuration(ms){
+  if (!ms && ms !== 0) return '—';
+  return ms < 1000 ? ms + 'ms' : (ms / 1000).toFixed(1) + 's';
+}
+async function loadBackups(){
+  const tbody = document.querySelector('#backupsTable tbody');
+  tbody.innerHTML = '<tr><td colspan="5" class="loading">Loading…</td></tr>';
+  const res = await apiFetch('/admin/backup/list');
+  if (!res.ok) { tbody.innerHTML = '<tr><td colspan="5" class="empty">Could not load backups.</td></tr>'; return; }
+  const backups = res.body.backups || [];
+  if (!backups.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty">No backups yet — run one now, or wait for Sunday\'s automatic run.</td></tr>'; return; }
+  tbody.innerHTML = backups.map(b => `
+    <tr>
+      <td>${esc(new Date(b.createdAt).toLocaleString())}</td>
+      <td>${esc(b.totalKeys)}</td>
+      <td>${esc(b.chunkCount)}</td>
+      <td>${fmtDuration(b.durationMs)}</td>
+      <td><button class="btnSm danger" onclick="restoreBackup('${esc(b.timestamp)}')">Restore</button></td>
+    </tr>
+  `).join('');
+}
+async function runBackupNow(){
+  const btn = document.getElementById('runBackupBtn');
+  const resultEl = document.getElementById('runBackupResult');
+  btn.disabled = true;
+  resultEl.textContent = 'Running… this can take a moment on a large deployment.';
+  const res = await apiFetch('/admin/backup/run', { method: 'POST' });
+  btn.disabled = false;
+  if (res.ok) {
+    resultEl.textContent = `Done — ${res.body.manifest.totalKeys} keys in ${res.body.manifest.chunkCount} chunk(s), ${fmtDuration(res.body.manifest.durationMs)}.`;
+    toast('Backup complete.', 'ok');
+    loadBackups();
+  } else {
+    resultEl.textContent = res.body && res.body.error ? 'Failed: ' + res.body.error : 'Failed.';
+    toast('Backup failed.', 'err');
+  }
+}
+async function restoreBackup(timestamp){
+  // A restore only ever writes keys from the backup — it never deletes
+  // anything, so the worst case of a mistaken click is stale data coming
+  // back, not a second data-loss event. Still confirmed explicitly since
+  // it touches the entire platform's live data.
+  if (!confirm(`Restore the backup from ${timestamp.replace('T', ' ').slice(0, 19)}?\n\nThis writes every key from that snapshot back into the live Registry. It will not delete anything created since — but it can overwrite records with older values.`)) return;
+  const res = await apiFetch('/admin/backup/restore', { method: 'POST', body: JSON.stringify({ timestamp }) });
+  toast(res.ok ? `Restored ${res.body.restoredKeys} keys.` : (res.body && res.body.error ? 'Failed: ' + res.body.error : 'Restore failed.'), res.ok ? 'ok' : 'err');
 }
 
 // ---------------------------------------------------------------------

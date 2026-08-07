@@ -105,6 +105,10 @@ export default function SettingsScreen() {
   const [biometricBusy, setBiometricBusy] = useState(false);
   const lockTimeoutSec = useSessionStore((s) => s.lockTimeoutSec);
   const setLockTimeoutSec = useSessionStore((s) => s.setLockTimeoutSec);
+  const highContrastEnabled = useSessionStore((s) => s.highContrastEnabled);
+  const setHighContrastEnabled = useSessionStore((s) => s.setHighContrastEnabled);
+  const oneHandedModeEnabled = useSessionStore((s) => s.oneHandedModeEnabled);
+  const setOneHandedModeEnabled = useSessionStore((s) => s.setOneHandedModeEnabled);
   // Recomputed on every render off the live store (orgs/lockTimeoutSec are
   // both already subscribed in this component, so this stays in sync
   // without its own effect) — cheap enough (a handful of comparisons) not
@@ -477,6 +481,38 @@ export default function SettingsScreen() {
             A workspace you're in requires {lockTimeoutLabel(effectiveLockTimeout).toLowerCase()} — that stricter setting is what's actually enforced.
           </Text>
         )}
+      </View>
+
+      <View style={[styles.card, { backgroundColor: theme.glass, borderColor: theme.glassBrd }]}>
+        <Text style={[styles.value, { color: theme.textHi }]}>Accessibility</Text>
+        <View style={[styles.row, { marginTop: 12 }]}>
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.value, { color: theme.textHi, fontSize: 14 }]}>High contrast</Text>
+            <Text style={[styles.rowHint, { color: theme.textMid }]}>
+              Solid black/white backgrounds and stronger borders instead of the default translucent glass, for easier reading.
+            </Text>
+          </View>
+          <Switch
+            value={highContrastEnabled}
+            onValueChange={setHighContrastEnabled}
+            trackColor={{ true: theme.ice, false: theme.glassBrd }}
+            accessibilityLabel="High contrast"
+          />
+        </View>
+        <View style={[styles.row, { marginTop: 14 }]}>
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.value, { color: theme.textHi, fontSize: 14 }]}>One-handed mode</Text>
+            <Text style={[styles.rowHint, { color: theme.textMid }]}>
+              Adds a small handle above the bottom nav — tap it to temporarily bring the top of the screen down within thumb reach.
+            </Text>
+          </View>
+          <Switch
+            value={oneHandedModeEnabled}
+            onValueChange={setOneHandedModeEnabled}
+            trackColor={{ true: theme.ice, false: theme.glassBrd }}
+            accessibilityLabel="One-handed mode"
+          />
+        </View>
       </View>
 
       <View style={[styles.card, { backgroundColor: theme.glass, borderColor: theme.glassBrd }]}>
@@ -908,6 +944,6 @@ const styles = StyleSheet.create({
   modeRow: { flexDirection: 'row', gap: 6, marginTop: 6 },
   modePill: { flex: 1, borderWidth: 1, borderRadius: 999, paddingVertical: 7, alignItems: 'center' },
   deviceRow: { borderWidth: 1, borderRadius: 14, padding: 10, marginTop: 8, gap: 3 },
-  badge: { borderWidth: 1, borderRadius: 20, paddingHorizontal: 8, paddingVertical: 2 },
+  badge: { borderWidth: 1, borderRadius: 6, paddingHorizontal: 8, paddingVertical: 2 },
   deviceActions: { flexDirection: 'row', gap: 14, flexWrap: 'wrap', marginTop: 6 },
 });

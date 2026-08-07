@@ -39,6 +39,8 @@ const DEVICE_ID_KEY = 'parapin_device_id';
 const PIN_HASH_KEY = 'parapin_pin_hash';
 const BIOMETRIC_ENABLED_KEY = 'parapin_biometric_enabled';
 const LOCK_TIMEOUT_KEY = 'parapin_lock_timeout_sec';
+const HIGH_CONTRAST_KEY = 'parapin_high_contrast';
+const ONE_HANDED_KEY = 'parapin_one_handed_mode';
 
 // Mirrors index.html's LOCK_TIMEOUT_TIERS/DEFAULT_LOCK_TIMEOUT_SEC exactly —
 // see that file's "Inactivity auto-lock" comment for the full reasoning.
@@ -128,6 +130,16 @@ interface SessionState {
   // also factors in every org's securityPolicy.minTimeoutSec.
   lockTimeoutSec: number;
   setLockTimeoutSec: (sec: number) => Promise<void>;
+  // Accessibility preferences — same SecureStore-and-mirror-into-state
+  // pattern as lockTimeoutSec above, just booleans. Neither is
+  // security-sensitive (unlike pinHash/biometric), they just live here
+  // because this is already the one store every screen reads theme/settings
+  // state from, and useTheme() (see hooks/useTheme.ts) needs
+  // highContrastEnabled on every render.
+  highContrastEnabled: boolean;
+  setHighContrastEnabled: (enabled: boolean) => Promise<void>;
+  oneHandedModeEnabled: boolean;
+  setOneHandedModeEnabled: (enabled: boolean) => Promise<void>;
   // Mirrors index.html's profileSaveBtn handler (index.html:8530-8566).
   // `avatarUrl` here is the ALREADY-UPLOADED result — this action never
   // touches the file picker or /api/upload itself (see
@@ -182,19 +194,33 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     await SecureStore.setItemAsync(LOCK_TIMEOUT_KEY, String(sec));
     set({ lockTimeoutSec: sec });
   },
+  highContrastEnabled: false,
+  setHighContrastEnabled: async (enabled) => {
+    await SecureStore.setItemAsync(HIGH_CONTRAST_KEY, enabled ? 'true' : 'false');
+    set({ highContrastEnabled: enabled });
+  },
+  oneHandedModeEnabled: false,
+  setOneHandedModeEnabled: async (enabled) => {
+    await SecureStore.setItemAsync(ONE_HANDED_KEY, enabled ? 'true' : 'false');
+    set({ oneHandedModeEnabled: enabled });
+  },
 
   hydrate: async () => {
-    const [deviceId, pinHash, biometricPref, biometricSupported, lockTimeoutPref] = await Promise.all([
+    const [deviceId, pinHash, biometricPref, biometricSupported, lockTimeoutPref, highContrastPref, oneHandedPref] = await Promise.all([
       getOrCreateDeviceId(),
       SecureStore.getItemAsync(PIN_HASH_KEY),
       SecureStore.getItemAsync(BIOMETRIC_ENABLED_KEY),
       checkBiometricSupport(),
       SecureStore.getItemAsync(LOCK_TIMEOUT_KEY),
+      SecureStore.getItemAsync(HIGH_CONTRAST_KEY),
+      SecureStore.getItemAsync(ONE_HANDED_KEY),
     ]);
     const biometricEnabled = biometricPref === 'true' && biometricSupported;
     const parsedTimeout = parseInt(lockTimeoutPref || '', 10);
     const lockTimeoutSec = (LOCK_TIMEOUT_TIERS as readonly number[]).includes(parsedTimeout) ? parsedTimeout : DEFAULT_LOCK_TIMEOUT_SEC;
-    set({ deviceId, pinHash, biometricEnabled, biometricSupported, lockTimeoutSec });
+    const highContrastEnabled = highContrastPref === 'true';
+    const oneHandedModeEnabled = oneHandedPref === 'true';
+    set({ deviceId, pinHash, biometricEnabled, biometricSupported, lockTimeoutSec, highContrastEnabled, oneHandedModeEnabled });
 
     if (pinHash) {
       if (biometricEnabled) {

@@ -25,6 +25,7 @@ import { BlurView } from 'expo-blur';
 import { useSessionStore } from '../state/session';
 import { useTheme } from '../hooks/useTheme';
 import { initials, colorFromString } from '../utils/avatar';
+import { toggleReachability, useReachabilityStore } from '../state/reachability';
 import ProfileModal from './ProfileModal';
 
 interface RouteTabDef {
@@ -53,6 +54,8 @@ export default function BottomNav() {
   const displayName = useSessionStore((s) => s.displayName);
   const avatarUrl = useSessionStore((s) => s.avatarUrl);
   const userId = useSessionStore((s) => s.userId);
+  const oneHandedModeEnabled = useSessionStore((s) => s.oneHandedModeEnabled);
+  const reachabilityActive = useReachabilityStore((s) => s.active);
   const [profileOpen, setProfileOpen] = useState(false);
 
   // Sliding highlight capsule — same idea as index.html's
@@ -105,6 +108,27 @@ export default function BottomNav() {
   return (
     <>
       <View style={[styles.wrap, { bottom: Math.max(insets.bottom, 10) }]} pointerEvents="box-none">
+        {/* Reachability handle — only takes up space when the person has
+            actually turned One-handed mode on in Settings, so it costs
+            nothing for everyone else. Tap toggles; see
+            src/state/reachability.ts for what it actually shifts. */}
+        {oneHandedModeEnabled && (
+          <Pressable
+            onPress={toggleReachability}
+            hitSlop={10}
+            accessibilityRole="button"
+            accessibilityLabel={reachabilityActive ? 'Move content back up' : 'Bring content within reach'}
+            style={[
+              styles.reachabilityHandle,
+              {
+                borderColor: theme.glassBrdHi,
+                backgroundColor: theme.scheme === 'dark' ? 'rgba(30,33,40,0.5)' : 'rgba(255,255,255,0.65)',
+              },
+            ]}
+          >
+            <View style={[styles.reachabilityBar, { backgroundColor: reachabilityActive ? theme.ice : theme.textLow }]} />
+          </Pressable>
+        )}
         {/* Shadow lives on this outer View, not the BlurView below — iOS
             silently drops a shadow on any layer that also has
             overflow:'hidden' (needed here to clip the blur to the pill
@@ -190,6 +214,16 @@ export default function BottomNav() {
 
 const styles = StyleSheet.create({
   wrap: { position: 'absolute', left: 0, right: 0, alignItems: 'center', zIndex: 30 },
+  reachabilityHandle: {
+    width: 56,
+    height: 22,
+    borderRadius: 8,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 6,
+  },
+  reachabilityBar: { width: 30, height: 4, borderRadius: 2 },
   // Shadow properties live here, not on `pill` — see the comment above the
   // BlurView. `elevation` (Android's shadow mechanism) doesn't have this
   // overflow conflict, but keeping it here too so both platforms' shadow
