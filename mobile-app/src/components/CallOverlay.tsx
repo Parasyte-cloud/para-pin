@@ -35,6 +35,7 @@ import { RTCView } from 'react-native-webrtc';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useCallStore } from '../state/call';
+import { useSessionStore } from '../state/session';
 import { initials, colorFromString } from '../utils/avatar';
 import { callColors, callMotion } from '../theme/callTheme';
 import { AnimatedAvatar, ConnectionQualityDots, GlassBadge, isReduceMotionEnabled } from './call/primitives';
@@ -133,6 +134,7 @@ export default function CallOverlay() {
   // across screen sizes" fix, not a cosmetic one. SafeAreaProvider already
   // wraps the whole app (see app/_layout.tsx), so this Just Works here.
   const insets = useSafeAreaInsets();
+  const oneHandedModeEnabled = useSessionStore((s) => s.oneHandedModeEnabled);
   const callState = useCallStore((s) => s.callState);
   const peerName = useCallStore((s) => s.peerName);
   const peerId = useCallStore((s) => s.peerId);
@@ -324,6 +326,7 @@ export default function CallOverlay() {
               primary={primaryDock}
               overflow={overflowDock}
               endCall={{ label: 'End call', onPress: () => endCall() }}
+              oneHandedModeEnabled={oneHandedModeEnabled}
             />
           )}
 

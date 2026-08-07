@@ -943,7 +943,7 @@ const styles = StyleSheet.create({
   approveBtn: { borderRadius: 999, paddingVertical: 10, alignItems: 'center', marginTop: 4 },
   modeRow: { flexDirection: 'row', gap: 6, marginTop: 6 },
   modePill: { flex: 1, borderWidth: 1, borderRadius: 999, paddingVertical: 7, alignItems: 'center' },
-  deviceRow: { borderWidth: 1, borderRadius: 14, padding: 10, marginTop: 8, gap: 3 },
-  badge: { borderWidth: 1, borderRadius: 6, paddingHorizontal: 8, paddingVertical: 2 },
+  deviceRow: { borderWidth: 1, borderRadius: 6, padding: 10, marginTop: 8, gap: 3 },
+  badge: { borderWidth: 1, borderRadius: 20, paddingHorizontal: 8, paddingVertical: 2 },
   deviceActions: { flexDirection: 'row', gap: 14, flexWrap: 'wrap', marginTop: 6 },
 });

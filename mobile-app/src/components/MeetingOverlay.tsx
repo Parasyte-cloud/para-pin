@@ -47,6 +47,7 @@ import { RTCView, ScreenCapturePickerView as RawScreenCapturePickerView } from '
 const ScreenCapturePickerView = RawScreenCapturePickerView as any;
 import { BlurView } from 'expo-blur';
 import { useMeetingStore, type MeetingParticipant, type WaitingParticipant } from '../state/meeting';
+import { useSessionStore } from '../state/session';
 import { initials, colorFromString } from '../utils/avatar';
 import { callColors, callMotion } from '../theme/callTheme';
 import { AnimatedAvatar, ConnectionQualityDots, GlassBadge, isReduceMotionEnabled } from './call/primitives';
@@ -311,6 +312,7 @@ export default function MeetingOverlay() {
   // Same reasoning as CallOverlay's insets usage — real per-device safe-area
   // values instead of a fixed paddingVertical guess.
   const insets = useSafeAreaInsets();
+  const oneHandedModeEnabled = useSessionStore((s) => s.oneHandedModeEnabled);
   const status = useMeetingStore((s) => s.status);
   const meetingName = useMeetingStore((s) => s.meetingName);
   const participants = useMeetingStore((s) => s.participants);
@@ -648,7 +650,12 @@ export default function MeetingOverlay() {
         <FloatingReactions reactions={reactions} />
 
         <View style={styles.controlsWrap}>
-          <GlassDock primary={primaryDock} overflow={overflowDock} endCall={{ label: 'Leave meeting', onPress: () => leaveMeeting() }} />
+          <GlassDock
+            primary={primaryDock}
+            overflow={overflowDock}
+            endCall={{ label: 'Leave meeting', onPress: () => leaveMeeting() }}
+            oneHandedModeEnabled={oneHandedModeEnabled}
+          />
         </View>
 
         {reactionPickerOpen && (

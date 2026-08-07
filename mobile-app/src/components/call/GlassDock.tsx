@@ -36,32 +36,85 @@ export interface DockItem {
   accessibilityHint?: string;
 }
 
+// How far the dock shifts down when reachability is toggled on. Fixed
+// value, same reasoning as src/state/reachability.ts's SHIFT_DISTANCE (this
+// only needs to bring the row within thumb range, not be device-exact).
+const REACH_SHIFT = 90;
+const REACH_AUTO_DISMISS_MS = 5000;
+
 export function GlassDock({
   primary,
   overflow = [],
   endCall,
   oneHandedOffset = 0,
+  oneHandedModeEnabled = false,
 }: {
   primary: DockItem[];
   overflow?: DockItem[];
   endCall: { label: string; onPress: () => void; disabled?: boolean };
-  // Vertical nudge (px) for one-handed reachability — see the accessibility
-  // pass: a person can drag the dock down toward their thumb, this is
-  // where that offset gets applied.
+  // External vertical nudge (px), for a caller that wants to drive the
+  // offset itself. Most callers instead just pass oneHandedModeEnabled and
+  // let the dock manage its own handle+toggle below.
   oneHandedOffset?: number;
+  // Mirrors the same person-level Settings toggle used for the main app's
+  // reachability handle (src/state/reachability.ts) — when on, this dock
+  // grows its own small drag-free tap handle above the pill so an
+  // in-progress call's controls can be pulled toward the thumb too,
+  // independent of whatever screen (1:1 audio/video, meeting/group) it's
+  // rendered on.
+  oneHandedModeEnabled?: boolean;
 }) {
   const [moreOpen, setMoreOpen] = useState(false);
+  const [reachActive, setReachActive] = useState(false);
   const enter = useRef(new Animated.Value(0)).current;
+  const reachY = useRef(new Animated.Value(0)).current;
+  const reachDismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     Animated.spring(enter, { toValue: 1, useNativeDriver: true, ...callMotion.springGentle }).start();
   }, [enter]);
 
+  useEffect(() => {
+    return () => {
+      if (reachDismissTimer.current) clearTimeout(reachDismissTimer.current);
+    };
+  }, []);
+
+  const toggleReach = () => {
+    const next = !reachActive;
+    setReachActive(next);
+    Animated.spring(reachY, { toValue: next ? REACH_SHIFT : 0, useNativeDriver: true, bounciness: 4, speed: 18 }).start();
+    if (reachDismissTimer.current) clearTimeout(reachDismissTimer.current);
+    if (next) {
+      reachDismissTimer.current = setTimeout(() => {
+        setReachActive(false);
+        Animated.spring(reachY, { toValue: 0, useNativeDriver: true, bounciness: 4, speed: 18 }).start();
+      }, REACH_AUTO_DISMISS_MS);
+    }
+  };
+
   const translateY = enter.interpolate({ inputRange: [0, 1], outputRange: [40, 0] });
   const hasOverflowBadge = overflow.some((i) => i.badge);
 
   return (
-    <Animated.View style={[styles.wrap, { transform: [{ translateY: Animated.add(translateY, oneHandedOffset) }], opacity: enter }]}>
+    <View style={{ alignItems: 'center' }}>
+      {oneHandedModeEnabled && (
+        <Pressable
+          onPress={toggleReach}
+          hitSlop={10}
+          accessibilityRole="button"
+          accessibilityLabel={reachActive ? 'Move call controls back up' : 'Bring call controls within reach'}
+          style={styles.reachHandle}
+        >
+          <View style={[styles.reachBar, reachActive && { backgroundColor: callColors.ice }]} />
+        </Pressable>
+      )}
+      <Animated.View
+        style={[
+          styles.wrap,
+          { transform: [{ translateY: Animated.add(Animated.add(translateY, oneHandedOffset), reachY) }], opacity: enter },
+        ]}
+      >
       <BlurView intensity={54} tint="dark" style={styles.pill}>
         <View style={styles.row}>
           {primary.map((item) => (
@@ -124,12 +177,25 @@ export function GlassDock({
           </Pressable>
         </Pressable>
       </Modal>
-    </Animated.View>
+      </Animated.View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   wrap: { flexDirection: 'row', alignItems: 'center', gap: 14, alignSelf: 'center' },
+  reachHandle: {
+    width: 56,
+    height: 20,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: callColors.glassBrdHi,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 6,
+  },
+  reachBar: { width: 28, height: 4, borderRadius: 2, backgroundColor: callColors.textLow },
   pill: {
     borderRadius: callRadii.dock,
     paddingHorizontal: 14,
