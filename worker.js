@@ -118,6 +118,28 @@ function generateMfaBackupCodes(count = 8) {
 const RP_ID = 'parasyte.cloud';
 const ALLOWED_WEBAUTHN_ORIGINS = ['https://chat.parasyte.cloud', 'https://web.parasyte.cloud'];
 
+// A passkey's rpId has to be the exact domain (or a registrable parent of
+// it) the page is actually being served from — the browser enforces this
+// itself and will silently refuse navigator.credentials.get()/create() for
+// any mismatch, no error surfaced to the app at all. This was hardcoded to
+// RP_ID ('parasyte.cloud') everywhere, which meant Face ID/Touch ID could
+// never work on any org's branded custom domain (see org.customDomains) —
+// the exact scenario a customer using their own domain hits immediately,
+// silently, with the button just appearing to do nothing. Resolves the real
+// rpId to use for THIS request's hostname: the base app domains keep using
+// RP_ID as before (unchanged behavior, existing passkeys keep working);
+// any other hostname is checked against the same orgHostnameIndex the
+// branding/routing logic already trusts (see /internal/org-by-hostname) —
+// so a passkey registered on an org's own verified custom domain gets an
+// rpId matching that domain, and works there. An unrecognized hostname
+// falls back to RP_ID rather than trusting an arbitrary Host header.
+async function resolveWebauthnRpId(storage, hostname) {
+  const h = (hostname || '').toLowerCase().trim();
+  if (!h || h === 'chat.parasyte.cloud' || h === 'web.parasyte.cloud' || h === 'localhost') return RP_ID;
+  const orgId = await storage.get(`orgHostnameIndex:${h}`);
+  return orgId ? h : RP_ID;
+}
+
 // Minimal CBOR decoder — just the major types WebAuthn's attestationObject
 // and COSE_Key structures actually use (0 uint, 1 negative int, 2 byte
 // string, 3 text string, 4 array, 5 map, 7 true/false/null). No indefinite-
@@ -1951,6 +1973,14 @@ async function sendAdminWelcomeEmail(env, { to, name, orgName, emailSignInAutoEn
 // thrown error) for anyone who hasn't configured it yet, same pattern as
 // RESEND_API_KEY/RESEND_FROM_EMAIL below it.
 async function sendAlertEmail(env, { subject, text }) {
+  // This previously had zero trace of its own — if ALERT_EMAIL/Resend
+  // weren't configured (or the Resend call itself failed), an alert-worthy
+  // event would vanish with no record anywhere, the exact "silent failure"
+  // this function exists to prevent, just one level removed. Logging every
+  // call (not just failures) means `wrangler tail | grep '\[alert\]'` is a
+  // live feed of every alert-worthy event this app has detected, independent
+  // of whether the email itself successfully sent.
+  try { console.log('[alert]', JSON.stringify({ subject, text: String(text).slice(0, 500) })); } catch (e) {}
   if (!env.ALERT_EMAIL || !env.RESEND_API_KEY || !env.RESEND_FROM_EMAIL) return { sent: false, error: 'alerting_not_configured' };
   try {
     const res = await fetch('https://api.resend.com/emails', {
@@ -2727,17 +2757,18 @@ export class Registry {
     // challenge; verify has to see a real signed response over that exact
     // challenge before anything gets trusted and stored.
     if (request.method === 'POST' && url.pathname === '/webauthn/register-options') {
-      const { pinHash } = await request.json();
+      const { pinHash, hostname } = await request.json();
       const user = await this.state.storage.get(`user:${pinHash}`);
       if (!user) return json({ error: 'not_registered' }, 401);
+      const rpId = await resolveWebauthnRpId(this.state.storage, hostname);
       const challengeBytes = new Uint8Array(32);
       crypto.getRandomValues(challengeBytes);
       const challenge = bufToB64url(challengeBytes);
-      user.webauthnPendingRegChallenge = { challenge, expiresAt: Date.now() + 5 * 60 * 1000 };
+      user.webauthnPendingRegChallenge = { challenge, expiresAt: Date.now() + 5 * 60 * 1000, rpId };
       await this.state.storage.put(`user:${pinHash}`, user);
       return json({
         challenge,
-        rpId: RP_ID,
+        rpId,
         rpName: 'PArA PIN',
         userId: bufToB64url(new TextEncoder().encode(user.id)),
         userName: user.displayName || user.id,
@@ -2751,16 +2782,22 @@ export class Registry {
       if (!user) return json({ error: 'not_registered' }, 401);
       const pending = user.webauthnPendingRegChallenge;
       if (!pending || pending.expiresAt < Date.now()) return json({ error: 'no_pending_setup' }, 400);
+      const rpId = pending.rpId || RP_ID;
       try {
         const clientData = JSON.parse(new TextDecoder().decode(b64urlToBuf(clientDataJSON)));
         if (clientData.type !== 'webauthn.create') return json({ error: 'invalid_client_data' }, 400);
         if (clientData.challenge !== pending.challenge) return json({ error: 'invalid_challenge' }, 400);
-        if (!ALLOWED_WEBAUTHN_ORIGINS.includes(clientData.origin)) return json({ error: 'invalid_origin' }, 400);
+        // A custom-domain rpId (see resolveWebauthnRpId) means the real
+        // origin is that exact domain — only the base app domains still
+        // need the static allowlist, everything else is checked against
+        // the same rpId this challenge was actually issued for.
+        const originOk = ALLOWED_WEBAUTHN_ORIGINS.includes(clientData.origin) || clientData.origin === `https://${rpId}`;
+        if (!originOk) return json({ error: 'invalid_origin' }, 400);
 
         const attestationBytes = b64urlToBuf(attestationObject);
         const { value: attestation } = cborDecode(attestationBytes, 0);
         const authData = parseAuthenticatorData(toU8(attestation.get('authData')));
-        const expectedRpIdHash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(RP_ID)));
+        const expectedRpIdHash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(rpId)));
         if (!authData.attestedCredentialDataIncluded) return json({ error: 'no_credential_data' }, 400);
         if (!buffersEqual(authData.rpIdHash, expectedRpIdHash)) return json({ error: 'rpid_mismatch' }, 400);
 
@@ -2776,6 +2813,11 @@ export class Registry {
           counter: authData.signCount,
           label: (typeof label === 'string' && label.trim()) ? label.trim().slice(0, 40) : 'Passkey',
           createdAt: Date.now(),
+          // Which domain this credential is actually usable on (WebAuthn
+          // credentials are bound to the rpId they were created with, this
+          // can never be "fixed" after the fact, only recorded so
+          // auth-options/auth-verify know which requests it can answer).
+          rpId,
         });
         user.webauthnPendingRegChallenge = null;
         await this.state.storage.put(`user:${pinHash}`, user);
@@ -2799,17 +2841,26 @@ export class Registry {
     // pattern as /mfa/verify-login below, see the comment on its outer
     // /api/webauthn/auth-options route for why that's safe here.
     if (request.method === 'POST' && url.pathname === '/webauthn/auth-options') {
-      const { pinHash } = await request.json();
+      const { pinHash, hostname } = await request.json();
       const user = await this.state.storage.get(`user:${pinHash}`);
       if (!user) return json({ error: 'not_registered' }, 401);
       const credentials = user.webauthnCredentials || [];
       if (!credentials.length) return json({ error: 'not_enabled' }, 400);
+      const rpId = await resolveWebauthnRpId(this.state.storage, hostname);
+      // Only offer credentials that were actually registered for THIS
+      // domain — a credential's rpId can't be changed after the fact
+      // (see register-verify), so listing a mismatched one here would just
+      // guarantee the browser silently refuses it. Credentials saved before
+      // this fix have no rpId recorded at all; treat those as RP_ID, the
+      // only domain they could have been created under at the time.
+      const usable = credentials.filter((c) => (c.rpId || RP_ID) === rpId);
+      if (!usable.length) return json({ error: 'not_enabled', reason: 'no_credential_for_domain' }, 400);
       const challengeBytes = new Uint8Array(32);
       crypto.getRandomValues(challengeBytes);
       const challenge = bufToB64url(challengeBytes);
-      user.webauthnPendingAuthChallenge = { challenge, expiresAt: Date.now() + 5 * 60 * 1000 };
+      user.webauthnPendingAuthChallenge = { challenge, expiresAt: Date.now() + 5 * 60 * 1000, rpId };
       await this.state.storage.put(`user:${pinHash}`, user);
-      return json({ challenge, rpId: RP_ID, allowCredentialIds: credentials.map((c) => c.id) });
+      return json({ challenge, rpId, allowCredentialIds: usable.map((c) => c.id) });
     }
 
     if (request.method === 'POST' && url.pathname === '/webauthn/auth-verify') {
@@ -2842,11 +2893,13 @@ export class Registry {
         const clientData = JSON.parse(new TextDecoder().decode(b64urlToBuf(clientDataJSON)));
         if (clientData.type !== 'webauthn.get') return json({ error: 'invalid_client_data' }, 400);
         if (clientData.challenge !== pending.challenge) return json({ error: 'invalid_challenge' }, 400);
-        if (!ALLOWED_WEBAUTHN_ORIGINS.includes(clientData.origin)) return json({ error: 'invalid_origin' }, 400);
+        const rpId = pending.rpId || credential.rpId || RP_ID;
+        const originOk = ALLOWED_WEBAUTHN_ORIGINS.includes(clientData.origin) || clientData.origin === `https://${rpId}`;
+        if (!originOk) return json({ error: 'invalid_origin' }, 400);
 
         const authDataBuf = b64urlToBuf(authenticatorData);
         const authData = parseAuthenticatorData(authDataBuf);
-        const expectedRpIdHash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(RP_ID)));
+        const expectedRpIdHash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(rpId)));
         if (!buffersEqual(authData.rpIdHash, expectedRpIdHash)) return json({ error: 'rpid_mismatch' }, 400);
         if (!authData.userPresent) return json({ error: 'user_not_present' }, 400);
 
@@ -6658,7 +6711,8 @@ export class Registry {
       const todayKey = nowDate.toISOString().slice(0, 10); // UTC calendar date — used both for the month/day match and the dedupe key
       const todayMonth = nowDate.getUTCMonth();
       const todayDate = nowDate.getUTCDate();
-      let notified = 0;
+      let notified = 0, checked = 0, failed = 0;
+      const CHUNK = 25;
       const orgMap = await this.state.storage.list({ prefix: 'org:' });
       for (const org of orgMap.values()) {
         const orgId = org.id;
@@ -6667,52 +6721,67 @@ export class Registry {
         // Computed once per org, not once per birthday match — hasOrgPermission
         // does its own storage read per call, so this keeps the sweep linear
         // in member count instead of quadratic on a large org where several
-        // people happen to share a birthday.
+        // people happen to share a birthday. Bounded-concurrency chunked like
+        // the per-member loop below, same reasoning (see scheduled()'s
+        // comment on the retention-purge loop) — a large org's member count
+        // is exactly where a plain sequential await-per-member loop starts
+        // costing real wall-clock time in a shared, once-daily invocation.
         const hrAdminIds = [];
-        for (const mid of memberIds) {
-          if (await hasOrgPermission(this.state.storage, orgId, mid, 'manage_hr')) hrAdminIds.push(mid);
+        for (let i = 0; i < memberIds.length; i += CHUNK) {
+          const chunk = memberIds.slice(i, i + CHUNK);
+          const results = await Promise.all(chunk.map((mid) => hasOrgPermission(this.state.storage, orgId, mid, 'manage_hr').then((ok) => ({ mid, ok }))));
+          for (const r of results) if (r.ok) hrAdminIds.push(r.mid);
         }
-        for (const uid of memberIds) {
-          const employee = await getEmployee(this.state.storage, orgId, uid);
-          const dob = employee.personal.dob;
-          if (!dob) continue;
-          const d = new Date(dob);
-          if (d.getUTCMonth() !== todayMonth || d.getUTCDate() !== todayDate) continue;
-          // Idempotency guard: set BEFORE sending, not after — if this crashes
-          // partway through a large org's member list, tomorrow's run (or a
-          // retried Cron Trigger invocation today) should never double-send
-          // to someone it already reached, a stray duplicate is far less
-          // disruptive than a partial-send loop double-notifying everyone
-          // whose birthday sorted earlier in memberIds.
-          const dedupeKey = `birthdayNotified:${orgId}:${uid}:${todayKey}`;
-          if (await this.state.storage.get(dedupeKey)) continue;
-          await this.state.storage.put(dedupeKey, true);
 
-          const userRec = await this.state.storage.get(`userById:${uid}`);
-          if (!userRec) continue;
-          const notifyTargets = new Set(hrAdminIds);
-          if (employee.job.current.managerId) notifyTargets.add(employee.job.current.managerId);
-          notifyTargets.delete(uid); // never notify the birthday person about their own birthday
-          if (notifyTargets.size === 0 || !this.env.USER_CHANNEL) continue;
+        for (let i = 0; i < memberIds.length; i += CHUNK) {
+          const chunk = memberIds.slice(i, i + CHUNK);
+          const results = await Promise.allSettled(chunk.map(async (uid) => {
+            const employee = await getEmployee(this.state.storage, orgId, uid);
+            const dob = employee.personal.dob;
+            if (!dob) return 'no_dob';
+            const d = new Date(dob);
+            if (d.getUTCMonth() !== todayMonth || d.getUTCDate() !== todayDate) return 'not_today';
+            // Idempotency guard: set BEFORE sending, not after — if this
+            // crashes partway through, tomorrow's run (or a retried Cron
+            // Trigger invocation today) should never double-send to someone
+            // it already reached, a stray duplicate is far less disruptive
+            // than a partial-send loop double-notifying everyone whose
+            // birthday sorted earlier.
+            const dedupeKey = `birthdayNotified:${orgId}:${uid}:${todayKey}`;
+            if (await this.state.storage.get(dedupeKey)) return 'already_notified';
+            await this.state.storage.put(dedupeKey, true);
 
-          const payload = JSON.stringify({
-            title: 'PArA PIN',
-            body: `🎂 It's ${userRec.displayName || 'a teammate'}'s birthday today!`,
-            chatId: null,
-            type: 'birthday',
-          });
-          for (const targetId of notifyTargets) {
-            try {
-              await this.env.USER_CHANNEL.get(this.env.USER_CHANNEL.idFromName(targetId)).fetch('https://internal/push-direct', { method: 'POST', body: payload });
-            } catch (e) {
-              // One recipient's push failing (e.g. no live channel) shouldn't
-              // stop the rest of that person's notifyTargets, or the sweep.
+            const userRec = await this.state.storage.get(`userById:${uid}`);
+            if (!userRec) return 'no_user_rec';
+            const notifyTargets = new Set(hrAdminIds);
+            if (employee.job.current.managerId) notifyTargets.add(employee.job.current.managerId);
+            notifyTargets.delete(uid); // never notify the birthday person about their own birthday
+            if (notifyTargets.size === 0 || !this.env.USER_CHANNEL) return 'no_targets';
+
+            const payload = JSON.stringify({
+              title: 'PArA PIN',
+              body: `🎂 It's ${userRec.displayName || 'a teammate'}'s birthday today!`,
+              chatId: null,
+              type: 'birthday',
+            });
+            for (const targetId of notifyTargets) {
+              try {
+                await this.env.USER_CHANNEL.get(this.env.USER_CHANNEL.idFromName(targetId)).fetch('https://internal/push-direct', { method: 'POST', body: payload });
+              } catch (e) {
+                // One recipient's push failing (e.g. no live channel) shouldn't
+                // stop the rest of that person's notifyTargets, or the sweep.
+              }
             }
+            return 'notified';
+          }));
+          for (const r of results) {
+            checked++;
+            if (r.status === 'fulfilled' && r.value === 'notified') notified++;
+            else if (r.status === 'rejected') failed++;
           }
-          notified++;
         }
       }
-      return json({ ok: true, notified });
+      return json({ ok: true, notified, checked, failed });
     }
 
     return new Response('not found', { status: 404 });
@@ -7866,8 +7935,67 @@ export {
   arrayBufferToBase64, bufToB64url, b64urlToBuf,
 };
 
+// No response anywhere in this app carried a Content-Security-Policy or any
+// other security response header before this — confirmed by grepping the
+// whole file, zero hits. Wrapping every response through here (see the thin
+// `fetch` export below) rather than threading header-setting through every
+// individual return statement in handleFetch (there are hundreds, scattered
+// across ~2500 lines) is the only way to guarantee this actually applies
+// everywhere, including any future route someone adds without remembering
+// to set headers by hand.
+//
+// script-src/style-src carry 'unsafe-inline': this entire app is a single
+// static index.html with its CSS and ~8 large inline <script> blocks, no
+// build step and no nonce plumbing exist to avoid it. That's a real,
+// deliberate trade-off, not an oversight — a nonce-based CSP (server
+// generates a random value per request, stamps it into both the header and
+// every <script>/<style> tag) is the complete fix, but this app is served
+// as a static asset via the ASSETS binding, not dynamically rendered per
+// request, so adding nonces means restructuring how the page is served, not
+// a header value. Flagging as the real follow-up rather than pretending
+// 'unsafe-inline' isn't a compromise. What this DOES still meaningfully
+// block even with it in place: any injected tag trying to load a script from
+// somewhere other than this app's own explicitly allowlisted CDNs (the two
+// QR libraries and Google Fonts, the only third-party resources this app
+// actually loads — see loadScriptFromMirrors), framing this app in another
+// site's iframe (clickjacking), and form submissions to a foreign origin.
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com",
+  "img-src 'self' data: blob:",
+  "media-src 'self' blob:",
+  "connect-src 'self' wss:",
+  "frame-ancestors 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "object-src 'none'",
+].join('; ');
+
+function withSecurityHeaders(response, request) {
+  // A WebSocket upgrade response (chat/notify/meeting sockets) is status
+  // 101 with no real header/body semantics to rewrite — cloning it the same
+  // way as a normal response breaks the handshake. Every other response
+  // (HTML pages, /api/* JSON, media) gets the same baseline regardless of
+  // content type; the directives above only constrain the types they name,
+  // so this is safe to apply uniformly rather than special-casing per route.
+  if (!response || response.status === 101) return response;
+  const headers = new Headers(response.headers);
+  headers.set('Content-Security-Policy', CSP);
+  headers.set('X-Content-Type-Options', 'nosniff');
+  headers.set('X-Frame-Options', 'DENY');
+  headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
 export default {
   async fetch(request, env, ctx) {
+    const response = await this.handleFetch(request, env, ctx);
+    return withSecurityHeaders(response, request);
+  },
+
+  async handleFetch(request, env, ctx) {
     const url = new URL(request.url);
 
     if (!url.pathname.startsWith('/api/')) {
@@ -8463,7 +8591,7 @@ export default {
       if (request.method === 'POST' && url.pathname === '/api/webauthn/register-options') {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
-        return registryStub.fetch('https://internal/webauthn/register-options', { method: 'POST', body: JSON.stringify({ pinHash }) });
+        return registryStub.fetch('https://internal/webauthn/register-options', { method: 'POST', body: JSON.stringify({ pinHash, hostname: url.hostname }) });
       }
 
       if (request.method === 'POST' && url.pathname === '/api/webauthn/register-verify') {
@@ -8492,7 +8620,7 @@ export default {
       if (request.method === 'POST' && url.pathname === '/api/webauthn/auth-options') {
         const pinHash = authHash(request, url);
         if (!pinHash) return json({ error: 'missing_pin_hash' }, 401);
-        return registryStub.fetch('https://internal/webauthn/auth-options', { method: 'POST', body: JSON.stringify({ pinHash }) });
+        return registryStub.fetch('https://internal/webauthn/auth-options', { method: 'POST', body: JSON.stringify({ pinHash, hostname: url.hostname }) });
       }
 
       if (request.method === 'POST' && url.pathname === '/api/webauthn/auth-verify') {
@@ -9488,7 +9616,17 @@ export default {
         const rawBody = await request.text();
         const signature = request.headers.get('x-paystack-signature');
         const valid = await verifyPaystackSignature(rawBody, signature, env.PAYSTACK_SECRET_KEY);
-        if (!valid) return json({ error: 'invalid_signature' }, 401);
+        if (!valid) {
+          // Logged, not emailed — Paystack itself never sends a bad
+          // signature, so every hit here is either a misconfigured
+          // PAYSTACK_SECRET_KEY (which legitimate traffic would trip
+          // constantly and flood an inbox) or scanner/attack noise against a
+          // public endpoint (which is expected background radiation for any
+          // public webhook URL, not something worth an email each time).
+          // Visible via wrangler tail either way if it's ever worth digging into.
+          try { console.log('[webhook]', JSON.stringify({ event: 'invalid_signature' })); } catch (e) {}
+          return json({ error: 'invalid_signature' }, 401);
+        }
         let event;
         try { event = JSON.parse(rawBody); } catch (e) { return json({ ok: true }); }
         const type = event && event.event;
@@ -9567,9 +9705,19 @@ export default {
             ]);
           }
         } catch (e) {
-          // Swallow, Paystack retries on non-2xx, and a webhook we can't
-          // fully process (unknown event shape, a lookup miss) shouldn't
-          // turn into an infinite retry storm, just no-op it.
+          // Still returns 200 below — Paystack retries on non-2xx, and a
+          // malformed/unexpected event shouldn't turn into an infinite retry
+          // storm. But a signature-verified webhook (real money genuinely
+          // moved) that then threw while processing is exactly the "silent
+          // failure nobody finds out about" case this file had zero
+          // visibility into before — a customer paid and their workspace or
+          // Premium may not have actually unlocked, with nothing but a swallowed
+          // exception marking the moment it happened. This is the single
+          // highest-value alert in the app for that reason.
+          await sendAlertEmail(env, {
+            subject: `Billing webhook failed to process (${type || 'unknown event'})`,
+            text: `A Paystack webhook verified correctly but threw while processing.\n\nEvent: ${type || 'unknown'}\nReference: ${data.reference || 'n/a'}\nCustomer: ${data.customer ? data.customer.email : 'n/a'}\nError: ${e && e.message ? e.message : String(e)}\n\nThis may mean a paid workspace or Premium purchase did not actually activate — worth checking /admin/orgs or the user's premium status directly.`,
+          });
         }
         return json({ ok: true });
       }
@@ -10521,6 +10669,7 @@ export default {
   // failure must never block the other's.
   async scheduled(event, env, ctx) {
     const registryStub = env.REGISTRY.get(env.REGISTRY.idFromName('global-registry-v1'));
+    const startedAt = Date.now();
 
     try {
       const retRes = await registryStub.fetch('https://internal/internal/retention-days');
@@ -10532,10 +10681,32 @@ export default {
         const holdRes = await registryStub.fetch('https://internal/internal/legal-hold-chat-ids');
         const { chatIds: heldChatIds } = await holdRes.json();
         const held = new Set(heldChatIds || []);
+        const toProcess = (chatIds || []).filter((id) => !held.has(id));
 
-        for (const chatId of chatIds || []) {
-          if (held.has(chatId)) continue; // legal hold: never auto-purged regardless of the retention window
-          try {
+        // Was one Durable Object fetch fully awaited before starting the
+        // next, for every chat room on the entire platform, in a single
+        // Cron Trigger invocation — fine at the platform's current size, but
+        // a purely sequential unbounded loop like this is exactly the shape
+        // of code that keeps working in every test and then silently starts
+        // running out of the invocation's time budget once there are enough
+        // chat rooms, with the per-chat try/catch below quietly absorbing
+        // whatever didn't get to run as "retried tomorrow" — true for a
+        // genuinely transient failure, false for "there wasn't time," and
+        // indistinguishable from each other without this summary log.
+        // Bounded concurrency (CHUNK rooms in flight at once, not the whole
+        // platform at once and not fully serial either) cuts real wall-clock
+        // time roughly by the chunk size without an unbounded fan-out of
+        // simultaneous subrequests. The complete fix for a platform large
+        // enough to still exceed this is cursor-based batching across
+        // multiple cron runs (process N rooms, persist where it left off,
+        // pick up there tomorrow) — a real state-management change, not
+        // something to also do blind in this pass; this is the safe
+        // improvement available without it.
+        const CHUNK = 15;
+        let purged = 0, failed = 0;
+        for (let i = 0; i < toProcess.length; i += CHUNK) {
+          const chunk = toProcess.slice(i, i + CHUNK);
+          const results = await Promise.allSettled(chunk.map(async (chatId) => {
             const roomStub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(chatId));
             const res = await roomStub.fetch('https://internal/purge-old', {
               method: 'POST',
@@ -10545,25 +10716,42 @@ export default {
             if (env.MEDIA && mediaKeys && mediaKeys.length) {
               await Promise.all(mediaKeys.map((key) => env.MEDIA.delete(key).catch(() => {})));
             }
-          } catch (e) {
-            // One chat failing shouldn't stop the rest of the sweep, it'll be
-            // retried on tomorrow's run regardless.
-          }
+          }));
+          for (const r of results) { if (r.status === 'fulfilled') purged++; else failed++; }
+        }
+        const summary = { job: 'retention_purge', totalChats: toProcess.length, purged, failed, durationMs: Date.now() - startedAt };
+        try { console.log('[cron]', JSON.stringify(summary)); } catch (e) {}
+        // A handful of individual chat failures is normal noise (one DO
+        // momentarily unreachable); a large fraction failing in the same run
+        // is the actual "silently breaking at scale" signal worth a human
+        // looking at rather than trusting tomorrow's retry to fix itself.
+        if (toProcess.length > 0 && failed / toProcess.length > 0.1) {
+          await sendAlertEmail(env, {
+            subject: 'Retention purge: high failure rate',
+            text: `${failed}/${toProcess.length} chat rooms failed to purge in this run (${summary.durationMs}ms). See wrangler tail for [cron] retention_purge logs.`,
+          });
         }
       }
     } catch (e) {
-      // Never let a retention-sweep failure affect anything else this worker does.
+      await sendAlertEmail(env, {
+        subject: 'Retention purge cron job crashed',
+        text: `The daily retention-purge job threw before completing: ${e && e.message ? e.message : String(e)}`,
+      });
     }
 
     try {
       // See Registry's /internal/birthday-sweep for what this actually does
-      // (compute today's birthdays per org, notify manager + HR, dedupe).
-      // Fire-and-forget from this side on purpose — a slow or failed sweep
-      // shouldn't hold the Cron Trigger open or throw and skip tomorrow's.
-      await registryStub.fetch('https://internal/internal/birthday-sweep', { method: 'POST' });
+      // (compute today's birthdays per org, notify manager + HR, dedupe) —
+      // that handler now does its own internal batching/summary logging for
+      // the same reason as the purge loop above (see its comment).
+      const sweepRes = await registryStub.fetch('https://internal/internal/birthday-sweep', { method: 'POST' });
+      const sweepBody = await sweepRes.json().catch(() => ({}));
+      try { console.log('[cron]', JSON.stringify({ job: 'birthday_sweep', ...sweepBody, durationMs: Date.now() - startedAt })); } catch (e) {}
     } catch (e) {
-      // Same reasoning as the retention try/catch above — never let this
-      // affect anything else, it'll just run again tomorrow.
+      await sendAlertEmail(env, {
+        subject: 'Birthday sweep cron job crashed',
+        text: `The daily birthday-notification job threw before completing: ${e && e.message ? e.message : String(e)}`,
+      });
     }
   },
 };

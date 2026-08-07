@@ -163,6 +163,28 @@
   #lock{
     position:fixed; inset:0; z-index:10; display:flex; align-items:center; justify-content:center;
     flex-direction:column; gap:28px; padding:24px;
+    /* iOS Safari (standalone PWA especially) can report `100vh`-derived box
+       heights before the visual viewport actually settles, and inset:0's
+       centering math against that stale, too-tall box is what reads as
+       "content stuck near the top with dead space below" — the logo/keypad
+       render at their normal size but the invisible flex box they're being
+       centered inside is taller than what's actually visible, so the true
+       center sits below the fold. `100dvh` (dynamic viewport height)
+       recalculates against the real, current visual viewport instead; the
+       plain 100vh line stays first as a fallback for older browsers that
+       don't support dvh at all, dvh overrides it wherever it's understood.
+       Safe-area padding is explicit rather than folded into the flat 24px
+       so a notch/Dynamic Island or the home-indicator area doesn't eat into
+       the same budget the centering math is using. overflow-y:auto is the
+       backstop for the one case dvh can't fix — a genuinely short viewport
+       (small phone + a big system font size) where the content is taller
+       than the screen even once measured correctly; scrolling beats
+       clipping the keypad off unreachably. */
+    height:100vh; height:100dvh;
+    padding-top:calc(24px + env(safe-area-inset-top, 0px));
+    padding-bottom:calc(24px + env(safe-area-inset-bottom, 0px));
+    overflow-y:auto;
+    box-sizing:border-box;
   }
   #lock .icon-big{ width:250px; height:auto; filter:drop-shadow(0 0 30px rgba(0,212,255,0.2)) drop-shadow(0 8px 24px rgba(0,0,0,0.6)); }
   #lock .brand{ font-size:30px; font-weight:700; letter-spacing:.14em; text-align:center;
@@ -607,6 +629,12 @@
     position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
     width:56px; height:56px; font-size:20px; z-index:0;
   }
+  .meeting-tile-remove-btn{
+    position:absolute; top:6px; right:6px; z-index:2; width:22px; height:22px; border-radius:50%;
+    background:rgba(20,20,20,0.72); color:#ff6a6a; border:1px solid rgba(255,255,255,0.18);
+    display:none; align-items:center; justify-content:center; font-size:13px; line-height:1; cursor:pointer;
+  }
+  .meeting-tile-remove-btn.host-visible{ display:flex; }
   .meeting-tile-name{
     position:absolute; left:8px; bottom:6px; font-size:11.5px; font-weight:600; color:#fff;
     text-shadow:0 1px 4px rgba(0,0,0,0.7); background:rgba(0,0,0,0.35); padding:2px 8px; border-radius:999px;
@@ -1279,6 +1307,20 @@
     padding:12px 16px; border-radius:999px; background:rgba(var(--tint-rgb),0.03);
     border:1px solid var(--glass-brd); margin-bottom:8px; font-size:13px; cursor:default;
   }
+  /* A full pill (999px radius) reads fine for the common case — a short,
+     one-line label — but the same shape actively breaks once the label
+     genuinely wraps to 2-3 lines: the rounded caps stretch into a bizarre
+     elongated capsule around the paragraph, and centering the checkbox
+     against the whole block's height leaves it floating disconnected from
+     any specific line rather than sitting next to the text it controls.
+     Applied to the handful of settings rows whose label is long enough to
+     reliably wrap (photo-policy/security-policy explanatory toggles) — the
+     ~20 short single-line rows elsewhere keep the plain pill look
+     unchanged, this is additive, not a global shape change. */
+  .settings-row-multiline{
+    border-radius:16px; align-items:flex-start; padding:14px 16px;
+  }
+  .settings-row-multiline input[type="checkbox"]{ margin-top:2px; }
   .settings-row-action{ cursor:pointer; transition:background .15s ease; }
   .settings-row-action:hover{ background:rgba(var(--tint-rgb),0.07); }
   .settings-row input[type="checkbox"]{ width:auto; flex-shrink:0; }
@@ -2045,7 +2087,7 @@
             <option value="60">Require after 1 minute</option>
             <option value="300">Require after 5 minutes</option>
           </select>
-          <label class="settings-row" style="margin-bottom:8px;">
+          <label class="settings-row settings-row-multiline" style="margin-bottom:8px;">
             <span>Require biometric/PIN re-confirmation for sensitive actions (approving a device, changing billing)</span>
             <input type="checkbox" id="securityPolicyStepUpToggle">
           </label>
@@ -2054,11 +2096,11 @@
         </div>
         <div style="border-top:1px solid var(--border); padding-top:12px; margin-top:12px;">
           <div class="hint" style="margin-bottom:6px;">Profile photo protection. Android can technically block screenshots of the full-screen photo viewer (FLAG_SECURE); iOS has no equivalent API — no app can prevent a screenshot there, so this only ever protects Android devices. On iOS the app can detect that a screenshot happened while the viewer was open and report it, but not stop it.</div>
-          <label class="settings-row" style="margin-bottom:8px;">
+          <label class="settings-row settings-row-multiline" style="margin-bottom:8px;">
             <span>Block screenshots of the profile photo viewer on Android</span>
             <input type="checkbox" id="avatarPolicyScreenshotToggle">
           </label>
-          <label class="settings-row" style="margin-bottom:8px;">
+          <label class="settings-row settings-row-multiline" style="margin-bottom:8px;">
             <span>Show viewer's name to the photo owner in their access log (off by default — most messaging apps deliberately don't reveal who viewed a profile photo, since that creates its own surveillance dynamic against the viewer)</span>
             <input type="checkbox" id="avatarPolicyIdentityToggle">
           </label>
@@ -3910,12 +3952,35 @@
   // the locally-cached state.pin instead of a value the person just typed
   // (there's nothing to type here — that's the whole point of this button).
   document.getElementById('lockPasskeyBtn').addEventListener('click', async function(){
-    if (!window.PublicKeyCredential || !navigator.credentials || !state.pin) return;
     const btn = this;
     const original = btn.textContent;
+    // Every failure branch below used to reset the button text and stop
+    // silently — from the tap itself, that's indistinguishable from the
+    // button simply doing nothing, which is exactly what "Face ID isn't
+    // working" looks like from the outside even when the real cause (an
+    // expired session, a passkey that isn't registered for this exact
+    // domain, a network hiccup) is perfectly diagnosable. Every path now
+    // says something, even if brief, so a real failure is visibly a
+    // failure rather than a dead button.
+    const fail = (msg) => {
+      btn.textContent = original;
+      if (msg) { lockMsg.textContent = msg; setTimeout(() => { if (lockMsg.textContent === msg) setLockMessage(); }, 2600); }
+    };
+    if (!window.PublicKeyCredential || !navigator.credentials) return fail('Face ID / Touch ID isn\'t available in this browser — use your PIN.');
+    if (!state.pin) return fail();
     btn.textContent = 'Waiting for Face ID / Touch ID…';
     const optRes = await apiFetch('/webauthn/auth-options', { method: 'POST', headers: { 'X-Para-Pin-Hash': state.pin } });
-    if (!optRes.ok){ btn.textContent = original; return; }
+    if (!optRes.ok){
+      // A passkey registered on a different domain (e.g. set up on
+      // chat.parasyte.cloud, this device now on an org's branded custom
+      // domain) can't be offered here at all — see resolveWebauthnRpId in
+      // worker.js. That's a real, different situation from "not set up",
+      // worth its own message rather than folding into a generic failure.
+      const reason = optRes.body && optRes.body.reason === 'no_credential_for_domain'
+        ? 'No Face ID / Touch ID set up for this specific address yet — use your PIN, then add one from Settings.'
+        : 'Couldn\'t reach the server to unlock — use your PIN.';
+      return fail(reason);
+    }
     const opts = optRes.body;
     let assertion;
     try {
@@ -3929,8 +3994,7 @@
         },
       });
     } catch(e){
-      btn.textContent = original;
-      return; // cancelled/failed — the PIN keypad is right there as always, no error needed for a simple dismiss
+      return fail(); // cancelled/failed — the PIN keypad is right there as always, no error needed for a simple dismiss
     }
     const r = await apiFetch('/webauthn/auth-verify', {
       method: 'POST',
@@ -3943,7 +4007,7 @@
         signature: e2eeBufToB64(assertion.response.signature),
       }),
     });
-    if (!r.ok){ btn.textContent = original; return; }
+    if (!r.ok){ return fail('That didn\'t verify — use your PIN.'); }
     lockEl.style.display = 'none';
     appEl.classList.add('show');
     buffer = '';
@@ -8569,6 +8633,15 @@
   let meetingWsPingInterval = null;
   let meetingWsReconnectTimer = null;
   let meetingLeavingIntentionally = false;
+  // The server has fully supported host controls (mute-all, remove-
+  // participant, waiting room admit/deny — see MeetingRoom in worker.js)
+  // since an earlier round, but nothing in this file ever sent or handled
+  // any of those message types — there was no way to reach the feature from
+  // the web app at all. This tracks who the current host is (set from the
+  // 'roster' message on join, kept current via 'host-changed' if the host
+  // leaves) purely to gate the "Remove" action below to the one person the
+  // server will actually let use it.
+  let meetingHostUserId = null;
 
   function meetingTileFor(userId, name, avatarUrl){
     let tile = document.getElementById('meetingTile_' + userId);
@@ -8596,8 +8669,41 @@
     label.className = 'meeting-tile-name';
     label.textContent = name || 'Someone';
     tile.appendChild(label);
+    const removeBtn = document.createElement('div');
+    removeBtn.className = 'meeting-tile-remove-btn';
+    removeBtn.title = 'Remove from meeting';
+    removeBtn.textContent = '×';
+    removeBtn.addEventListener('click', (e)=>{
+      e.stopPropagation();
+      meetingRequestRemoveParticipant(userId, name || 'this person');
+    });
+    tile.appendChild(removeBtn);
     document.getElementById('meetingTilesGrid').appendChild(tile);
+    meetingRefreshHostControls();
     return tile;
+  }
+
+  // Shows/hides every tile's Remove button based on whether I'm currently
+  // the host — re-run whenever host status changes (join, host-changed) or
+  // a new tile is created, rather than computed once, since either of those
+  // can happen at any point during a meeting (the host can leave and
+  // reassignment can happen mid-call).
+  function meetingRefreshHostControls(){
+    const amHost = !!myUserId && meetingHostUserId === myUserId;
+    document.querySelectorAll('.meeting-tile-remove-btn').forEach(btn=>{
+      btn.classList.toggle('host-visible', amHost);
+    });
+  }
+
+  // Server-enforced (see MeetingRoom's remove-participant handler — it
+  // independently re-checks isHost(userId) itself, this button being
+  // visible is a UI convenience only, never the actual authorization), but
+  // still worth a confirm() here: unlike muting yourself or leaving, this is
+  // an action taken against someone else who has no say in it.
+  function meetingRequestRemoveParticipant(userId, name){
+    if (!meetingWs || meetingWs.readyState !== WebSocket.OPEN) return;
+    if (!confirm(`Remove ${name} from this meeting? They won't be able to rejoin unless invited again.`)) return;
+    try { meetingWs.send(JSON.stringify({ type: 'remove-participant', targetUserId: userId })); } catch(e){}
   }
 
   function meetingAttachTrack(userId, name, avatarUrl, track, stream){
@@ -8839,6 +8945,8 @@
       // start_meetings but the server didn't actually grant it.
       meetingOrgId = data.verifiedOrgId || null;
       document.getElementById('meetingRecordBtn').style.display = meetingOrgId ? 'flex' : 'none';
+      meetingHostUserId = data.hostUserId || null;
+      meetingRefreshHostControls();
       (data.participants || []).forEach(p=>{
         if (p.userId === myUserId) return;
         meetingParticipants[p.userId] = { name: p.name, avatarUrl: p.avatarUrl };
@@ -8846,6 +8954,27 @@
         (p.tracks || []).forEach(t => meetingPullTrack(p.userId, p.name, p.avatarUrl, p.sfuSessionId, t.trackName, t.kind));
       });
       updateMeetingStatus();
+      return;
+    }
+    if (data.type === 'host-changed'){
+      // Fires when whoever was host leaves and the longest-present remaining
+      // participant is promoted (see MeetingRoom.maybeReassignHost) — every
+      // client needs to know this, not just to show/hide their own Remove
+      // buttons, but because otherwise nobody would ever regain the ability
+      // to remove a disruptive participant once the original host left.
+      meetingHostUserId = data.hostUserId || null;
+      meetingRefreshHostControls();
+      return;
+    }
+    if (data.type === 'removed'){
+      // The host removed ME from this meeting. leaveMeeting() already sets
+      // meetingLeavingIntentionally itself (so the socket's own close
+      // handler doesn't treat this as a dropped-connection reconnect
+      // attempt) — the banner is what turns a silent "you're just back on
+      // the app now" into an explained, deliberate host action instead of
+      // something that looks like a bug.
+      leaveMeeting();
+      showSessionBanner('You were removed from the meeting.');
       return;
     }
     if (data.type === 'participant-joined'){
@@ -9161,6 +9290,7 @@
     meetingOrgId = null;
     meetingSfuSessionId = null;
     meetingParticipants = {};
+    meetingHostUserId = null;
     meetingMidToTrack = {};
     meetingPulledTracks = new Set();
     // Drop any queued negotiations from the meeting that just ended, so a
