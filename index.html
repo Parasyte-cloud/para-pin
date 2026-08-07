@@ -5118,8 +5118,17 @@
     if (!name){ errEl.textContent = 'Enter a name.'; errEl.style.display = 'block'; return; }
     if (!email || !email.includes('@')){ errEl.textContent = 'Enter a valid email for billing.'; errEl.style.display = 'block'; return; }
     const saveBtn = document.getElementById('createWorkspaceSaveBtn');
+    // A double-click/double-tap here used to fire two real org-creation
+    // requests before the first one's redirect ever happened, each starting
+    // its own Paystack checkout for what the person meant as one workspace.
+    // The server now dedupes that too (see /org/create), but disabling the
+    // button is what stops it from happening at all instead of relying on
+    // a second layer to clean it up after the fact.
+    if (saveBtn.disabled) return;
+    saveBtn.disabled = true;
     saveBtn.textContent = 'Redirecting…';
     const r = await apiFetch('/billing/checkout-new', { method: 'POST', body: JSON.stringify({ name, email }) });
+    saveBtn.disabled = false;
     saveBtn.textContent = 'Continue to payment';
     if (!r.ok){
       errEl.textContent = r.body && r.body.error === 'paystack_plan_not_configured'

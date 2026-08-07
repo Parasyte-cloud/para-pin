@@ -3520,6 +3520,27 @@ export class Registry {
       if (!me) return json({ error: 'not_registered' }, 401);
       if (!name || !name.trim()) return json({ error: 'missing_name' }, 400);
 
+      // Double-submit guard: /billing/checkout-new (the only caller) has no
+      // idempotency key, and its client button wasn't disabled on click
+      // (fixed alongside this), so a double-click/double-tap or a network
+      // retry landed here twice and created two real orgs, each kicking off
+      // its own Paystack transaction — worst case, two separate charges for
+      // one intended workspace, or an abandoned 'pending' org left behind
+      // forever if only one checkout was completed. If this same user
+      // already has a still-unpaid org they created in the last 5 minutes,
+      // hand that one back instead of minting a new one; a genuinely new,
+      // deliberate workspace from the same person that soon is rare enough
+      // that asking them to wait out the window is the safer failure mode
+      // here, not creating a duplicate billing flow.
+      const recentOrgs = (await this.state.storage.get(`userOrgs:${me.id}`)) || [];
+      const dedupeCutoff = Date.now() - 5 * 60 * 1000;
+      for (let i = recentOrgs.length - 1; i >= 0; i--) {
+        const existing = await this.state.storage.get(`org:${recentOrgs[i]}`);
+        if (existing && existing.createdBy === me.id && existing.billingStatus === 'pending' && existing.createdAt > dedupeCutoff) {
+          return json({ org: existing, deduped: true });
+        }
+      }
+
       const orgId = crypto.randomUUID();
       // Starts locked (billingStatus 'pending'): the creator is wired up as
       // admin/member right away so no separate limbo bookkeeping is needed,
@@ -7253,7 +7274,25 @@ export class ChatRoom {
         msg.replyTo = { id: String(replyTo.id).slice(0, 100) };
       }
       msgs.push(msg);
-      if (msgs.length > 500) msgs.splice(0, msgs.length - 500);
+      // A real, active chat (a busy team channel especially) can blow past
+      // any fixed message count within days — this cap was silently and
+      // permanently discarding a chat's oldest history on every single
+      // message sent past it, with zero warning to anyone. That's real data
+      // loss for a product whose entire premise is persistent messaging, not
+      // a cosmetic limit. The true fix is moving message storage off a
+      // single ever-growing array under one key (which is itself bounded by
+      // this Durable Object's per-value storage ceiling) to one row/key per
+      // message with a paginated read path — a real architecture change,
+      // not a number to tune. Until that lands: the cap is raised to give
+      // real headroom for typical text-weight chats, and every truncation is
+      // now logged so it's a visible, actionable signal instead of invisible
+      // loss discovered by a customer asking "where did my old messages go."
+      const MSG_HISTORY_CAP = 1000;
+      if (msgs.length > MSG_HISTORY_CAP) {
+        const dropped = msgs.length - MSG_HISTORY_CAP;
+        msgs.splice(0, dropped);
+        try { console.log('[chat]', JSON.stringify({ event: 'history_truncated', dropped, cap: MSG_HISTORY_CAP })); } catch (e) {}
+      }
       await this.state.storage.put('messages', msgs);
 
       this.broadcast(JSON.stringify({ type: 'message', message: msg }), null);
@@ -7423,7 +7462,16 @@ export class ChatRoom {
         ts: Date.now(),
       };
       msgs.push(msg);
-      if (msgs.length > 500) msgs.splice(0, msgs.length - 500);
+      // Same history-cap reasoning as the real /messages send handler above
+      // (see its comment) — kept consistent so a chat's join/leave system
+      // messages don't push real messages out any faster than they already
+      // would on their own.
+      const MSG_HISTORY_CAP = 1000;
+      if (msgs.length > MSG_HISTORY_CAP) {
+        const dropped = msgs.length - MSG_HISTORY_CAP;
+        msgs.splice(0, dropped);
+        try { console.log('[chat]', JSON.stringify({ event: 'history_truncated', dropped, cap: MSG_HISTORY_CAP })); } catch (e) {}
+      }
       await this.state.storage.put('messages', msgs);
       this.broadcast(JSON.stringify({ type: 'message', message: msg }), null);
       return json({ ok: true, message: msg });
