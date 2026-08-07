@@ -4966,6 +4966,26 @@ export class Registry {
       const days = daysBetweenInclusive(startDate, endDate, !!halfDay);
       if (days <= 0) return json({ error: 'invalid_dates' }, 400);
 
+      // Duplicate-submission guard: unlike /org/hr/leave/decide (which
+      // already can't double-apply — it checks `status !== 'pending'` before
+      // mutating), nothing here stopped a double-click or a retried request
+      // from creating two separate pending records for the identical dates.
+      // Both would independently pass the balance check above (each reads
+      // the same not-yet-updated ledger), and if a manager approved both —
+      // entirely plausible, they'd look like the same request twice in the
+      // inbox — the ledger would get debited for the same vacation twice.
+      // Scans the same `leaveRequestIds` list /org/hr/leave/inbox already
+      // scans in full, so this doesn't introduce a new O(all requests ever)
+      // pattern beyond what this module already does elsewhere.
+      const existingIds = (await this.state.storage.get(`leaveRequestIds:${orgId}`)) || [];
+      for (const rid of existingIds) {
+        const existing = await this.state.storage.get(`leaveRequest:${orgId}:${rid}`);
+        if (existing && existing.userId === me.id && existing.status === 'pending'
+          && existing.type === type && existing.startDate === startDate && existing.endDate === endDate) {
+          return json({ error: 'duplicate_pending_request' }, 409);
+        }
+      }
+
       const employee = await getEmployee(this.state.storage, orgId, me.id);
       const ledger = await getLeaveLedger(this.state.storage, orgId, me.id);
       const entitlements = await getOrgLeaveEntitlements(this.state.storage, orgId);
@@ -5133,23 +5153,46 @@ export class Registry {
         notes: input.notes ? String(input.notes).trim().slice(0, 4000) : null,
       };
     }
+    // Bug fix (reliability sweep) — same bug class as crmSanitizeDeal above,
+    // found right after fixing that one: this expected split `firstName`/
+    // `lastName` fields, but index.html's contact form has always had a
+    // single "Name" input (id="crmContactNameInput") and sends one combined
+    // `name` field — and the whole contact list/search/edit UI already
+    // reads/filters on `c.name` too. Same result as the deal bug: `clean.
+    // firstName` was unconditionally '', so `if (!clean.firstName) return
+    // ...missing_name` rejected every single contact creation from the
+    // actual UI. Matching the server to the client's one real, already-
+    // consistent convention (single `name`) rather than teaching the client
+    // a first/last split it was never built with.
     function crmSanitizeContact(input) {
       return {
         companyId: input.companyId ? String(input.companyId) : null,
-        firstName: (input.firstName || '').toString().trim().slice(0, 80),
-        lastName: input.lastName ? String(input.lastName).trim().slice(0, 80) : null,
+        name: (input.name || '').toString().trim().slice(0, 160),
         email: input.email ? String(input.email).trim().slice(0, 200) : null,
         phone: input.phone ? String(input.phone).trim().slice(0, 40) : null,
         title: input.title ? String(input.title).trim().slice(0, 100) : null,
         notes: input.notes ? String(input.notes).trim().slice(0, 4000) : null,
       };
     }
+    // Bug fix (reliability sweep): this read `input.name`, but the ONLY
+    // client that ever calls this (index.html's crmDealSaveBtn handler,
+    // whose form field is literally id="crmDealTitleInput") has always sent
+    // `title`, never `name` — and the deal-card display already reads
+    // `d.title` too. That mismatch meant `clean.name` was unconditionally
+    // '', which meant the very next line's `if (!clean.name) return
+    // json({error:'missing_name'},400)` rejected EVERY deal creation
+    // attempt from the actual UI, unconditionally, since the day this
+    // shipped — "Could not save. Try again." on literally every retry,
+    // because retrying can't fix a field name that will never match.
+    // Renaming this function's own field to `title` (matching the one real
+    // caller and the display code) is the fix, not teaching the client a
+    // new field name — `title` was already the established convention here.
     function crmSanitizeDeal(input) {
       const stage = CRM_STAGES.includes(input.stage) ? input.stage : 'lead';
       return {
         companyId: input.companyId ? String(input.companyId) : null,
         contactId: input.contactId ? String(input.contactId) : null,
-        name: (input.name || '').toString().trim().slice(0, 160),
+        title: (input.title || '').toString().trim().slice(0, 160),
         value: Number.isFinite(Number(input.value)) ? Math.max(0, Number(input.value)) : 0,
         currency: input.currency ? String(input.currency).trim().slice(0, 6).toUpperCase() : 'USD',
         stage,
@@ -5239,7 +5282,7 @@ export class Registry {
       if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
       if (!(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_crm'))) return json({ error: 'forbidden' }, 403);
       const clean = crmSanitizeContact(fields);
-      if (!clean.firstName) return json({ error: 'missing_name' }, 400);
+      if (!clean.name) return json({ error: 'missing_name' }, 400);
       const id = crypto.randomUUID();
       const now = Date.now();
       const contact = { id, orgId, ...clean, createdAt: now, updatedAt: now, createdBy: me.id };
@@ -5248,7 +5291,7 @@ export class Registry {
       await this.state.storage.put(`crmContactIds:${orgId}`, [...ids, id]);
       await appendAuditLog(this.state.storage, orgId, {
         actorId: me.id, actorName: me.displayName || 'Someone', action: 'crm_contact_created',
-        details: `Added contact: ${clean.firstName} ${clean.lastName || ''}`.trim(),
+        details: `Added contact: ${clean.name}`,
       });
       return json({ contact });
     }
@@ -5267,7 +5310,10 @@ export class Registry {
         if (c) contacts.push(c);
       }
       if (companyId) contacts = contacts.filter((c) => c.companyId === companyId);
-      contacts.sort((a, b) => a.firstName.localeCompare(b.firstName));
+      // Defensive `|| ''` on both sides: harmless for any contact created
+      // after this fix, but keeps this from throwing on a hypothetical
+      // pre-fix record that somehow still has no `name` at all.
+      contacts.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
       return json({ contacts });
     }
 
@@ -5287,18 +5333,18 @@ export class Registry {
         await this.state.storage.put(`crmContactIds:${orgId}`, ids.filter((id) => id !== contactId));
         await appendAuditLog(this.state.storage, orgId, {
           actorId: me.id, actorName: me.displayName || 'Someone', action: 'crm_contact_deleted',
-          details: `Deleted contact: ${existing.firstName} ${existing.lastName || ''}`.trim(),
+          details: `Deleted contact: ${existing.name}`,
         });
         return json({ ok: true });
       }
 
       const clean = crmSanitizeContact({ ...existing, ...fields });
-      if (!clean.firstName) return json({ error: 'missing_name' }, 400);
+      if (!clean.name) return json({ error: 'missing_name' }, 400);
       const contact = { ...existing, ...clean, updatedAt: Date.now() };
       await this.state.storage.put(`crmContact:${orgId}:${contactId}`, contact);
       await appendAuditLog(this.state.storage, orgId, {
         actorId: me.id, actorName: me.displayName || 'Someone', action: 'crm_contact_updated',
-        details: `Updated contact: ${clean.firstName} ${clean.lastName || ''}`.trim(),
+        details: `Updated contact: ${clean.name}`,
       });
       return json({ contact });
     }
@@ -5310,7 +5356,7 @@ export class Registry {
       if (!orgId || !(await isOrgMember(this.state.storage, orgId, me.id))) return json({ error: 'forbidden' }, 403);
       if (!(await hasOrgPermission(this.state.storage, orgId, me.id, 'manage_crm'))) return json({ error: 'forbidden' }, 403);
       const clean = crmSanitizeDeal(fields);
-      if (!clean.name) return json({ error: 'missing_name' }, 400);
+      if (!clean.title) return json({ error: 'missing_title' }, 400);
       const id = crypto.randomUUID();
       const now = Date.now();
       const deal = {
@@ -5322,7 +5368,7 @@ export class Registry {
       await this.state.storage.put(`crmDealIds:${orgId}`, [...ids, id]);
       await appendAuditLog(this.state.storage, orgId, {
         actorId: me.id, actorName: me.displayName || 'Someone', action: 'crm_deal_created',
-        details: `Added deal: ${clean.name} (${clean.stage})`,
+        details: `Added deal: ${clean.title} (${clean.stage})`,
       });
       return json({ deal });
     }
@@ -5359,14 +5405,14 @@ export class Registry {
         await this.state.storage.put(`crmDealIds:${orgId}`, ids.filter((id) => id !== dealId));
         await appendAuditLog(this.state.storage, orgId, {
           actorId: me.id, actorName: me.displayName || 'Someone', action: 'crm_deal_deleted',
-          details: `Deleted deal: ${existing.name}`,
+          details: `Deleted deal: ${existing.title}`,
         });
         return json({ ok: true });
       }
 
       const wasClosed = CRM_CLOSED_STAGES.includes(existing.stage);
       const clean = crmSanitizeDeal({ ...existing, ...fields });
-      if (!clean.name) return json({ error: 'missing_name' }, 400);
+      if (!clean.title) return json({ error: 'missing_title' }, 400);
       const nowClosed = CRM_CLOSED_STAGES.includes(clean.stage);
       const deal = {
         ...existing, ...clean, updatedAt: Date.now(),
@@ -5379,8 +5425,8 @@ export class Registry {
       await appendAuditLog(this.state.storage, orgId, {
         actorId: me.id, actorName: me.displayName || 'Someone', action: 'crm_deal_updated',
         details: existing.stage !== clean.stage
-          ? `Moved deal "${clean.name}" from ${existing.stage} to ${clean.stage}`
-          : `Updated deal: ${clean.name}`,
+          ? `Moved deal "${clean.title}" from ${existing.stage} to ${clean.stage}`
+          : `Updated deal: ${clean.title}`,
       });
       return json({ deal });
     }

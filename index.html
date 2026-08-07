@@ -3058,8 +3058,15 @@
   }, 1000);
 </script>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js"></script>
+<!-- Perf fix: the two QR libraries used to be loaded eagerly, render-
+     blocking, on EVERY page load here — for a feature (share-my-PIN /
+     scan-to-add) most sessions never touch. They already have a proper
+     lazy loader below (ensureQRCodeLib/ensureJsQR, with mirror fallbacks),
+     called right at the point of actual use in settingsShareBtn's handler
+     and startScan() — these eager tags just meant that loader's "not yet
+     loaded" branch never had anything to do, since both libs were already
+     sitting in memory unconditionally. Deleting these two tags is what
+     actually turns the lazy loader on. -->
 <script>
 (function(){
   "use strict";
@@ -3505,6 +3512,26 @@
   let iAmAdmin = false;
   let userAvatarCache = {}; // userId -> avatarUrl | null
 
+  // QA sweep finding ("expired sessions" / "deleted users" / "permission
+  // changes mid-session"): every one of this app's 100+ apiFetch call sites
+  // handles its own !r.ok case with its own specific message ("Couldn't
+  // save your profile. Try again.", etc.), which is fine for a real
+  // transient failure, but actively misleading for the one case where NONE
+  // of those messages are true — the server no longer recognizes this
+  // pinHash at all (an admin disabled/reset the PIN, this device was
+  // remotely logged out, or the account was removed) while a tab sits open.
+  // Every one of those "Try again" messages implies a retry could work; it
+  // can't, this session is just over. Rather than retrofit all 100+ call
+  // sites individually (real risk of introducing a new bug in code that
+  // already works), this catches it once at the one choke point everything
+  // already passes through, without changing apiFetch's return shape at all
+  // — every existing caller's `if (!r.ok)` still fires exactly as before,
+  // this only adds a clearer banner on top of that. Deliberately does NOT
+  // force a reload/redirect: someone mid-message or mid-call shouldn't get
+  // yanked out from under themselves the instant this fires, they just get
+  // an honest explanation instead of a confusing generic one, and can
+  // finish what they're doing before refreshing.
+  let sessionExpiredNoticeShown = false;
   async function apiFetch(path, opts = {}){
     const headers = { 'content-type': 'application/json', ...(opts.headers || {}) };
     if (myPinHash) headers['X-Para-Pin-Hash'] = myPinHash;
@@ -3516,6 +3543,13 @@
     }
     let body = null;
     try { body = await res.json(); } catch(e) {}
+    // `myPinHash` guard: only fires once we actually thought we were signed
+    // in, so this can't misfire during the PIN-entry flow itself (wrong PIN,
+    // etc., which return their own distinct error codes, not this one).
+    if (res.status === 401 && body && body.error === 'not_registered' && myPinHash && !sessionExpiredNoticeShown){
+      sessionExpiredNoticeShown = true;
+      showSessionBanner("Your session isn't valid anymore. Finish anything urgent, then refresh the page and sign in again.");
+    }
     return { ok: res.ok, status: res.status, body };
   }
 
@@ -4993,8 +5027,25 @@
   // endpoint regardless of whether this ever runs, this is purely the UI
   // telling them why chats/roster/Meeting Room all came back empty/forbidden).
   async function checkActiveWorkspaceBilling(){
-    if (!activeOrgId){ closeModal('workspaceLockedOverlay'); return; }
-    const r = await apiFetch(`/billing/status?orgId=${encodeURIComponent(activeOrgId)}`);
+    // Bug fix (QA sweep — "workspace switching" / concurrent responses):
+    // this used to read the GLOBAL `activeOrgId` both before AND after the
+    // await, with no memory of which workspace it was actually checking.
+    // Switching A -> B fast enough to have both checks in flight at once
+    // meant whichever response arrived LAST won, regardless of which
+    // workspace was actually active by then — including the reactivate
+    // button's dataset.orgId, which could end up wired to workspace A's id
+    // while the banner text (built from A's own response body) still talked
+    // about A, all while the person was already looking at B. That's not
+    // just a display glitch: clicking "Reactivate" would start a checkout
+    // for the WRONG workspace's billing. Capturing the id once up front and
+    // bailing out if it's gone stale by the time the response lands fixes
+    // both the display and the reactivate-button-wired-to-wrong-org cases —
+    // a newer call for the now-current workspace has already been kicked
+    // off by switchWorkspace() and will render its own correct result.
+    const checkedOrgId = activeOrgId;
+    if (!checkedOrgId){ closeModal('workspaceLockedOverlay'); return; }
+    const r = await apiFetch(`/billing/status?orgId=${encodeURIComponent(checkedOrgId)}`);
+    if (activeOrgId !== checkedOrgId) return; // stale — a newer switch already superseded this check
     if (!r.ok || !r.body){ return; } // fail open on a network blip, don't lock someone out over that
     if (r.body.billingStatus === 'active'){ closeModal('workspaceLockedOverlay'); return; }
     const orgName = r.body.orgName || 'This workspace';
@@ -5003,7 +5054,7 @@
       : `${orgName}'s subscription isn't active.${r.body.canReactivate ? ' Reactivate below to restore access.' : ' Ask your admin to reactivate it.'}`;
     const reactivateBtn = document.getElementById('workspaceReactivateBtn');
     reactivateBtn.style.display = r.body.canReactivate ? 'inline-flex' : 'none';
-    reactivateBtn.dataset.orgId = activeOrgId;
+    reactivateBtn.dataset.orgId = checkedOrgId;
     openModal('workspaceLockedOverlay');
   }
 
@@ -5818,7 +5869,11 @@
   async function crmDeleteCompany(id){
     if (!crmActiveOrg) return;
     if (!confirm('Delete this company? Contacts and deals linked to it keep their history but lose the company link.')) return;
-    await apiFetch(`/org/crm/companies/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ orgId: crmActiveOrg.id }) });
+    // Bug fix (reliability sweep): same silent-failure gap as crmDeleteDeal —
+    // a failed delete previously just re-rendered the unchanged list with no
+    // explanation.
+    const r = await apiFetch(`/org/crm/companies/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ orgId: crmActiveOrg.id }) });
+    if (!r.ok) showSessionBanner("Couldn't delete that company. Try again.");
     loadCrmCompanies();
   }
 
@@ -5924,7 +5979,9 @@
   async function crmDeleteContact(id){
     if (!crmActiveOrg) return;
     if (!confirm('Delete this contact?')) return;
-    await apiFetch(`/org/crm/contacts/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ orgId: crmActiveOrg.id }) });
+    // Bug fix (reliability sweep): same silent-failure gap as crmDeleteDeal.
+    const r = await apiFetch(`/org/crm/contacts/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ orgId: crmActiveOrg.id }) });
+    if (!r.ok) showSessionBanner("Couldn't delete that contact. Try again.");
     loadCrmContacts();
   }
 
@@ -6003,14 +6060,24 @@
 
   async function crmMoveDeal(id, stage){
     if (!crmActiveOrg) return;
-    await apiFetch(`/org/crm/deals/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ orgId: crmActiveOrg.id, stage }) });
+    // Bug fix (reliability sweep): this silently did nothing on failure — a
+    // stage PATCH failing (permission revoked mid-session, the deal already
+    // deleted by someone else, a network blip) left the board looking like
+    // the click just didn't register, with loadCrmDeals() then quietly
+    // reloading the unchanged (correct) server state and no explanation of
+    // why. Every other mutating action in this app surfaces a message on
+    // failure; this one and crmDeleteDeal below were the exception, not a
+    // deliberate design choice.
+    const r = await apiFetch(`/org/crm/deals/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ orgId: crmActiveOrg.id, stage }) });
+    if (!r.ok) showSessionBanner("Couldn't move that deal. It may have been changed or removed — refreshing.");
     loadCrmDeals();
   }
 
   async function crmDeleteDeal(id){
     if (!crmActiveOrg) return;
     if (!confirm('Delete this deal?')) return;
-    await apiFetch(`/org/crm/deals/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ orgId: crmActiveOrg.id }) });
+    const r = await apiFetch(`/org/crm/deals/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ orgId: crmActiveOrg.id }) });
+    if (!r.ok) showSessionBanner("Couldn't delete that deal. Try again.");
     loadCrmDeals();
   }
 
@@ -6641,7 +6708,17 @@
     openModal('hrRequestLeaveOverlay');
   });
 
-  document.getElementById('hrLeaveSubmitBtn').addEventListener('click', async ()=>{
+  document.getElementById('hrLeaveSubmitBtn').addEventListener('click', async function(){
+    // Bug fix (QA sweep): this handler had no double-click guard, so a fast
+    // double-click (or a real double-tap on mobile) fired it twice before
+    // the first request resolved, each of which independently passed the
+    // balance check and created its own separate pending request for the
+    // identical dates — two records that both then show up in the manager's
+    // approval inbox, and if both got approved, the ledger would be debited
+    // twice for the same vacation. Disabling the button immediately closes
+    // that off client-side; the matching server-side fix (rejecting an
+    // identical pending request) is in worker.js's /org/hr/leave/request.
+    const btn = this;
     const errEl = document.getElementById('hrLeaveError');
     const type = document.getElementById('hrLeaveTypeSelect').value;
     const startDate = document.getElementById('hrLeaveStartInput').value;
@@ -6649,13 +6726,18 @@
     const endDate = halfDay ? startDate : document.getElementById('hrLeaveEndInput').value;
     const reason = document.getElementById('hrLeaveReasonInput').value.trim();
     if (!startDate || !endDate){ errEl.textContent = 'Pick a start (and end) date.'; errEl.style.display = 'block'; return; }
+    btn.disabled = true;
     const r = await apiFetch('/org/hr/leave/request', {
       method: 'POST',
       body: JSON.stringify({ orgId: hrActiveOrg.id, type, startDate, endDate, halfDay, reason }),
     });
+    btn.disabled = false;
     if (!r.ok){
       const err = r.body && r.body.error;
-      errEl.textContent = err === 'insufficient_balance' ? `You only have ${r.body.balance} day(s) available.` : "Couldn't submit that. Check the dates and try again.";
+      errEl.textContent =
+        err === 'insufficient_balance' ? `You only have ${r.body.balance} day(s) available.` :
+        err === 'duplicate_pending_request' ? "You've already got a pending request for those exact dates." :
+        "Couldn't submit that. Check the dates and try again.";
       errEl.style.display = 'block';
       return;
     }
@@ -6837,7 +6919,11 @@
           if (isImg){
             inner += stillDecrypting
               ? `<div class="att-decrypting">🔒 Decrypting photo…</div>`
-              : `<img class="msg-image" src="${escapeHtml(attUrl)}" data-full="${escapeHtml(attUrl)}" alt="Photo">`;
+              // loading="lazy" + decoding="async": a long chat history can carry
+              // dozens of photos in one render pass; without these the browser
+              // fetches and decodes every one of them immediately regardless of
+              // scroll position, competing with whatever's actually on screen.
+              : `<img class="msg-image" src="${escapeHtml(attUrl)}" data-full="${escapeHtml(attUrl)}" alt="Photo" loading="lazy" decoding="async">`;
           } else if (m.attachment.kind === 'voice'){
             const dur = m.attachment.duration || 0;
             inner += stillDecrypting
@@ -10373,12 +10459,12 @@
       ].filter(Boolean).join(' · ');
       return `
         <div class="settings-row" style="align-items:flex-start; flex-direction:column; gap:4px;">
-          <div style="display:flex; justify-content:space-between; width:100%; align-items:center;">
-            <span>${icon} ${escapeHtml(d.label)}${isCurrent ? ' <span style="color:var(--text-mid); font-size:12px;">(this device)</span>' : ''}</span>
-            <span style="font-size:11px; font-weight:700; color:${badge.color}; border:1px solid ${badge.color}; border-radius:20px; padding:2px 8px;">${badge.label}</span>
+          <div style="display:flex; justify-content:space-between; width:100%; align-items:center; gap:8px;">
+            <span style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${icon} ${escapeHtml(d.label)}${isCurrent ? ' <span style="color:var(--text-mid); font-size:12px;">(this device)</span>' : ''}</span>
+            <span style="flex-shrink:0; white-space:nowrap; font-size:11px; font-weight:700; color:${badge.color}; border:1px solid ${badge.color}; border-radius:20px; padding:2px 8px;">${badge.label}</span>
           </div>
           <span class="hint" style="margin:0;">${detailBits ? detailBits + ' · ' : ''}${escapeHtml(deviceLocationLine(d))}</span>
-          <span class="hint" style="margin:0;">Active ${formatLastSeen(d.lastSeenAt)} · ${d.sessionCount} session${d.sessionCount === 1 ? '' : 's'} · Risk <span style="color:${riskColor(d.riskScore)}; font-weight:700;">${d.riskScore}</span>${d.expiresAt ? ` · expires ${new Date(d.expiresAt).toLocaleString()}` : ''}${d.oneTimeUse ? ' · one-time' : ''}</span>
+          <span class="hint" style="margin:0;">Active ${formatLastSeen(d.lastSeenAt)} · ${d.sessionCount ?? 0} session${(d.sessionCount ?? 0) === 1 ? '' : 's'} · Risk <span style="color:${riskColor(d.riskScore ?? 0)}; font-weight:700;">${d.riskScore ?? 0}</span>${d.expiresAt ? ` · expires ${new Date(d.expiresAt).toLocaleString()}` : ''}${d.oneTimeUse ? ' · one-time' : ''}</span>
           ${isCurrent ? '' : `
             <span style="display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;">
               <span class="btn" style="padding:4px 10px; font-size:12px;" data-resync-device="${escapeHtml(d.id)}">Re-sync keys</span>
@@ -10450,9 +10536,9 @@
     wrap.style.display = 'block';
     listEl.innerHTML = unknown.map(d => `
       <div class="settings-row" style="align-items:flex-start; flex-direction:column; gap:4px; border-color:rgba(255,209,102,0.4);">
-        <div style="display:flex; justify-content:space-between; width:100%; align-items:center;">
-          <span>${PLATFORM_ICON[d.platform] || PLATFORM_ICON.other} ${escapeHtml(d.label)}</span>
-          <span style="font-size:11px; font-weight:700; color:#ffd166; border:1px solid #ffd166; border-radius:20px; padding:2px 8px;">Unknown</span>
+        <div style="display:flex; justify-content:space-between; width:100%; align-items:center; gap:8px;">
+          <span style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${PLATFORM_ICON[d.platform] || PLATFORM_ICON.other} ${escapeHtml(d.label)}</span>
+          <span style="flex-shrink:0; white-space:nowrap; font-size:11px; font-weight:700; color:#ffd166; border:1px solid #ffd166; border-radius:20px; padding:2px 8px;">Unknown</span>
         </div>
         <span class="hint" style="margin:0;">${escapeHtml(deviceLocationLine(d))} · requested ${formatLastSeen(d.requestedAt)}</span>
         <span style="display:flex; gap:6px; margin-top:4px;">
