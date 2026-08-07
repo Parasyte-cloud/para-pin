@@ -1641,6 +1641,12 @@ async function sendApnsPush(deviceToken, payloadObj, env) {
     aps: { alert: { title: payloadObj.title, body: payloadObj.body }, sound: 'default', 'mutable-content': 1 },
     chatId: payloadObj.chatId || null,
     avatarUrl: payloadObj.avatarUrl || null,
+    // Bug fix: this hand-picked field list silently dropped `type` even
+    // after /push-direct started forwarding it — same class of bug, one
+    // layer deeper. Custom top-level keys alongside `aps` are exactly how
+    // APNs payloads carry app-specific data, this was never a formatting
+    // constraint, just a missed field.
+    type: payloadObj.type || null,
   });
   try {
     const res = await fetch(`${host}/3/device/${deviceToken}`, {
@@ -1709,7 +1715,11 @@ async function sendFcmPush(deviceToken, payloadObj, env) {
         message: {
           token: deviceToken,
           notification: { title: payloadObj.title, body: payloadObj.body },
-          data: { chatId: String(payloadObj.chatId || ''), avatarUrl: String(payloadObj.avatarUrl || '') },
+          // Bug fix: same dropped-`type` issue as sendApnsPush above — FCM's
+          // `data` map requires string values (hence the String() wrapping
+          // already used for the other two fields), which is why this was
+          // easy to miss rather than an intentional omission.
+          data: { chatId: String(payloadObj.chatId || ''), avatarUrl: String(payloadObj.avatarUrl || ''), type: String(payloadObj.type || '') },
           android: { priority: 'high' },
         },
       }),
@@ -6564,6 +6574,80 @@ export class Registry {
       return json({ retentionDays });
     }
 
+    // Internal-only, called once a day by the top-level scheduled() handler.
+    // Sends a "🎂 it's X's birthday today" push to whoever's actually meant
+    // to hear about it: the person's direct manager and anyone holding
+    // manage_hr on that workspace — the exact same notifyTargets recipe the
+    // leave-request-submitted notification above already uses, since this is
+    // the same kind of thing (an HR event the org's HR/management chain
+    // should know about), not a new pattern invented just for this.
+    // Deliberately does NOT fan out to the whole workspace/team by default —
+    // that's a much noisier, more debatable default (some orgs want it,
+    // many don't), and the existing HR Home "Celebrations" widget already
+    // gives every member a passive, opt-in way to see upcoming birthdays
+    // without anyone being pushed one they didn't ask for.
+    if (request.method === 'POST' && url.pathname === '/internal/birthday-sweep') {
+      const nowDate = new Date();
+      const todayKey = nowDate.toISOString().slice(0, 10); // UTC calendar date — used both for the month/day match and the dedupe key
+      const todayMonth = nowDate.getUTCMonth();
+      const todayDate = nowDate.getUTCDate();
+      let notified = 0;
+      const orgMap = await this.state.storage.list({ prefix: 'org:' });
+      for (const org of orgMap.values()) {
+        const orgId = org.id;
+        const memberIds = (await this.state.storage.get(`orgMembers:${orgId}`)) || [];
+        if (memberIds.length === 0) continue;
+        // Computed once per org, not once per birthday match — hasOrgPermission
+        // does its own storage read per call, so this keeps the sweep linear
+        // in member count instead of quadratic on a large org where several
+        // people happen to share a birthday.
+        const hrAdminIds = [];
+        for (const mid of memberIds) {
+          if (await hasOrgPermission(this.state.storage, orgId, mid, 'manage_hr')) hrAdminIds.push(mid);
+        }
+        for (const uid of memberIds) {
+          const employee = await getEmployee(this.state.storage, orgId, uid);
+          const dob = employee.personal.dob;
+          if (!dob) continue;
+          const d = new Date(dob);
+          if (d.getUTCMonth() !== todayMonth || d.getUTCDate() !== todayDate) continue;
+          // Idempotency guard: set BEFORE sending, not after — if this crashes
+          // partway through a large org's member list, tomorrow's run (or a
+          // retried Cron Trigger invocation today) should never double-send
+          // to someone it already reached, a stray duplicate is far less
+          // disruptive than a partial-send loop double-notifying everyone
+          // whose birthday sorted earlier in memberIds.
+          const dedupeKey = `birthdayNotified:${orgId}:${uid}:${todayKey}`;
+          if (await this.state.storage.get(dedupeKey)) continue;
+          await this.state.storage.put(dedupeKey, true);
+
+          const userRec = await this.state.storage.get(`userById:${uid}`);
+          if (!userRec) continue;
+          const notifyTargets = new Set(hrAdminIds);
+          if (employee.job.current.managerId) notifyTargets.add(employee.job.current.managerId);
+          notifyTargets.delete(uid); // never notify the birthday person about their own birthday
+          if (notifyTargets.size === 0 || !this.env.USER_CHANNEL) continue;
+
+          const payload = JSON.stringify({
+            title: 'PArA PIN',
+            body: `🎂 It's ${userRec.displayName || 'a teammate'}'s birthday today!`,
+            chatId: null,
+            type: 'birthday',
+          });
+          for (const targetId of notifyTargets) {
+            try {
+              await this.env.USER_CHANNEL.get(this.env.USER_CHANNEL.idFromName(targetId)).fetch('https://internal/push-direct', { method: 'POST', body: payload });
+            } catch (e) {
+              // One recipient's push failing (e.g. no live channel) shouldn't
+              // stop the rest of that person's notifyTargets, or the sweep.
+            }
+          }
+          notified++;
+        }
+      }
+      return json({ ok: true, notified });
+    }
+
     return new Response('not found', { status: 404 });
   }
 }
@@ -6913,8 +6997,19 @@ export class UserChannel {
     // that aren't a chat message at all, like alerting admins when someone
     // claims their HR-onboarding roster PIN for the first time.
     if (request.method === 'POST' && url.pathname === '/push-direct') {
-      const { title, body, chatId } = await request.json().catch(() => ({}));
-      const payload = { title: title || 'PArA PIN', body: body || '', chatId: chatId || null };
+      const { title, body, chatId, type } = await request.json().catch(() => ({}));
+      // Bug fix: `type` used to be silently dropped here even though several
+      // callers (device_approved, device_rejected, and now birthday) already
+      // sent one — every /push-direct payload downstream (Web Push, APNs,
+      // FCM) got title/body/chatId only, so a caller's category was thrown
+      // away right at this one boundary. Nothing currently reads it back out
+      // client-side (confirmed: service-worker.js's push handler only checks
+      // chatId, and the mobile app has no notification-type routing yet), so
+      // this was latent rather than an active break, but it defeats the
+      // point of a caller passing `type` at all, and the next feature that
+      // wants to group/icon/deep-link by notification category would hit a
+      // wall of always-undefined types for anything routed through here.
+      const payload = { title: title || 'PArA PIN', body: body || '', chatId: chatId || null, type: type || null };
       const result = await pushToAllTargets(this.state.storage, payload, this.env);
       return json(result);
     }
@@ -10322,42 +10417,59 @@ export default {
     }
   },
 
-  // Runs once a day (see wrangler.jsonc's triggers.crons). A no-op unless an
-  // admin has explicitly set a retention window, the default is "keep
-  // everything forever," matching how this worked before retention existed.
+  // Runs once a day (see wrangler.jsonc's triggers.crons): the message-
+  // retention purge and the HR birthday sweep. These are deliberately two
+  // independent try/catches rather than one — the old single-try version
+  // had the retention purge's own early-return (`if (!retentionDays) return`)
+  // silently skip EVERYTHING after it, which would have included birthdays
+  // for the common case (an org that's never touched retention settings,
+  // i.e. most of them) if the two jobs shared a body. One job's no-op or
+  // failure must never block the other's.
   async scheduled(event, env, ctx) {
+    const registryStub = env.REGISTRY.get(env.REGISTRY.idFromName('global-registry-v1'));
+
     try {
-      const registryStub = env.REGISTRY.get(env.REGISTRY.idFromName('global-registry-v1'));
       const retRes = await registryStub.fetch('https://internal/internal/retention-days');
       const { retentionDays } = await retRes.json();
-      if (!retentionDays) return;
+      if (retentionDays) {
+        const cutoffTs = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+        const listRes = await registryStub.fetch('https://internal/internal/all-chat-ids');
+        const { chatIds } = await listRes.json();
+        const holdRes = await registryStub.fetch('https://internal/internal/legal-hold-chat-ids');
+        const { chatIds: heldChatIds } = await holdRes.json();
+        const held = new Set(heldChatIds || []);
 
-      const cutoffTs = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
-      const listRes = await registryStub.fetch('https://internal/internal/all-chat-ids');
-      const { chatIds } = await listRes.json();
-      const holdRes = await registryStub.fetch('https://internal/internal/legal-hold-chat-ids');
-      const { chatIds: heldChatIds } = await holdRes.json();
-      const held = new Set(heldChatIds || []);
-
-      for (const chatId of chatIds || []) {
-        if (held.has(chatId)) continue; // legal hold: never auto-purged regardless of the retention window
-        try {
-          const roomStub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(chatId));
-          const res = await roomStub.fetch('https://internal/purge-old', {
-            method: 'POST',
-            body: JSON.stringify({ cutoffTs }),
-          });
-          const { mediaKeys } = await res.json();
-          if (env.MEDIA && mediaKeys && mediaKeys.length) {
-            await Promise.all(mediaKeys.map((key) => env.MEDIA.delete(key).catch(() => {})));
+        for (const chatId of chatIds || []) {
+          if (held.has(chatId)) continue; // legal hold: never auto-purged regardless of the retention window
+          try {
+            const roomStub = env.CHAT_ROOM.get(env.CHAT_ROOM.idFromName(chatId));
+            const res = await roomStub.fetch('https://internal/purge-old', {
+              method: 'POST',
+              body: JSON.stringify({ cutoffTs }),
+            });
+            const { mediaKeys } = await res.json();
+            if (env.MEDIA && mediaKeys && mediaKeys.length) {
+              await Promise.all(mediaKeys.map((key) => env.MEDIA.delete(key).catch(() => {})));
+            }
+          } catch (e) {
+            // One chat failing shouldn't stop the rest of the sweep, it'll be
+            // retried on tomorrow's run regardless.
           }
-        } catch (e) {
-          // One chat failing shouldn't stop the rest of the sweep, it'll be
-          // retried on tomorrow's run regardless.
         }
       }
     } catch (e) {
       // Never let a retention-sweep failure affect anything else this worker does.
+    }
+
+    try {
+      // See Registry's /internal/birthday-sweep for what this actually does
+      // (compute today's birthdays per org, notify manager + HR, dedupe).
+      // Fire-and-forget from this side on purpose — a slow or failed sweep
+      // shouldn't hold the Cron Trigger open or throw and skip tomorrow's.
+      await registryStub.fetch('https://internal/internal/birthday-sweep', { method: 'POST' });
+    } catch (e) {
+      // Same reasoning as the retention try/catch above — never let this
+      // affect anything else, it'll just run again tomorrow.
     }
   },
 };

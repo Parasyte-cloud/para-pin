@@ -173,7 +173,18 @@ self.addEventListener('push', (event) => {
     // message in that same chat actually alert again (sound/vibration)
     // instead of silently swapping the text of the existing one, which is
     // exactly what "sometimes there's no ping" looked like.
-    tag: data.chatId ? 'parapin-' + data.chatId : 'parapin',
+    //
+    // Bug fix: every chatId-less push (device approved/rejected, birthday
+    // alerts, ...) used to share one fixed 'parapin' tag. With `renotify:
+    // true` that meant each one still made a sound, but silently REPLACED
+    // whatever chatId-less notification was already sitting in the tray —
+    // two things landing close together (e.g. two people's birthdays on the
+    // same day in a larger org, or a birthday alert arriving right after a
+    // device-approved one) meant only the last one stayed visible. Folding
+    // `type` + a timestamp into the tag when there's no chatId gives each of
+    // these its own tray entry instead, while same-chat messages keep
+    // exactly their old collapse-and-renotify behavior.
+    tag: data.chatId ? 'parapin-' + data.chatId : 'parapin-' + (data.type || 'alert') + '-' + Date.now(),
     renotify: true,
     vibrate: [200, 100, 200],
     timestamp: Date.now(),
