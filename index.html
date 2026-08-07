@@ -10621,21 +10621,21 @@
         d.isEmulator ? 'Emulator' : null,
       ].filter(Boolean).join(' · ');
       return `
-        <div class="settings-row" style="align-items:flex-start; flex-direction:column; gap:4px;">
+        <div class="settings-row" style="align-items:flex-start; flex-direction:column; gap:4px; border-radius:14px;">
           <div style="display:flex; justify-content:space-between; width:100%; align-items:center; gap:8px;">
             <span style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${icon} ${escapeHtml(d.label)}${isCurrent ? ' <span style="color:var(--text-mid); font-size:12px;">(this device)</span>' : ''}</span>
-            <span style="flex-shrink:0; white-space:nowrap; font-size:11px; font-weight:700; color:${badge.color}; border:1px solid ${badge.color}; border-radius:6px; padding:2px 8px;">${badge.label}</span>
+            <span style="flex-shrink:0; white-space:nowrap; font-size:11px; font-weight:700; color:${badge.color}; border:1px solid ${badge.color}; border-radius:999px; padding:2px 8px;">${badge.label}</span>
           </div>
           <span class="hint" style="margin:0;">${detailBits ? detailBits + ' · ' : ''}${escapeHtml(deviceLocationLine(d))}</span>
           <span class="hint" style="margin:0;">Active ${formatLastSeen(d.lastSeenAt)} · ${d.sessionCount ?? 0} session${(d.sessionCount ?? 0) === 1 ? '' : 's'} · Risk <span style="color:${riskColor(d.riskScore ?? 0)}; font-weight:700;">${d.riskScore ?? 0}</span>${d.expiresAt ? ` · expires ${new Date(d.expiresAt).toLocaleString()}` : ''}${d.oneTimeUse ? ' · one-time' : ''}</span>
           ${isCurrent ? '' : `
             <span style="display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;">
-              <span class="btn" style="padding:4px 10px; font-size:12px; border-radius:8px;" data-resync-device="${escapeHtml(d.id)}">Re-sync keys</span>
+              <span class="btn" style="padding:4px 10px; font-size:12px;" data-resync-device="${escapeHtml(d.id)}">Re-sync keys</span>
               ${revoked ? '' : `
-                <span class="btn" style="padding:4px 10px; font-size:12px; border-radius:8px;" data-lost-device="${escapeHtml(d.id)}">Mark lost</span>
-                <span class="btn" style="padding:4px 10px; font-size:12px; border-radius:8px; color:#ff6a6a;" data-compromised-device="${escapeHtml(d.id)}">Mark compromised</span>
+                <span class="btn" style="padding:4px 10px; font-size:12px;" data-lost-device="${escapeHtml(d.id)}">Mark lost</span>
+                <span class="btn" style="padding:4px 10px; font-size:12px; color:#ff6a6a;" data-compromised-device="${escapeHtml(d.id)}">Mark compromised</span>
               `}
-              <span class="btn" style="padding:4px 10px; font-size:12px; border-radius:8px;" data-logout-device="${escapeHtml(d.id)}">${revoked ? 'Remove' : 'Revoke / log out'}</span>
+              <span class="btn" style="padding:4px 10px; font-size:12px;" data-logout-device="${escapeHtml(d.id)}">${revoked ? 'Remove' : 'Revoke / log out'}</span>
             </span>
           `}
         </div>
@@ -10698,15 +10698,15 @@
     if (!unknown.length){ wrap.style.display = 'none'; return; }
     wrap.style.display = 'block';
     listEl.innerHTML = unknown.map(d => `
-      <div class="settings-row" style="align-items:flex-start; flex-direction:column; gap:4px; border-color:rgba(255,209,102,0.4);">
+      <div class="settings-row" style="align-items:flex-start; flex-direction:column; gap:4px; border-color:rgba(255,209,102,0.4); border-radius:14px;">
         <div style="display:flex; justify-content:space-between; width:100%; align-items:center; gap:8px;">
           <span style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${PLATFORM_ICON[d.platform] || PLATFORM_ICON.other} ${escapeHtml(d.label)}</span>
-          <span style="flex-shrink:0; white-space:nowrap; font-size:11px; font-weight:700; color:#ffd166; border:1px solid #ffd166; border-radius:6px; padding:2px 8px;">Unknown</span>
+          <span style="flex-shrink:0; white-space:nowrap; font-size:11px; font-weight:700; color:#ffd166; border:1px solid #ffd166; border-radius:999px; padding:2px 8px;">Unknown</span>
         </div>
         <span class="hint" style="margin:0;">${escapeHtml(deviceLocationLine(d))} · requested ${formatLastSeen(d.requestedAt)}</span>
         <span style="display:flex; gap:6px; margin-top:4px;">
-          <span class="btn" style="padding:4px 10px; font-size:12px; border-radius:8px;" onclick="openApproveDeviceFlow()">Enter code to approve</span>
-          <span class="btn" style="padding:4px 10px; font-size:12px; border-radius:8px; color:#ff6a6a;" data-reject-unknown="${escapeHtml(d.id)}">Reject</span>
+          <span class="btn" style="padding:4px 10px; font-size:12px;" onclick="openApproveDeviceFlow()">Enter code to approve</span>
+          <span class="btn" style="padding:4px 10px; font-size:12px; color:#ff6a6a;" data-reject-unknown="${escapeHtml(d.id)}">Reject</span>
         </span>
       </div>
     `).join('');
